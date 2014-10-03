@@ -75,8 +75,9 @@ interface Vat {
   # A machine, ready to serve.
   #
   # The master will call the methods below in order to tell the machine what it should do. Multiple
-  # become*() method can be called to make the vat serve multiple purposes, but each individual
-  # method cannot be called more than once.
+  # become*() method can be called to make the vat serve multiple purposes. However, if a method
+  # is called more than once, the second call simply updates the parameters and returns the same
+  # capability(s) returned previously.
 
   # TODO(now): Figure out how to allow worker vats to use storage restorers. Each vat should be its
   #   own SturdyRef sealing domain, probably. Maybe have a SealedRestorer interface where the vat
