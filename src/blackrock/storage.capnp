@@ -13,7 +13,7 @@ using ByteStream = Util.ByteStream;
 using Timepoint = UInt64;
 # Nanoseconds since epoch.
 
-interface StorageZone {
+interface StorageZone(T) {
   # A grouping of storage objects with a quota.
   #
   # Newly-created objects (other than the root) are in a detached state, similar to a temporary file
@@ -26,7 +26,7 @@ interface StorageZone {
   #
   # TODO(someday): Parameterize type for root type.
 
-  getRoot @0 () -> (assignable :Assignable);
+  getRoot @0 () -> (assignable :Assignable(T));
 
   getFactory @1 () -> (factory :StorageFactory);
 
@@ -63,16 +63,16 @@ interface StorageFactory {
   # If an error later occurs during upload, the blob will be left broken, and attempts to read it
   # may throw exceptions.
 
-  createImmutable @2 (value :AnyPointer) -> (immutable :Immutable);
+  createImmutable @2 [T] (value :T) -> (immutable :Immutable(T));
   # Store the given value immutably, returning a persistable capability that can be used to read
   # the value back later. Note that `value` can itself contain other capabilities, which will
   # themselves be persisted by the storage server. If any of these capabilities are not persistable,
   # they will be replaced with capabilities that always throw an exception.
 
-  createAssignable @3 (initialValue :AnyPointer) -> (assignable :Assignable);
+  createAssignable @3 [T] (initialValue :T) -> (assignable :Assignable(T));
   # Create a new assignable slot, the value of which can be changed over time.
 
-  createSubZone @4 (initialRootValue :AnyPointer) -> (zone :StorageZone);
+  createSubZone @4 [T] (initialRootValue :T) -> (zone :StorageZone(T));
   # Create a sub-zone of this zone with its own root. The zones will share quota, but all objects
   # in the sub-zone must be reachable from its own root in order to persist. The sub-zone object
   # itself must be reachable from some object in the parent zone or the sub-zone and everything
@@ -111,10 +111,10 @@ interface Blob {
   # you may want to switch to `writeTo`.
 }
 
-interface Immutable {
+interface Immutable(T) {
   # TODO(someday): Use generics when available.
 
-  get @0 () -> (value :AnyPointer);
+  get @0 () -> (value :T);
 }
 
 interface Quota {

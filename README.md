@@ -113,6 +113,10 @@ Within the Blackrock network, SturdyRefs come in a limited number of varieties:
 
 Every SturdyRef is "sealed" to the "trust zone" of the vat which requested its creation, and can only be restored by that same trust zone. This prevents bits leaked across trust boundaries from being useful. Each vat is its own trust zone, but there are additionally four special zones: storage, gateways, coordinators, and shells. Vats in each of these groups have the ability to save SturdyRefs such that any other member of the group can later restore them.
 
+### Log sink
+
+All other machines shunt logs here for analysis.
+
 ## Implementation plan
 
 ### Observations
@@ -135,6 +139,7 @@ Cap'n Proto level 2 RPC is probably necessary. We will need to save some sort of
 
 1. Implement level 2 RPC in Cap'n Proto.
 2. Implement worker.
+   * Just an RPC wrapper around the exsiting supervisor.
    * Every grain gets a unique uid for another layer of sandboxing.
    * cgroups to track memory usage.
    * Loopback block devices just backed by disk.

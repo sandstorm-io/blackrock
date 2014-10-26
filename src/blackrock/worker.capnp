@@ -16,12 +16,12 @@ using Timepoint = UInt64;
 interface Worker {
   # Top-level interface to a Sandstorm worker node, which runs apps.
 
-  newGrain @0 (package :Storage.Blob, actionIndex :UInt32, zone :Storage.StorageZone)
+  newGrain @0 (package :Storage.Blob, actionIndex :UInt32, zone :Storage.StorageZone(GrainState))
            -> (grain :HostedGrain, grainState :Storage.Assignable);
   # Start a new grain using the given package. `actionIndex` is an index into the package's
   # manifest's action table specifying the action to run.
 
-  restoreGrain @1 (package :Storage.Blob, grainState :Storage.Assignable, zone :Storage.StorageZone)
+  restoreGrain @1 (package :Storage.Blob, zone :Storage.StorageZone(GrainState))
                -> (grain :HostedGrain);
   # Continue an existing grain.
 
@@ -52,8 +52,8 @@ interface Coordinator {
   #
   # The coordinator can also field "restore" requests for grainHosted SturdyRefs.
 
-  newGrain @0 (package :Storage.Blob, actionIndex :UInt32, parentZone :Storage.StorageZone)
-           -> (ui :Grain.UiView, grainZone :Storage.StorageZone);
+  newGrain @0 (package :Storage.Blob, actionIndex :UInt32, storage :Storage.StorageFactory)
+           -> (ui :Grain.UiView, grainZone :Storage.StorageZone(GrainState));
 }
 
 struct GrainState {
