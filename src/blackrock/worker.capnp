@@ -49,54 +49,51 @@ interface HostedGrain {
 
 interface Coordinator {
   # Decides which workers should be running which apps.
-  #
-  # The coordinator can also field "restore" requests for grainHosted SturdyRefs.
 
   newGrain @0 (package :Storage.Blob, actionIndex :UInt32, storage :Storage.StorageFactory)
-           -> (ui :Grain.UiView, grainZone :Storage.StorageZone(GrainState));
+           -> (grain :HostedGrain, grainZone :Storage.StorageZone(GrainState));
+  # Create a new grain.
+  #
+  # Params:
+  # `package`: The app package to use.
+  # `actionIndex`: The index of the startup action to use, from those defined in the grain's
+  #   manifest.
+  # `storage`: Where to create the grain's per-instance storage.
+  #
+  # Results:
+  # `grain`: The interface to the new grain.
+  # `grainZone`: The StorageZone created using `storage`. This needs to be linked into the parent
+  #   zone in order to persist long-term.
 }
 
 struct GrainState {
   union {
-    frozen @0 :Void;
+    inactive @0 :Void;
     # No worker is currently assigned to this grain.
 
-    thawed :group {
-      # A worker is currently assigned to this grain and has transferred some or all of its data
-      # to local disk, but as yet no changes have been made to that data.
-      #
-      # It is safe to transition from this mode to frozen even while the worker is offline.
-
-      grain @1 :HostedGrain;
-    }
-
-    active :group {
-      # A worker is actively executing this grain, and its local copy has changes not yet saved to
-      # storage.
-      #
-      # If the worker is currently unreachable, you must wait for it to come back up or risk data
-      # loss.
-
-      grain @2 :HostedGrain;
-
-      # TODO(someday): Also keep a modification journal tracking recent writes, in case of machine
-      #   failure.
-    }
+    active @1 :HostedGrain;
+    # This grain is currently running on a worker machine.
   }
 
-  currentContent @3 :Snapshot;
-  struct Snapshot {
-    timestamp @0 :Timepoint;
-    # Time at which this snapshot was current.
+  filesystem @2 :Storage.Collection(FsNode);
 
-    zip @1 :Storage.Blob;
-    # ZIP backup of the grain.
+  struct FsNode {
+    name @0 :Text;
 
-    # TODO(someday): Break out large files into separate blobs.
+    union {
+      file @1 :Storage.MutableBlob;
+      directory @2 :Storage.Collection(FsNode);
+    }
+
+    readable @3 :Bool;
+    writable @4 :Bool;
+    executable @5 :Bool;
+    timestamp @6 :Timepoint;
   }
 
-  # TODO(someday): Archived snapshots for time travel.
-
-  # TODO(someday): Probably need to store outbound capabilities explicitly so storage system can
-  #   track.
+  savedCaps @3 :Storage.Collection(SavedCap);
+  struct SavedCap {
+    id @0 :UInt64;
+    cap @1 :AnyPointer;
+  }
 }

@@ -5,15 +5,16 @@
 @0xbdcb3e9621f08052;
 
 $import "/capnp/c++.capnp".namespace("sandstorm::blackrock");
+using Persistent = import "/capnp/persistent.capnp".Persistent;
 
 using Util = import "/sandstorm/util.capnp";
-using Assignable = Util.Assignable;
 using ByteStream = Util.ByteStream;
+using StoredObjectId = import "cluster-rpc.capnp".StoredObjectId;
 
 using Timepoint = UInt64;
 # Nanoseconds since epoch.
 
-interface StorageZone(T) {
+interface StorageZone(T) extends(Persistent) {
   # A grouping of storage objects with a quota.
   #
   # Newly-created objects (other than the root) are in a detached state, similar to a temporary file
@@ -23,8 +24,6 @@ interface StorageZone(T) {
   # sources are "weak" -- they do not force the capability to persist. This ensures that the user's
   # quota can't unknowingly be consumed by an object to which they no longer have any access because
   # the only link to it is external.
-  #
-  # TODO(someday): Parameterize type for root type.
 
   getRoot @0 () -> (assignable :Assignable(T));
 
@@ -54,7 +53,7 @@ interface StorageSibling {
 }
 
 interface StorageFactory {
-  createBlob @0 (content :Data) -> (blob :Blob);
+  newBlob @0 (content :Data) -> (blob :Blob);
   # Create a new blob from some bytes.
 
   uploadBlob @1 () -> (blob :Blob, sink :ByteStream);
@@ -63,41 +62,36 @@ interface StorageFactory {
   # If an error later occurs during upload, the blob will be left broken, and attempts to read it
   # may throw exceptions.
 
-  createImmutable @2 [T] (value :T) -> (immutable :Immutable(T));
+  newMutableBlob @2 () -> (blob :MutableBlob);
+  # Create a new MutableBlob.
+
+  newImmutable @3 [T] (value :T) -> (immutable :Immutable(T));
   # Store the given value immutably, returning a persistable capability that can be used to read
   # the value back later. Note that `value` can itself contain other capabilities, which will
   # themselves be persisted by the storage server. If any of these capabilities are not persistable,
   # they will be replaced with capabilities that always throw an exception.
 
-  createAssignable @3 [T] (initialValue :T) -> (assignable :Assignable(T));
+  newAssignable @4 [T] (initialValue :T) -> (assignable :Assignable(T));
   # Create a new assignable slot, the value of which can be changed over time.
 
-  createSubZone @4 [T] (initialRootValue :T) -> (zone :StorageZone(T));
+  newCollection @5 [T] () -> (collection :Collection(T));
+  # Create a new collection.
+
+  newSubZone @6 [T] (initialRootValue :T) -> (zone :StorageZone(T));
   # Create a sub-zone of this zone with its own root. The zones will share quota, but all objects
   # in the sub-zone must be reachable from its own root in order to persist. The sub-zone object
   # itself must be reachable from some object in the parent zone or the sub-zone and everything
   # inside it will be destroyed.
 }
 
-struct StoredObjectId {
-  # SturdyRefObjectId for persisted objects.
-
-  key0 @0 :UInt64;
-  key1 @1 :UInt64;
-  key2 @2 :UInt64;
-  key3 @3 :UInt64;
-  # 256-bit object key. This both identifies the object and may serve as a symmetric key for
-  # decrypting the object.
-}
-
-interface Blob {
+interface Blob extends(Persistent) {
   # Represents a large byte blob living in long-term storage.
 
   getSize @0 () -> (size :UInt64);
   # Get the total size of the blob. May block if the blob is still being uploaded and the size is
   # not yet known.
 
-  writeTo @1 (sink :ByteStream, startAtOffset :UInt64 = 0) -> ();
+  writeTo @1 (sink :ByteStream, startAtOffset :UInt64 = 0);
   # Write the contents of the blob to `sink`.
 
   getSlice @2 (offset :UInt64, size :UInt32) -> (data :Data);
@@ -109,15 +103,88 @@ interface Blob {
   # One technique that makes a lot of sense is to start off by calling e.g. `getSlice(0, 65536)`.
   # If the returned data is less than 65536 bytes then you know you got the whole blob, otherwise
   # you may want to switch to `writeTo`.
+
+  snapshot @3 () -> (blob :Blob);
+  # Make a copy of this blob in its current state which is guaranteed never to change. This may
+  # simply return the same object if it is already immutable.
+
+  clone @4 () -> (blob :MutableBlob);
+  # Make a new MutableBlob which is initialized to be a copy of this blob.
 }
 
-interface Immutable(T) {
-  # TODO(someday): Use generics when available.
+interface MutableBlob extends(Blob) {
+  # Like `Blob` but the content can be modified.
 
+  setSize @0 (size :UInt64);
+  # Changes the size of the blob. If the new size is smaller than the old, the trailing data is
+  # truncated. If it is larger, then the new space is filled with zeros.
+
+  openStream @1 (startAtOffset :UInt64 = 0) -> (sink :ByteStream);
+  # Returns a ByteStream that, when written to, writes the data to the file starting at the given
+  # offset.
+
+  setSlice @2 (offset :UInt64, data :Data);
+  # Overwrite a slice of the blob starting at the given offset with the given data.
+
+  zeroSlice @3 (offset :UInt64, size :UInt64);
+  # Like setSlice() but sets all the bytes to zero. Large contiguous blocks of zeros created this
+  # way will not count against the storage quota.
+}
+
+interface Immutable(T) extends(Persistent) {
   get @0 () -> (value :T);
 }
 
+interface Assignable(T) extends(Util.Assignable(T), Persistent) {}
+
+struct Function(Input, Output) {
+  # TODO(soon): Pointfree function that takes an input of type Input and produces a value of type
+  #   Output. Usually used to select a field of a struct to use as a key. Kind of like RPC pipeline
+  #   ops.
+}
+
+struct Box(T) {
+  # TODO(someday): Make Box(T) a Cap'n Proto built-in type, so that T can be a primitive, and so
+  #   that List(Box(T)) can collapse to List(T)?
+
+  value @0 :T;
+}
+
+interface Collection(T) extends(Persistent) {
+  # Use cases:
+  # - Read all.
+  # - Insert.
+  # - Get slot as Assignable.
+  # - Observe changes.
+  # - Set up index.
+
+  insert @0 (value :T) -> (slot :Assignable(T));
+
+  getAll @1 () -> (cursor :Cursor);
+
+  makeIndex @2 [Key] (selector :Function(T, Key)) -> (index :Index(Key));
+
+  interface Index(Key) extends(Persistent) {
+    getMatching @0 (key :Key) -> (cursor :Cursor);
+    getRange @1 (start :Key, end :Key) -> (cursor :Cursor);
+  }
+
+  interface Cursor {
+    getNext @0 (count :UInt32) -> (elements :List(Box(T)));
+    getAll @1 () -> (elements :List(Box(T)));
+    getOne @2 () -> (value :T);
+    skip @3 (count :UInt64);
+    count @4 () -> (count :UInt64);
+    observeChanges @5 () -> (observer :Observer);
+  }
+
+  interface Observer {
+    inserted @0 (value :T);
+    removed @1 (value :T);
+  }
+}
+
 interface Quota {
-  # TODO(soon): Something like the purse protocol (classic capability protocol for payments). Note
-  #   that there are two parameters: space and time.
+  sprout @0 () -> (quota :Quota);
+  deposit @1 (from :Quota, byteCount :UInt64, begin :Timepoint, end :Timepoint);
 }

@@ -13,27 +13,23 @@ using Util = import "/sandstorm/util.capnp";
 
 using VatId = ClusterRpc.VatId;
 using Address = ClusterRpc.Address;
-
-interface Collection {
-  # Represents a collection of items which may change over time. You can subscribe to update
-  # notifications.
-
-  # TODO(soon): Fill out.
-  #
-  # TODO(someday): Storage should support stored collections with indexes.
-
-  interface Observer {
-    # Allows observing changes to a collection, but cannot make changes.
-  }
-}
+using SturdyRef = ClusterRpc.SturdyRef;
 
 struct ObjectStorageCredentials {
-  # TODO(soon): Credentials for accessing GCE, etc.
+  # TODO(soon): Credentials for accessing S3, GCS, etc.
 }
 
-interface Restorer {
-  restore @0 (sturdyRef :AnyPointer) -> (value :AnyPointer);
-  release @1 (sturdyRef :AnyPointer);
+interface Restorer(Ref) {
+  restore @0 (sturdyRef :Ref) -> (value :AnyPointer);
+  release @1 (sturdyRef :Ref);
+}
+
+interface MasterRestorer(Ref) {
+  # Represents a Restorer that can restore capabilities for any owner. This capability should only
+  # be given to the cluster master, which must then attenuate it for specific owners before passing
+  # it on to said owners.
+
+  getForOwner @0 (domain :SturdyRef.Owner) -> (attenuated :Restorer(Ref));
 }
 
 interface Gateway {
@@ -71,40 +67,61 @@ interface MongoSibling {
   # TODO(soon): Information needed to set up replicas.
 }
 
-interface Vat {
+using Collection = Storage.Collection;
+
+interface Machine {
   # A machine, ready to serve.
   #
+  # When a new machine is added to the cluster, its Machine capability is given to the cluster
+  # master via an appropriately secure mechanism. Only the master should ever hold this capability.
+  #
   # The master will call the methods below in order to tell the machine what it should do. Multiple
-  # become*() method can be called to make the vat serve multiple purposes. However, if a method
-  # is called more than once, the second call simply updates the parameters and returns the same
-  # capability(s) returned previously.
+  # become*() method can be called to make the vat serve multiple purposes.
 
-  # TODO(now): Figure out how to allow worker vats to use storage restorers. Each vat should be its
-  #   own SturdyRef sealing domain, probably. Maybe have a SealedRestorer interface where the vat
-  #   proves its VatId to get access?
-
-  becomeStorage @0 (credentials :ObjectStorageCredentials, siblings :Collection.Observer,
-                    grainHostedRestorers :Collection.Observer,
-                    gatewayRestorers :Collection.Observer)
-                -> (rootZone :Storage.StorageZone,
-                    storageRestorerForCoordinators :Restorer,
-                    storageRestorerForGateways :Restorer,
-                    storageRestorerForFrontends :Restorer);
+  becomeStorage @0 (credentials :ObjectStorageCredentials,
+                    siblings :Collection(Storage.StorageSibling).Cursor,
+                    hostedRestorers :Collection(Restorer(SturdyRef.Hosted)).Cursor,
+                    gatewayRestorers :Collection(Restorer(SturdyRef.Stored)).Cursor)
+                -> (sibling :Storage.StorageSibling,
+                    rootZone :Storage.StorageZone,
+                    storageRestorer :MasterRestorer(SturdyRef.Stored));
   becomeWorker @1 () -> (worker :Worker.Worker);
-  becomeCoordinator @2 (workers :Collection.Observer, storageRestorers :Collection.Observer)
-                    -> (coordinator :Worker.Coordinator, grainHostedRestorer :Restorer);
-  becomeGateway @3 (storage :Storage.StorageZone, storageRestorers :Collection.Observer,
-                    frontends :Collection.Observer)
-                -> (gateway :Gateway);
-  becomeFrontend @4 (userStorage :Storage.StorageZone, storageRestorers :Collection.Observer)
+  becomeCoordinator @2 (workers :Collection(Worker.Worker).Observer,
+                        storageRestorers :Collection(Restorer(SturdyRef.Stored)).Cursor)
+                    -> (coordinator :Worker.Coordinator,
+                        hostedRestorer :MasterRestorer(SturdyRef.Hosted));
+  becomeGateway @3 (storage :Storage.StorageZone,
+                    storageRestorers :Collection(Restorer(SturdyRef.Stored)).Cursor,
+                    frontends :Collection(Frontend).Observer)
+                -> (gateway :Gateway,
+                    externalRestorer :MasterRestorer(SturdyRef.External));
+  becomeFrontend @4 (userStorage :Storage.StorageZone,
+                     storageRestorers :Collection(Restorer(SturdyRef.Stored)).Cursor,
+                     hostedRestorers :Collection(Restorer(SturdyRef.Hosted)).Cursor,
+                     mongo :Collection(Mongo).Observer)
                  -> (frontend :Frontend);
-  becomeMongo @5 (siblings :Collection.Observer) -> (mongo :Mongo);
+  becomeMongo @5 (siblings :Collection(MongoSibling).Observer) -> (mongo :Mongo);
 
   shutdown @6 ();
   # Do whatever is necessary to prepare this machine for safe shutdown. Do not return until it's
   # safe.
-}
 
-interface Master {
-  addVat @0 (vatId :VatId, vat :Vat);
+  getResources @7 () -> Resources;
+
+  struct Resources {
+    # Manifest of hardware resources available to a particular machine.
+
+    disks @0 :List(Disk);
+    # List of disks attached to this machine.
+
+    struct Disk {
+      uuid @0 :Data;
+      size @1 :UInt64;
+    }
+
+    hasInternet @1 :Bool;
+    # Whether or not this machine is connected to the internet.
+
+    # TODO(soon): CPU, RAM, etc.
+  }
 }

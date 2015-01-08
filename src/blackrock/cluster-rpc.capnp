@@ -6,8 +6,6 @@
 
 $import "/capnp/c++.capnp".namespace("sandstorm::blackrock");
 
-using Storage = import "storage.capnp";
-
 struct VatId {
   # Identifies a machine in the cluster.
   #
@@ -45,54 +43,87 @@ struct Address {
   }
 }
 
-struct SturdyRefHostId {
-  # Parameterization of SturdyRefHostId for Sandstorm internal traffic.
-  #
-  # Sealing
-  # =======
-  #
-  # When a Sandstorm node receives a "Save" request for a presistable capability, it shall return
-  # a SturdyRef which is sealed to the caller's "trust domain" as follows:
-  # - All storage servers are part of the "storage" domain.
-  # - All coordinators are part of the "coordinator" domain.
-  # - All gateways are part of the "gateway" domain.
-  # - Any other vat is its own restricted domain (limited to the VatId).
-  #
-  # These SturdyRefs may only later be restored by vats in the same domain. This rule is a
-  # defense-in-depth measure -- in theory it should never be strictly necessary to protect security,
-  # but it may defend against attacks that are possible if a machine (especially a worker) is
-  # compromised by an attacker.
+struct SturdyRef {
+  # Parameterization of SturdyRef for Sandstorm internal traffic.
+
+  struct Owner {
+    # Owner of a SturdyRef, for sealing purposes. See discussion of sealing in
+    # import "/capnp/persistent.capnp".Persistent.
+
+    union {
+      vat @0 :VatId;
+      # The domain of a single vat. Use this domain when saving refs in the vat's local storage.
+
+      storage @1 :Void;
+      # The domain of the storage system. Use when saving refs in long-term storage.
+
+      coordinator @2 :Void;
+      # The domain of the coordinators. Use when generating a `hosted` SturdyRef.
+
+      gateway @3 :Void;
+      # The domain of the gateways. Use when generating an `external` SturdyRef.
+
+      frontend @4 :Void;
+      # The domain of the front-end shell.
+    }
+  }
 
   union {
+    transient @0 :Transient;
+    stored @1 :Stored;
+    hosted @2 :Hosted;
+    external @3 :External;
+  }
+
+  struct Transient {
+    # Referece to an object hosted by some specific vat in the cluster, which will eventually
+    # become invalid when that vat is taken out of rotation.
+
     vat @0 :VatId;
-    # Identifies a specific vat in the cluster.
+    # The vat where the object is located.
 
-    storage @1 :Void;
-    # This is a storage object. To restore it, you must first obtain a Datastore interface.
+    address @1 :Address;
+    # Address of the vat.
+
+    localRef @2 :AnyPointer;
+    # A SturdyRef in the format defined by the vat.
+  }
+
+  struct Stored {
+    # Reference to an object in long-term storage.
+
+    key0 @0 :UInt64;
+    key1 @1 :UInt64;
+    key2 @2 :UInt64;
+    key3 @3 :UInt64;
+    # 256-bit object key. This both identifies the object and may serve as a symmetric key for
+    # decrypting the object.
+  }
+
+  struct Hosted {
+    # Reference to an object hosted within a grain.
+
+    grainState @0 :Stored;
+    # Storage ID for an Assignable(GrainState) representing the grain.
     #
-    # The objectId part of the SturdyRef is a StoredObjectId, from storage.capnp.
+    # This stored object is sealed for coordinators, so that holding a SturdyRef to a capability
+    # hosted by some grain does not grant direct access to the grain's storage.
 
-    grainHosted :group {
-      # This object is hosted within a grain.
-      #
-      # The corresponding ObjectId is in a format defined by the Sandstorm supervisor, which in
-      # turn maps to the application's internal format.
+    supervisorRef @1 :AnyPointer;
+    # A SturdyRef in the format defined by the Sandstorm supervisor.
+  }
 
-      grainState @2 :Storage.StoredObjectId;
-      # Storage ID for an Assignable(GrainState) representing the grain.
-      #
-      # This stored object is sealed for coordinators, so that holding a SturdyRef to a capability
-      # hosted by some grain does not grant direct access to the grain's storage.
-    }
+  struct External {
+    # Reference to an object living outside the Sandstorm cluster.
 
-    external @3 :Void;
-    # This reference points outside of the Sandstorm cluster.
-    #
-    # The ObjectId part of the reference is a StoredObjectId for an Immutable(SturdyRef), where
-    # that SturdyRef is designed for use on the public internet. The stored object is sealed for
-    # the cluster's Cap'n Proto gateway machines.
+    gatewayRef @0 :Stored;
+    # Reference to a stored Immutable(SturdyRef), where that SturdyRef is designed for use on
+    # the public internet. The stored object is sealed for the cluster's Cap'n Proto gateway
+    # machines.
   }
 }
+
+using Persistent = import "/capnp/persistent.capnp".Persistent(SturdyRef, SturdyRef.Owner);
 
 struct ProvisionId {
   provider @0 :VatId;
@@ -110,8 +141,9 @@ struct ThirdPartyCapId {
 }
 
 struct JoinKeyPart {
-
+  # TODO(someday)
 }
 
 struct JoinResult {
+  # TODO(someday)
 }
