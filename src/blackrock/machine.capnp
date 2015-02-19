@@ -76,7 +76,7 @@ interface Machine {
   # master via an appropriately secure mechanism. Only the master should ever hold this capability.
   #
   # The master will call the methods below in order to tell the machine what it should do. Multiple
-  # become*() method can be called to make the vat serve multiple purposes.
+  # become*() method can be called to make the machine serve multiple purposes.
 
   becomeStorage @0 (credentials :ObjectStorageCredentials,
                     siblings :Collection(Storage.StorageSibling).Cursor,
@@ -124,4 +124,15 @@ interface Machine {
 
     # TODO(soon): CPU, RAM, etc.
   }
+}
+
+interface Master {
+  # Default interface exported by the cluster master.
+  #
+  # TODO(someday): Have some sort of authentication process so that rogue machines cannot add
+  #   themselves? Note that it's unclear how such authentication would work for machines booting
+  #   from common read-only images; they have nothing to authenticate with.
+
+  addMachine @0 (machine :Machine);
+  # Submit a new machine for work.
 }

@@ -19,28 +19,36 @@ struct VatId {
   publicKey1 @1 :UInt64;
   publicKey2 @2 :UInt64;
   publicKey3 @3 :UInt64;
-  # The Vat's ed25519 public key.
-
-  # TODO(soon): If every VatId included a Diffie-Hellman ingredient then any vat would be able
-  #   to determine a symmentic key to use with some other vat based only on its VatId, which
-  #   would mean it could start sending encrypted packets without waiting for a handshake.
+  # The Vat's Curve25519 public key, interpreted as little-endian.
 }
 
 struct Address {
   # Address at which you might connect to a vat. Used for three-party hand-offs.
+  #
+  # Note that any vat that listens for connections on a port should also listen for unix domain
+  # socket connections on the "abstract" name "sandstorm-<port>", so that other vats on the same machine
+  # can connect via Unix sockets rather than IP.
 
-  union {
-    ipv4 :group {
-      addr @0 :UInt32;
-      port @1 :UInt16;
-    }
+  lower64 @0 :UInt64;
+  upper64 @1 :UInt64;
+  # Bits of the IPv6 address. Since IP is a big-endian spec, the "lower" bits are on the right, and
+  # the "upper" bits on the left. E.g., if the address is "1:2:3:4:5:6:7:8", then the lower 64 bits
+  # are "5:6:7:8" or 0x0005000600070008 while the upper 64 bits are "1:2:3:4" or 0x0001000200030004.
+  #
+  # Note that for an IPv4 address, according to the standard IPv4-mapped IPv6 address rules, you
+  # would use code like this:
+  #     uint32 ipv4 = (octet[0] << 24) | (octet[1] << 16) | (octet[2] << 8) | octet[3];
+  #     dest.setLower64(0x0000FFFF00000000 | ipv4);
+  #     dest.setUpper64(0);
 
-    ipv6 :group {
-      addrLow @2 :UInt64;
-      addrHigh @3 :UInt64;
-      port @4 :UInt16;
-    }
-  }
+  port @2 :UInt16;
+}
+
+struct VatPath {
+  # Enough information to connect to a vat securely.
+
+  id @0 :VatId;
+  address @1 :Address;
 }
 
 struct SturdyRef {
@@ -79,13 +87,10 @@ struct SturdyRef {
     # Referece to an object hosted by some specific vat in the cluster, which will eventually
     # become invalid when that vat is taken out of rotation.
 
-    vat @0 :VatId;
+    vat @0 :VatPath;
     # The vat where the object is located.
 
-    address @1 :Address;
-    # Address of the vat.
-
-    localRef @2 :AnyPointer;
+    localRef @1 :AnyPointer;
     # A SturdyRef in the format defined by the vat.
   }
 
@@ -127,17 +132,32 @@ using Persistent = import "/capnp/persistent.capnp".Persistent(SturdyRef, Sturdy
 
 struct ProvisionId {
   provider @0 :VatId;
-  questionId @1 :UInt32;
+  # ID of the vat providing the capability (aka the introducer).
+
+  nonce0 @1 :UInt64;
+  nonce1 @2 :UInt64;
+  # 128-bit nonce chosen by the provider. Must be unique among all nonces produced by the same
+  # provider, and should be uniformly-distributed and random-appearing from the point of view of
+  # other vats. The recommended way to generate this nonce is to encrypt a counter with an internal
+  # secret key.
 }
 
 struct RecipientId {
   recipient @0 :VatId;
+  # ID of the vat receiving the capability.
+
+  nonce0 @1 :UInt64;
+  nonce1 @2 :UInt64;
+  # The same nonce as in ProvisionId.
 }
 
 struct ThirdPartyCapId {
-  provider @0 :VatId;
-  questionId @1 :UInt32;
-  vatAddress @2 :Address;
+  provider @0 :VatPath;
+  # ID and path to the host of this capability.
+
+  nonce0 @1 :UInt64;
+  nonce1 @2 :UInt64;
+  # The same nonce as in ProvisionId.
 }
 
 struct JoinKeyPart {
@@ -147,3 +167,69 @@ struct JoinKeyPart {
 struct JoinResult {
   # TODO(someday)
 }
+
+# ========================================================================================
+# Transport Protocol
+#
+# We assume an underlying sequential datagram transport supporting:
+# - Reliable and ordered delivery.
+# - Arbitrary-size datagrams.
+# - Congestion cotrol.
+# - Peer identified by VatId (not by sending IP/port).
+# - At the admin's option, encryption for privacy and integrity. (This is optional because many
+#   Blackrock clusters may be on physically secure networks where encryption is not needed.)
+#
+# The simplest implementation of this protocol -- called "the simple protocol" -- is based on
+# unencrypted TCP, where we assume that the network infrastructure is secure enough to ensure
+# integrity and privacy when delivering packets. The protocol still uses crypto to authenticate
+# the connection upfront.
+#
+# TODO(security): The following protocol has not been reviewed by a crypto expert, and therefore
+#   may be totally stupid.
+#
+# In the simple protocol, a connection is initiated by sending the following header:
+# - 32 bytes: The sender's X25519 public key.
+# - 8 bytes: Connection number (little-endian). Each time a new connection is initiated from the
+#     sending vat to the same receiving vat, this number must increase. If the sender's public key
+#     is less than the receiver's, this number must be even, otherwise it must be odd, so that
+#     connection IDs in opposite directions between the same vats never collide. Any existing
+#     connections with lower connection IDs must be invalidated when a new connection starts.
+# - 8 bytes: minIgnoredConnection, the minimum connection number which the sender guarantees that
+#     it had not received at the time that it sent this message. The sender promises that it if
+#     later receives an incoming connection with this number or greater, but less than the
+#     connection number that the sender is initiating with this header, then it will reject any
+#     such connection without reading any messages from it. This gives the receiver of this header
+#     some assurance that if it had tried to form a connection previously and optimistically sent
+#     messages on it, it is safe to send those messages again.
+# - 16 bytes: poly1305 MAC of the above *plus* the sender's IPv6 address (or IPv6-mapped IPv4
+#     address) and port number (18 bytes). The key is constructed by taking the first 32 bytes of
+#     the ChaCha20 stream generated using the two vats' shared secret as a key, and the connection
+#     number as a nonce. The purpose of this MAC is to prevent an arbitrary node on the network
+#     from impersonating an arbitrary vat by simply sending its public key, which would otherwise
+#     be possible even assuming a secure physical network.
+#
+# Upon accepting a conneciton, the acceptor does the following:
+# - Wait for the header.
+# - Verify the header MAC (closing the connection immediately if invalid).
+# - If the connection number is less than that of any existing connection to the same remote vat --
+#   especially, one recently initiated in the opposite direction -- close it and do not continue.
+# - Send a reply header on the newly-accepted connection, which is similar to the received header
+#   except that it bears the accepting vat's public key and the connection number (and MAC nonce)
+#   is incremented by one. (Notice that this connection number could not possibly already have been
+#   used because of the previous step.)
+# - If there is any other outstanding connection to the same remote vat (with a lower number),
+#   close that other connection. If this vat had sent messages on said other connection but had not
+#   yet received any data (including the header) from the peer, then re-send those messages on the
+#   newly-accepted connection instead.
+#
+# Note that, for the initiator of the connection, between the time that the connection starts and
+# the time that the reply header is received, it is not yet known if the IP address connected to
+# really does correspond to the intended VatId. However, since the IP address was given to us by
+# the introducer, and the introducer could have introduced us to anybody, we can safely send
+# plaintext messages meant for the entity to whom we were introduced. The only problem is if
+# we receive another introduction for the same target VatId but a different IP/port pair in the
+# interim. In this case, we must wait until we've received the reply on our existing connection
+# authenticating it. If we receive no reply in a reasonable time, or we receive a bogus reply,
+# we must close the connection and create a new one with the new address. At this point we cannot
+# send *any* messages until the new connection comes back with a valid header, at which point we
+# can re-send the messages we had sent to the old connection.
