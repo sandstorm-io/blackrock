@@ -93,8 +93,8 @@ VatNetwork::SimpleAddress::SimpleAddress(Address::Reader reader) {
   if (upper == 0 &&
       (lower & 0xffffffff00000000ull) == 0x0000ffff00000000ull) {
     ip4.sin_family = AF_INET;
-    ip4.sin_addr.s_addr = lower & 0x00000000ffffffffull;
-    ip4.sin_port = reader.getPort();
+    ip4.sin_addr.s_addr = htonl(lower & 0x00000000ffffffffull);
+    ip4.sin_port = htons(reader.getPort());
   } else {
     ip6.sin6_family = AF_INET6;
     toBigEndian64(ip6.sin6_addr.s6_addr + 0, upper);
@@ -129,6 +129,19 @@ auto VatNetwork::SimpleAddress::getLocal(kj::AsyncIoStream& socket) -> SimpleAdd
       KJ_FAIL_REQUIRE("Not an IP address!");
   }
   return result;
+}
+
+void VatNetwork::SimpleAddress::setPort(uint16_t port) {
+  switch (addr.sa_family) {
+    case AF_INET:
+      ip4.sin_port = htons(port);
+      break;
+    case AF_INET6:
+      ip6.sin6_port = htons(port);
+      break;
+    default:
+      KJ_UNREACHABLE;
+  }
 }
 
 void VatNetwork::SimpleAddress::copyTo(Address::Builder builder) const {
@@ -366,6 +379,8 @@ VatNetwork::VatNetwork(kj::Network& network, kj::Timer& timer, SimpleAddress add
       address(address),
       connectionReceiver(address.onNetwork(network)->listen()),
       connectionMap(kj::heap<ConnectionMap>()) {
+  address.setPort(connectionReceiver->getPort());
+
   auto path = self.initRoot<VatPath>();
   publicKey.copyTo(path.getId());
   address.copyTo(path.getAddress());
@@ -393,7 +408,7 @@ public:
     if (state == AUTHENTICATED) {
       // If we've already shut down the connection, then the caller will need to create a whole new
       // ConnectionImpl. Otherwise, we're already authenticated, so ignore the new address.
-      return previousWrite != nullptr;
+      return previousWrite != nullptr && !receivedShutdown;
     }
 
     if (state == OPTIMISTIC) {
@@ -408,7 +423,6 @@ public:
       // which address is correct, because if our first introducer forged this address, we don't
       // want to send messages to it on behalf of our second introducer.
       state = PESSIMISTIC;
-      sentCount = optimisticMessages.size();
       KJ_LOG(WARNING, "Received multiple addresses for same VatId. Possible spoofing.");
     }
 
@@ -457,20 +471,20 @@ public:
       auto promise = stream->read(header.get(), sizeof(Header));
       return promise.then([this,KJ_MVCAP(header),connectAddress,connectionNumber]() mutable {
         auto verifiedKey = KJ_ASSERT_NONNULL(header->verify(network.privateKey, connectAddress),
-            "Peer responded with invalid handshake header.");
+            "peer responded with invalid handshake header");
 
-        KJ_ASSERT(verifiedKey == peerKey, "Peer responded with wrong public key.");
+        KJ_ASSERT(verifiedKey == peerKey, "peer responded with wrong public key");
 
         KJ_ASSERT(header->getConnectionNumber() == connectionNumber + 1,
-            "Peer used wrong connection number in handshake reply.");
+            "peer used wrong connection number in handshake reply");
 
         // Check if it's possible that a previous attempt at connecting to this peer, on which we
         // sent some optimistic messages, actually reached the peer. Since we guarantee that
         // messages will be delivered no more than once, we cannot send them again, and therefore
         // in this case this ConnectionImpl object is in a state where it cannot continue.
         KJ_ASSERT(sentConnectionNumber >= header->getMinIgnoredConnection(),
-            "Previous optimistic connection attempt actually succeeded when we thought it "
-            "failed. Must abort.");
+            "previous optimistic connection attempt actually succeeded when we thought it "
+            "failed; must abort");
 
         setAuthenticated();
       });
@@ -505,7 +519,7 @@ public:
       return false;
     }
 
-    minConnectionNumber = kj::max(minConnectionNumber, connectionNumber + 1);
+    minConnectionNumber = kj::max(minConnectionNumber, connectionNumber + 2);
 
     streamIncomingConnectionNumber = connectionNumber;
     setStream(kj::mv(stream), connectionNumber + 1, nullptr);
@@ -526,6 +540,7 @@ public:
           KJ_IF_MAYBE(m, message) {
             return kj::Own<capnp::IncomingRpcMessage>(kj::heap<IncomingMessageImpl>(kj::mv(*m)));
           } else {
+            receivedShutdown = true;
             return nullptr;
           }
         });
@@ -541,7 +556,8 @@ public:
 
   kj::Promise<void> shutdown() override {
     if (state == AUTHENTICATED) {
-      kj::Promise<void> result = KJ_ASSERT_NONNULL(previousWrite, "already shut down").then([this]() {
+      kj::Promise<void> result = KJ_ASSERT_NONNULL(previousWrite, "already shut down")
+          .then([this]() {
         stream->shutdownWrite();
       });
       previousWrite = nullptr;
@@ -583,6 +599,8 @@ private:
     // This connection failed before it was ever authenticated.
   } state = WAITING;
 
+  bool receivedShutdown = false;
+
   kj::ForkedPromise<void> handshakeDone;
   kj::Own<kj::PromiseFulfiller<void>> handshakeDoneFulfiller;
   // Resolves as soon as we reach the AUTHENTICATED or FAILED state.
@@ -605,8 +623,7 @@ private:
   // AUTHENTICATED or FAILED state, this list is cleared.
 
   uint sentCount = 0;
-  // Number of messages from `optimisticMessages` that had been sent on the current `stream` before
-  // we switched to PESSIMISTIC state. Only valid in PESSIMISTIC mode.
+  // Number of messages from `optimisticMessages` that had been sent on the current `stream`.
 
   uint64_t sentConnectionNumber = kj::maxValue;
   // If any messages have been written to a connection, this is the minimum connection number that
@@ -648,7 +665,7 @@ private:
     // Write the new header.
     auto header = kj::heap<Header>(
         network.publicKey, streamOutgoingConnectionNumber, minIgnoredConnectionNumber,
-        SimpleAddress::getLocal(*newStream), peerKey, network.privateKey);
+        SimpleAddress::getLocal(*stream), peerKey, network.privateKey);
     previousWrite = stream->write(header.get(), sizeof(Header)).attach(kj::mv(header));
   }
 
@@ -722,6 +739,8 @@ private:
           // Not connected, nothing more to do.
           return;
         }
+
+        ++connection.sentCount;
       }
 
       sendOnCurrentStream();
@@ -830,7 +849,8 @@ auto VatNetwork::accept() -> kj::Promise<kj::Own<Connection>> {
       KJ_IF_MAYBE(connection, slot) {
         if (connection->get()->accept(kj::mv(stream),
               header->getConnectionNumber(), header->getMinIgnoredConnection())) {
-          return kj::Own<Connection>(kj::addRef(**connection));
+          // This is not a new connection, so don't return it. Keep waiting for something new.
+          return accept();
         } else {
           // This connection is dead. Drop it.
           oldMinConnectionNumber = connection->get()->getMinConnectionNumber();

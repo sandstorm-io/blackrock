@@ -52,6 +52,8 @@ private:
 
     inline sa_family_t family() const { return addr.sa_family; }
 
+    void setPort(uint16_t port);
+
     void copyTo(Address::Builder builder) const;
 
     static constexpr size_t FLAT_SIZE = 18;
