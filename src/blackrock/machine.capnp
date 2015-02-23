@@ -4,7 +4,7 @@
 
 @0x96022888188b4f2f;
 
-$import "/capnp/c++.capnp".namespace("sandstorm::blackrock");
+$import "/capnp/c++.capnp".namespace("blackrock");
 
 using ClusterRpc = import "cluster-rpc.capnp";
 using Storage = import "storage.capnp";
@@ -101,6 +101,11 @@ interface Machine {
                      mongo :Collection(Mongo).Observer)
                  -> (frontend :Frontend);
   becomeMongo @5 (siblings :Collection(MongoSibling).Observer) -> (mongo :Mongo);
+
+  ping @8 ();
+  # Just returns immediately. Used to verify that the machine is alive. If this call fails or
+  # doesn't return promptly, the master will assume the machine is wedged and shutdown or reboot
+  # it.
 
   shutdown @6 ();
   # Do whatever is necessary to prepare this machine for safe shutdown. Do not return until it's

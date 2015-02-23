@@ -2,9 +2,10 @@
 // Copyright (c) 2014 Sandstorm Development Group, Inc.
 // All Rights Reserved
 
-#ifndef SANDSTORM_BLACKROCK_CLUSTERRPC_H_
-#define SANDSTORM_BLACKROCK_CLUSTERRPC_H_
+#ifndef BLACKROCK_CLUSTERRPC_H_
+#define BLACKROCK_CLUSTERRPC_H_
 
+#include "common.h"
 #include <capnp/rpc.h>
 #include <capnp/message.h>
 #include <blackrock/cluster-rpc.capnp.h>
@@ -12,9 +13,7 @@
 #include <netinet/ip.h>
 #include <netinet/ip6.h>
 #include <kj/async-io.h>
-#include <sandstorm/util.h>
 
-namespace sandstorm {
 namespace blackrock {
 
 class VatNetwork final: public capnp::VatNetwork<VatPath, ProvisionId, RecipientId,
@@ -143,6 +142,5 @@ private:
 };
 
 }  // namespace blackrock
-}  // namespace sandstorm
 
-#endif // CLUSTERRPC_H
+#endif // BLACKROCK_CLUSTERRPC_H_

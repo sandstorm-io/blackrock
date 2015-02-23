@@ -18,7 +18,6 @@
 #include <sandstorm/util.h>
 #include <unordered_map>
 
-namespace sandstorm {
 namespace blackrock {
 
 static inline uint64_t fromLittleEndian64(const kj::byte* bytes) {
@@ -871,4 +870,3 @@ auto VatNetwork::accept() -> kj::Promise<kj::Own<Connection>> {
 }
 
 }  // namespace blackrock
-}  // namespace sandstorm

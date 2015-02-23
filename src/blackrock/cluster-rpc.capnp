@@ -4,7 +4,7 @@
 
 @0xf49ffd606012a28b;
 
-$import "/capnp/c++.capnp".namespace("sandstorm::blackrock");
+$import "/capnp/c++.capnp".namespace("blackrock");
 
 struct VatId {
   # Identifies a machine in the cluster.

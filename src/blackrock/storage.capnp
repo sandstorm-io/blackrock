@@ -4,7 +4,7 @@
 
 @0xbdcb3e9621f08052;
 
-$import "/capnp/c++.capnp".namespace("sandstorm::blackrock");
+$import "/capnp/c++.capnp".namespace("blackrock");
 using Persistent = import "/capnp/persistent.capnp".Persistent;
 
 using Util = import "/sandstorm/util.capnp";

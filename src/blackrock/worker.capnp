@@ -4,7 +4,7 @@
 
 @0x95ec494d81e25bb1;
 
-$import "/capnp/c++.capnp".namespace("sandstorm::blackrock");
+$import "/capnp/c++.capnp".namespace("blackrock");
 
 using Supervisor = import "/sandstorm/supervisor.capnp".Supervisor;
 using Grain = import "/sandstorm/grain.capnp";

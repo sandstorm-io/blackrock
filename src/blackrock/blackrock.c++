@@ -12,11 +12,32 @@
 #include <blackrock/machine.capnp.h>
 #include "cluster-rpc.h"
 
-namespace sandstorm {
 namespace blackrock {
 
+static struct sockaddr_in ip4Wildcard() {
+  struct sockaddr_in addr;
+  memset(&addr, 0, sizeof(addr));
+  addr.sin_family = AF_INET;
+  return addr;
+}
+
 class MachineImpl: public Machine::Server {
+  // TODO(security): For most become*() methods, we should probably actually spawn a child process.
+
 public:
+  kj::Promise<void> becomeWorker(BecomeWorkerContext context) override {
+
+  }
+
+private:
+};
+
+class MasterImpl: public Master::Server {
+public:
+  kj::Promise<void> addMachine(AddMachineContext context) override {
+  }
+
+private:
 };
 
 class Main {
@@ -52,10 +73,9 @@ private:
   bool runMaster() {
     auto ioContext = kj::setupAsyncIo();
 
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    VatNetwork network(ioContext.provider->getNetwork(), ioContext.provider->getTimer(), addr);
+    VatNetwork network(ioContext.provider->getNetwork(),
+        ioContext.provider->getTimer(), ip4Wildcard());
+    auto rpcSystem = capnp::makeRpcClient(network);
 
     return true;
   }
@@ -63,10 +83,8 @@ private:
   bool runSlave(kj::StringPtr masterAddr) {
     auto ioContext = kj::setupAsyncIo();
 
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    VatNetwork network(ioContext.provider->getNetwork(), ioContext.provider->getTimer(), addr);
+    VatNetwork network(ioContext.provider->getNetwork(),
+        ioContext.provider->getTimer(), ip4Wildcard());
     auto rpcSystem = capnp::makeRpcClient(network);
 
     auto bytes = sandstorm::base64Decode(masterAddr);
@@ -88,6 +106,5 @@ private:
 };
 
 }  // namespace blackrock
-}  // namespace sandstorm
 
-KJ_MAIN(sandstorm::blackrock::Main)
+KJ_MAIN(blackrock::Main)

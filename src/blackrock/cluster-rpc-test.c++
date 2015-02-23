@@ -5,7 +5,6 @@
 #include "cluster-rpc.h"
 #include <kj/test.h>
 
-namespace sandstorm {
 namespace blackrock {
 namespace {
 
@@ -377,4 +376,3 @@ KJ_TEST("can reconnect after authentication failure") {
 
 }  // namespace
 }  // namespace blackrock
-}  // namespace sandstorm
