@@ -77,6 +77,9 @@ interface StorageFactory {
   newCollection @5 [T] () -> (collection :Collection(T));
   # Create a new collection.
 
+  newVolume @7 () -> (volume :Volume);
+  # Create a new block-device-like volume.
+
   newSubZone @6 [T] (initialRootValue :T) -> (zone :StorageZone(T));
   # Create a sub-zone of this zone with its own root. The zones will share quota, but all objects
   # in the sub-zone must be reachable from its own root in order to persist. The sub-zone object
@@ -181,6 +184,38 @@ interface Collection(T) extends(Persistent) {
   interface Observer {
     inserted @0 (value :T);
     removed @1 (value :T);
+  }
+}
+
+interface Volume {
+  # Block storage supporting up to 2^32 blocks, typically of 4k each.
+  #
+  # Initially, all of the bytes are zero. The user is not charged quota for all-zero blocks.
+
+  read @0 (blockNum :UInt32, count :UInt32 = 1) -> (data :Data);
+  # Reads a block, or multiple sequential blocks. Returned data is always count * block size bytes.
+
+  write @1 (blockNum :UInt32, data :Data);
+  # Writes a block, or multiple sequential blocks. `data` must be a multiple of the block size.
+  #
+  # This method returns before the write actually reaches disk. Use sync() to wait for previous
+  # writes to fully complete.
+
+  zero @2 (blockNum :UInt32, count :UInt32 = 1);
+  # Overwrites one or more blocks with zeros.
+  #
+  # This method returns before the write actually reaches disk. Use sync() to wait for previous
+  # writes to fully complete.
+
+  sync @3 ();
+  # Does not return until all previous write()s and zero()s are permanently stored.
+
+  getBlockCount @4 () -> (count :UInt32);
+  # Get the number of non-zero blocks present in the volume.
+
+  watchBlockCount @5 (watcher :Watcher) -> (handle :Util.Handle);
+  interface Watcher {
+    blockCountChanged @0 (newCount :UInt32);
   }
 }
 
