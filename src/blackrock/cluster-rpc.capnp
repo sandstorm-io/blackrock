@@ -113,6 +113,16 @@ struct SturdyRef {
     #
     # This stored object is sealed for coordinators, so that holding a SturdyRef to a capability
     # hosted by some grain does not grant direct access to the grain's storage.
+    #
+    # TODO(soon): This doesn't work: there's no way for the coordinator to enforce the seal on
+    #   this ref, because the owner isn't stored anywhere. Possible solutions:
+    #   1) Use a reference to a wrapper object in storage owned by the coordinators, which itself
+    #      stores the actual object and Owner for enforcement. Problem: won't be cleaned up when
+    #      the grain is deleted.
+    #   2) Extend Persistent.save() to accept a tag which is returned later on load. Or have
+    #      it return the Owner on load, and we can make our Owner type include information about
+    #      who is allowed to invoke the coordinator. But note that remote entities and apps won't
+    #      be expected to maintain such storage.
 
     supervisorRef @1 :AnyPointer;
     # A SturdyRef in the format defined by the Sandstorm supervisor.

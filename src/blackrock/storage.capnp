@@ -5,7 +5,7 @@
 @0xbdcb3e9621f08052;
 
 $import "/capnp/c++.capnp".namespace("blackrock");
-using Persistent = import "/capnp/persistent.capnp".Persistent;
+using persistent = import "/capnp/persistent.capnp".persistent;
 
 using Util = import "/sandstorm/util.capnp";
 using ByteStream = Util.ByteStream;
@@ -14,7 +14,7 @@ using StoredObjectId = import "cluster-rpc.capnp".StoredObjectId;
 using Timepoint = UInt64;
 # Nanoseconds since epoch.
 
-interface StorageZone(T) extends(Persistent) {
+interface StorageZone(T) $persistent {
   # A grouping of storage objects with a quota.
   #
   # Newly-created objects (other than the root) are in a detached state, similar to a temporary file
@@ -87,7 +87,7 @@ interface StorageFactory {
   # inside it will be destroyed.
 }
 
-interface Blob extends(Persistent) {
+interface Blob $persistent {
   # Represents a large byte blob living in long-term storage.
 
   getSize @0 () -> (size :UInt64);
@@ -134,11 +134,11 @@ interface MutableBlob extends(Blob) {
   # way will not count against the storage quota.
 }
 
-interface Immutable(T) extends(Persistent) {
+interface Immutable(T) $persistent {
   get @0 () -> (value :T);
 }
 
-interface Assignable(T) extends(Util.Assignable(T), Persistent) {}
+interface Assignable(T) extends(Util.Assignable(T)) $persistent {}
 
 struct Function(Input, Output) {
   # TODO(soon): Pointfree function that takes an input of type Input and produces a value of type
@@ -153,7 +153,7 @@ struct Box(T) {
   value @0 :T;
 }
 
-interface Collection(T) extends(Persistent) {
+interface Collection(T) $persistent {
   # Use cases:
   # - Read all.
   # - Insert.
@@ -167,7 +167,7 @@ interface Collection(T) extends(Persistent) {
 
   makeIndex @2 [Key] (selector :Function(T, Key)) -> (index :Index(Key));
 
-  interface Index(Key) extends(Persistent) {
+  interface Index(Key) $persistent {
     getMatching @0 (key :Key) -> (cursor :Cursor);
     getRange @1 (start :Key, end :Key) -> (cursor :Cursor);
   }
@@ -191,6 +191,14 @@ interface Volume {
   # Block storage supporting up to 2^32 blocks, typically of 4k each.
   #
   # Initially, all of the bytes are zero. The user is not charged quota for all-zero blocks.
+  #
+  # Only blocks that you write are actually stored. Hence, there's no need for an explicit
+  # capacity (other than the 2^32-block limit imposed by the choice of integer width). The client
+  # is welcome to pretend the capacity is any number. It may even make sense to allocate a small
+  # file system early on and only grow it as needed.
+
+  const blockSize :UInt32 = 4096;
+  # All volumes use a block size of 4096.
 
   read @0 (blockNum :UInt32, count :UInt32 = 1) -> (data :Data);
   # Reads a block, or multiple sequential blocks. Returned data is always count * block size bytes.
