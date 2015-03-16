@@ -17,6 +17,8 @@
 #include <kj/thread.h>
 #include <kj/async-unix.h>
 #include <queue>
+#include <unordered_map>
+#include <unordered_set>
 
 namespace blackrock {
 
@@ -40,6 +42,8 @@ kj::AutoCloseFd newEventFd(uint value, int flags) {
 }
 
 static constexpr uint64_t EVENTFD_MAX = (uint64_t)-2;
+
+typedef capnp::Persistent<SturdyRef, SturdyRef::Owner> StandardPersistent;
 
 }  // namespace
 
@@ -202,7 +206,30 @@ public:
     }
 
     storage.deleteObject(id);
+
+    KJ_IF_MAYBE(list, storage.openChildList(id)) {
+      uint64_t size = getFileSize(*list);
+      auto ids = kj::heapArray<ObjectId>(size / sizeof(ObjectId));
+      readAll(*list, ids.asBytes().begin(), ids.asBytes().size());
+      for (auto& id: ids) {
+        deleteObject(id);
+      }
+    }
   }
+
+  template <typename T>
+  typename T::Serves::Client registerObject(kj::Own<T> object);
+  void unregisterObject(ObjectBase& object);
+  kj::Maybe<ObjectBase&> getLiveObject(ObjectId id);
+  kj::Promise<kj::Maybe<ObjectBase&>> getLiveObject(capnp::Capability::Client& client);
+  // Interfaces for use only by StorageFactoryImpl and RestorerImpl.
+
+  struct ClientObjectPair {
+    capnp::Capability::Client client;
+    ObjectBase* object;
+  };
+
+  ClientObjectPair restoreObject(ObjectKey key);
 
   class Transaction {
   public:
@@ -358,6 +385,13 @@ private:
 
   FilesystemStorage& storage;
 
+  capnp::CapabilityServerSet<capnp::Capability> serverSet;
+  // Lets us map our own capabilities -- when they come back from the caller -- back to the
+  // underlying objects.
+
+  std::unordered_map<ObjectId, ObjectBase*, ObjectId::Hash> objectCache;
+  // Maps object IDs to live objects representing them, if any.
+
   kj::AutoCloseFd journalFd;
   uint64_t journalEnd;
   uint64_t journalSynced;
@@ -451,6 +485,8 @@ private:
     off_t position;
     KJ_SYSCALL(position = lseek(journalFd, 0, SEEK_DATA));
 
+    std::unordered_set<ObjectId, ObjectId::Hash> zeroRefcount;
+
     if (journalEnd > position) {
       // Recover from previous journal failure.
 
@@ -461,8 +497,26 @@ private:
       // Process valid entries and discard any incomplete transaction.
       for (auto& entry: validateEntries(entries, true)) {
         executeEntry(entry);
+        if (entry.newXattr.refcount == 0) {
+          zeroRefcount.insert(entry.objectId);
+        } else {
+          zeroRefcount.erase(entry.objectId);
+        }
       }
     }
+
+    // Delete all objects that reached zero refcount during the course of replaying the journal
+    // and were not revived by the time it finished. Any remaining live references to those objects
+    // were lost when the storage node rebooted.
+    //
+    // TODO(now): This doesn't work: We easily could have actually completed the set-refcount-zero
+    //   op before crashing, and then we'd never see it here.
+    #error "doesn't work"
+    for (auto& id: zeroRefcount) {
+      storage.deleteObject(id);
+    }
+
+    storage.deleteAllStaging();
   }
 
   void doProcessingThread() {
@@ -571,23 +625,97 @@ class FilesystemStorage::ObjectBase {
   // unwrapping a Capability::Client into a native object and then doing dynamic_cast.
 
 public:
-  ObjectBase(Journal& journal, ObjectId zone, Type type);
-  // Create a new object. A key will be generated.
+  ObjectBase(Journal& journal, ObjectId zone, Type type)
+      : journal(journal), zone(zone), key(ObjectKey::generate()), id(key) {
+    // Create a new object. A key will be generated.
+
+    memset(&xattr, 0, sizeof(xattr));
+    xattr.type = type;
+  }
 
   ObjectBase(Journal& journal, ObjectId zone, const ObjectKey& key,
-             const ObjectId& id, const Xattr& xattr);
-  // Construct an ObjectBase around an existing on-disk object.
+             const ObjectId& id, const Xattr& xattr)
+      : journal(journal), zone(zone), key(key), id(id), xattr(xattr) {}
+    // Construct an ObjectBase around an existing on-disk object.
 
-  bool isInZone(ObjectId zone);
-  // Returns true if this object's parent zone is `zone`.
+  ~ObjectBase() noexcept(false) {
+    journal.unregisterObject(*this);
+    if (xattr.refcount == 0) {
+      journal.deleteObject(id);
+    }
+  }
 
-  ObjectKey addReference(Journal::Transaction& transaction);
-  // Add a new reference to this object (from a sibling in the same zone).
+  inline const ObjectId& getId() const { return id; }
 
-  void dropReference(Journal::Transaction& transaction);
-  // Add an operation to the transaction which decrements this object's refcount. If it reaches
-  // zero, recursively reduces the refcount on all children as well, but holds live refs to them
-  // for possible later revival.
+  inline capnp::Capability::Client getClient() {
+    return KJ_ASSERT_NONNULL(weak->get());
+  }
+
+  inline void setWeak(kj::Own<capnp::WeakCapability<capnp::Capability>> weak) {
+    KJ_IREQUIRE(this->weak.get() == nullptr);
+    this->weak = kj::mv(weak);
+  }
+
+  bool isInZone(ObjectId zone) {
+    // Returns true if this object's parent zone is `zone`.
+
+    return xattr.zone == zone;
+  }
+
+  const ObjectKey& addReference(Journal::Transaction& transaction) {
+    // Add a new reference to this object (from a sibling in the same zone).
+
+    uint oldCount = xattr.refcount++;
+    transaction.updateObjectXattr(id, xattr);
+
+    if (oldCount == 0) {
+      for (auto& ref: tenuousRefs) {
+        ref.object->addReference(transaction);
+      }
+      tenuousRefs = nullptr;
+    }
+
+    return key;
+  }
+
+  void dropReference(Journal::Transaction& transaction) {
+    // Add an operation to the transaction which decrements this object's refcount. If it reaches
+    // zero, recursively reduces the refcount on all children as well, but holds live refs to them
+    // for possible later revival.
+
+    uint count = --xattr.refcount;
+    transaction.updateObjectXattr(id, xattr);
+
+    if (count == 0) {
+      // Restore all children.
+
+      switch (xattr.type) {
+        case Type::BLOB:
+        case Type::MUTABLE_BLOB:
+        case Type::VOLUME:
+        case Type::REFERENCE:
+        case Type::ZONE:
+          // Doesn't contain sibling references.
+          break;
+
+        case Type::ASSIGNABLE:
+        case Type::IMMUTABLE:
+        case Type::COLLECTION: {
+          capnp::StreamFdMessageReader reader(openCurrent(true));
+          kj::Vector<ClientObjectPair> newTenuousRefs;
+          for (auto cap: reader.getRoot<StoredObject>().getCapTable()) {
+            if (cap.isSibling()) {
+              auto ref = journal.restoreObject(cap.getSibling());
+              ref.object->dropReference(transaction);
+              newTenuousRefs.add(kj::mv(ref));
+            }
+          }
+          tenuousRefs = newTenuousRefs.releaseAsArray();
+          break;
+        }
+      }
+    }
+  }
 
 protected:
   kj::Promise<void> setStoredObject(capnp::AnyPointer::Reader value);
@@ -634,12 +762,49 @@ private:
   ObjectId id;
   Xattr xattr;
   kj::AutoCloseFd fd;
+  kj::Own<capnp::WeakCapability<capnp::Capability>> weak;
 
-  kj::Array<capnp::Capability::Client> tenuousRefs;
+  struct ClientObjectPair {
+    capnp::Capability::Client client;
+    ObjectBase* object;
+  };
+  kj::Array<ClientObjectPair> tenuousRefs;
   // If this object's refcount has reached zero, `tenuousRefs` is a list of live capabilities
   // representing all outgoing strong references form this object, to prevent them from going away
   // in the meantime.
 };
+
+template <typename T>
+typename T::Serves::Client FilesystemStorage::Journal::registerObject(kj::Own<T> object) {
+  ObjectBase& base = *object;
+  objectCache[base.getId()] = &base;
+
+  auto clientAndWeak = serverSet.addWeak(kj::mv(object));
+  base.setWeak(kj::mv(clientAndWeak.weak));
+  return kj::mv(clientAndWeak.client).template castAs<typename T::Serves>();
+}
+
+void FilesystemStorage::Journal::unregisterObject(ObjectBase& object) {
+  objectCache.erase(object.getId());
+}
+
+kj::Maybe<FilesystemStorage::ObjectBase&> FilesystemStorage::Journal::getLiveObject(ObjectId id) {
+  auto iter = objectCache.find(id);
+  if (iter == objectCache.end()) {
+    return nullptr;
+  } else {
+    return *iter->second;
+  }
+}
+
+kj::Promise<kj::Maybe<FilesystemStorage::ObjectBase&>> FilesystemStorage::Journal::getLiveObject(
+    capnp::Capability::Client& client) {
+  return serverSet.getLocalServer(client).then([](auto&& maybeServer) {
+    return maybeServer.map([](auto& server) -> ObjectBase& {
+      return dynamic_cast<ObjectBase&>(server);
+    });
+  });
+}
 
 // =======================================================================================
 
@@ -806,17 +971,16 @@ public:
   explicit StorageFactoryImpl(Journal& journal, ObjectId zone)
       : journal(journal), zone(zone) {}
 
-#error "TODO: if the same object is opened twice, return the same cap"
-
   kj::Promise<void> newAssignable(NewAssignableContext context) override {
     auto result = kj::heap<AssignableImpl>(journal, zone, Type::VOLUME);
     result->setStoredObject(context.getParams().getInitialValue());
-    context.getResults().setAssignable(kj::mv(result));
+    context.getResults().setAssignable(journal.registerObject(kj::mv(result)));
     return kj::READY_NOW;
   }
 
   kj::Promise<void> newVolume(NewVolumeContext context) override {
-    context.getResults().setVolume(kj::heap<VolumeImpl>(journal, zone, Type::VOLUME));
+    context.getResults().setVolume(journal.registerObject(
+        kj::heap<VolumeImpl>(journal, zone, Type::VOLUME)));
     return kj::READY_NOW;
   }
 

@@ -9,7 +9,6 @@
 #include <blackrock/storage.capnp.h>
 #include <blackrock/fs-storage.capnp.h>
 #include <kj/io.h>
-#include <unordered_map>
 
 namespace blackrock {
 
@@ -64,16 +63,6 @@ private:
     kj::FixedArray<char, 24> filename(char prefix) const;
   };
 
-  int mainDirFd;
-  int stagingDirFd;
-  kj::Array<ObjectId> path;
-
-  std::unordered_map<ObjectId, capnp::ClientHook*, ObjectId::Hash> children;
-  // Maps child object ID -> weak reference to the live capability representing it.
-
-  kj::Maybe<capnp::ClientHook&> factoryCap;
-  // Weak reference to the factory capability.
-
   class ObjectBase;
   class AssignableImpl;
   class VolumeImpl;
@@ -82,13 +71,21 @@ private:
   struct Xattr;
   class Journal;
 
+  int mainDirFd;
+  int stagingDirFd;
+
+  kj::Maybe<capnp::ClientHook&> factoryCap;
+  // Weak reference to the factory capability.
+
   kj::Maybe<kj::AutoCloseFd> openObject(ObjectId id);
   kj::Maybe<kj::AutoCloseFd> openStaging(uint32_t number);
+  kj::Maybe<kj::AutoCloseFd> openChildList(ObjectId id);
   kj::AutoCloseFd createObject(ObjectId id);
   kj::AutoCloseFd createTempFile();
   void linkTempIntoStaging(uint32_t number, int fd);
   void deleteObject(ObjectId id);
   void deleteStaging(uint32_t number);
+  void deleteAllStaging();
   void finalizeStagingIfExists(uint32_t stagingId, ObjectId finalId, const Xattr& attributes);
   void setAttributesIfExists(ObjectId objectId, const Xattr& attributes);
   void sync();

@@ -50,13 +50,10 @@ struct StoredIncomingRef {
   # Stored in `ref/<id>`, where <id> is the base64('+','_') of the 16-byte blake2b hash of
   # the ref key (the 32-byte key stored in the SturdyRef). Encrypted by the ref key.
 
-  zonePath @0 :List(StoredObjectId);
-  # Path to the zone where this object is stored.
-
-  owner @1 :SturdyRef.Owner;
+  owner @0 :SturdyRef.Owner;
   # Who is allowed to restore this ref?
 
-  key @2 :StoredObjectKey;
+  key @1 :StoredObjectKey;
   # Key to the object.
 }
 
@@ -75,7 +72,7 @@ struct StoredObject {
       # This points to another object in the same zone, and that sibling's refcount currently counts
       # this object.
 
-      outOfZone @2 :StoredIncomingRef;
+      outOfZone @2 :StoredObjectKey;
       # Reference to another object in storage.
     }
   }
