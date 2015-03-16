@@ -16,12 +16,13 @@ using Timepoint = UInt64;
 interface Worker {
   # Top-level interface to a Sandstorm worker node, which runs apps.
 
-  newGrain @0 (package :Storage.Blob, actionIndex :UInt32, zone :Storage.StorageZone(GrainState))
-           -> (grain :HostedGrain, grainState :Storage.Assignable);
+  newGrain @0 (package :Storage.Blob, actionIndex :UInt32, storage :Storage.StorageFactory)
+           -> (grain :HostedGrain, grainState :Storage.OwnedAssignable(GrainState));
   # Start a new grain using the given package. `actionIndex` is an index into the package's
   # manifest's action table specifying the action to run.
 
-  restoreGrain @1 (package :Storage.Blob, zone :Storage.StorageZone(GrainState))
+  restoreGrain @1 (package :Storage.Blob, storage :Storage.StorageFactory,
+                   grainState :Storage.OwnedAssignable(GrainState))
                -> (grain :HostedGrain);
   # Continue an existing grain.
 
@@ -51,7 +52,7 @@ interface Coordinator {
   # Decides which workers should be running which apps.
 
   newGrain @0 (package :Storage.Blob, actionIndex :UInt32, storage :Storage.StorageFactory)
-           -> (grain :HostedGrain, grainZone :Storage.StorageZone(GrainState));
+           -> (grain :HostedGrain, grainZone :Storage.OwnedAssignable(GrainState));
   # Create a new grain.
   #
   # Params:
@@ -75,23 +76,9 @@ struct GrainState {
     # This grain is currently running on a worker machine.
   }
 
-  filesystem @2 :Storage.Collection(FsNode);
+  volume @2 :Storage.OwnedVolume;
 
-  struct FsNode {
-    name @0 :Text;
-
-    union {
-      file @1 :Storage.MutableBlob;
-      directory @2 :Storage.Collection(FsNode);
-    }
-
-    readable @3 :Bool;
-    writable @4 :Bool;
-    executable @5 :Bool;
-    timestamp @6 :Timepoint;
-  }
-
-  savedCaps @3 :Storage.Collection(SavedCap);
+  savedCaps @3 :Storage.OwnedCollection(SavedCap);
   struct SavedCap {
     id @0 :UInt64;
     cap @1 :AnyPointer;

@@ -21,14 +21,7 @@
 
 $import "/capnp/c++.capnp".namespace("blackrock");
 using Storage = import "storage.capnp";
-
-using Persistent = import "cluster-rpc.capnp".Persistent;
-using persistent = import "/capnp/persistent.capnp".persistent;
 using SturdyRef = import "cluster-rpc.capnp".SturdyRef;
-
-interface PersistentStorageZone(T) extends(Storage.StorageZone(T), Persistent) {}
-interface PersistentAssignable(T) extends(Storage.Assignable(T), Persistent) {}
-interface PersistentVolume extends(Storage.Volume, Persistent) {}
 
 struct StoredObjectId {
   # 16-byte ID of the object. This is calculated as the 16-byte blake2b hash of the object key.
@@ -57,8 +50,18 @@ struct StoredIncomingRef {
   # Key to the object.
 }
 
+struct StoredChildIds {
+  # A stored `Assignable` or `Immutable` object file contains two Cap'n Proto messages:
+  # StoredChildIds followed by StoredObject. The latter could be encrypted.
+
+  children @0 :List(StoredObjectId);
+  # List of owned children of this object. If this object is deleted, all children should be
+  # deleted as well.
+}
+
 struct StoredObject {
-  # A stored `Assignable` or `Immutable` value.
+  # A stored `Assignable` or `Immutable` object file contains two Cap'n Proto messages:
+  # StoredChildIds followed by StoredObject. The latter could be encrypted.
 
   capTable @0 :List(CapDescriptor);
   payload @1 :AnyPointer;
