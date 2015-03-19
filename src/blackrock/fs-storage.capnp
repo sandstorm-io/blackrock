@@ -11,13 +11,23 @@
 #                  is generally append-only and so can contain IDs that no longer exist; those
 #                  should be ignored when deleting.
 #
-# A second directory, called "staging", stores files whose names consist of exactly 7 hex digits,
-# and which are intended to be rename()ed into place later on.
-#
 # In all cases above, an <id> is a 16-byte value base64-encoded to 22 bytes (with '-' and '_' as
 # digits 62 and 63). Note that ext4 directory entries are 8 + name_len bytes, rounded up to a
 # multiple of 4, with no NUL terminator stored. Since our filenames are 23 bytes (including prefix
 # character), each directory entry comes out to 32 bytes (31 rounded up). That seems sort of nice?
+#
+# A second directory, called "staging", stores files whose names consist of exactly 16 hex digits,
+# and which are intended to be rename()ed into place later on. Files in staging exist only for
+# their content. If that content includes outgoing owned references, the target objects are either
+# in staging themselves or are owned by some non-staging objects and are scheduled to have owneship
+# transferred in an upcoming transaction. In other words, when deleting an object out of staging,
+# it does NOT make sense to recursively delete its children.
+#
+# A third directory, called "deathrow", contains objects scheduled for recursive deletion. Objects
+# here used to be under the main directory, but have been deleted. Before actually deleting the
+# file, it is necessary to move all of its children into "deathrow". This process of recursive
+# deletion can occur in a separate thread (or process!) so that deep deletions do not block other
+# tasks.
 
 $import "/capnp/c++.capnp".namespace("blackrock");
 using Storage = import "storage.capnp";
@@ -68,15 +78,14 @@ struct StoredObject {
 
   struct CapDescriptor {
     union {
-      external @0 :SturdyRef;
-      # A remote capability. Does not point back into storage.
+      none @0 :Void;
+      # Null. (But `null` is not a good variable name due to macro conflicts.)
 
-      sibling @1 :StoredObjectKey;
-      # This points to another object in the same zone, and that sibling's refcount currently counts
-      # this object.
+      child @1 :StoredObjectKey;
+      # This points to an owned child object.
 
-      outOfZone @2 :StoredObjectKey;
-      # Reference to another object in storage.
+      external @2 :SturdyRef;
+      # A remote capability. (Could point back to storage, but the object isn't owned by us.)
     }
   }
 }

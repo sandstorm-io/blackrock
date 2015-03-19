@@ -19,6 +19,7 @@
 #include <queue>
 #include <unordered_map>
 #include <unordered_set>
+#include <capnp/persistent.capnp.h>
 
 namespace blackrock {
 
@@ -29,10 +30,16 @@ void writeAll(int fd, const void* data, size_t size);
 void preadAll(int fd, void* data, size_t size, off_t offset);
 void pwriteAll(int fd, const void* data, size_t size, off_t offset);
 
-size_t getFileSize(int fd) {
+uint64_t getFileSize(int fd) {
   struct stat stats;
   KJ_SYSCALL(fstat(fd, &stats));
   return stats.st_size;
+}
+
+uint64_t getFilePosition(int fd) {
+  off_t offset;
+  KJ_SYSCALL(offset = lseek(fd, 0, SEEK_CUR));
+  return offset;
 }
 
 kj::AutoCloseFd newEventFd(uint value, int flags) {
@@ -41,9 +48,26 @@ kj::AutoCloseFd newEventFd(uint value, int flags) {
   return kj::AutoCloseFd(fd);
 }
 
+template <typename T>
+kj::Array<T> removeNulls(kj::Array<kj::Maybe<T>> array) {
+  size_t count = 0;
+  for (auto& e: array) count += e != nullptr;
+
+  auto result = kj::heapArrayBuilder<T>(count);
+  for (auto& e: array) {
+    KJ_IF_MAYBE(e2, e) {
+      result.add(kj::mv(*e2));
+    }
+  }
+
+  return result;
+}
+
 static constexpr uint64_t EVENTFD_MAX = (uint64_t)-2;
 
 typedef capnp::Persistent<SturdyRef, SturdyRef::Owner> StandardPersistent;
+typedef capnp::CallContext<StandardPersistent::SaveParams, StandardPersistent::SaveResults>
+     StandardSaveContext;
 
 }  // namespace
 
@@ -118,17 +142,18 @@ struct FilesystemStorage::Xattr {
 
   Type type;
 
-  unsigned refcount :24;
-
-  uint32_t reserved;
+  byte reserved[3];
   // Must be zero.
 
-  uint64_t accountedSize;
-  // The size (in bytes) of this object the last time it was accounted into the zone's size.
-  // The actual on-disk size may have changed in the meantime.
+  uint32_t accountedBlockCount;
+  // The number of 4k blocks consumed by this object the last time we considered it for
+  // accounting/quota purposes. The on-disk size could have changed in the meantime.
 
-  ObjectId zone;
-  // The zone in which this object lives. 0 = this is the root zone, which should never be deleted.
+  uint64_t transitiveBlockCount;
+  // The number of 4k blocks in this object and all child objects.
+
+  ObjectId owner;
+  // What object owns this one?
 };
 
 class FilesystemStorage::Journal {
@@ -160,17 +185,15 @@ public:
     // Now the destructor of the thread will wait for the thread to exit.
   }
 
-  kj::Maybe<kj::AutoCloseFd> openObject(ObjectId id, Xattr& xattr) {
+  kj::AutoCloseFd openObject(ObjectId id, Xattr& xattr) {
     // Obtain a file descriptor and current attributes for the given object, as if all transactions
     // had already completed. `xattr` is filled in with the attributes.
 
     auto iter = cache.find(id);
     if (iter == cache.end()) {
-      auto result = storage.openObject(id);
-      KJ_IF_MAYBE(r, result) {
-        memset(&xattr, 0, sizeof(xattr));
-        KJ_SYSCALL(fgetxattr(*r, Xattr::NAME, &xattr, sizeof(xattr)));
-      }
+      auto result = KJ_ASSERT_NONNULL(storage.openObject(id), "object not found");
+      memset(&xattr, 0, sizeof(xattr));
+      KJ_SYSCALL(fgetxattr(result, Xattr::NAME, &xattr, sizeof(xattr)));
       return result;
     } else {
       xattr = iter->second.xattr;
@@ -184,37 +207,8 @@ public:
     }
   }
 
-  void deleteObject(ObjectId id) {
-    // Immediately delete the given object from disk. The object must already have had its refcount
-    // reduced to zero.
-
-    auto iter = cache.find(id);
-    if (iter != cache.end()) {
-      KJ_REQUIRE(iter->second.xattr.refcount == 0,
-          "request to delete object which still has references");
-      if (iter->second.stagingId != 0) {
-        // If the staging file still exists, then there is an unfulfilled journal entry moving it
-        // into place. But, if the journal playback doesn't find the file, it will safely ignore
-        // that operation. Meanwhile, normal journal playback never deletes files -- only recovery
-        // playback does, when at the end of recovery some file has zero refcount. So, we really
-        // do need to delete the staging file now, otherwise it will never be deleted. We also
-        // need to make sure to do this *before* deleting the main object file to avoid any race
-        // condition with the journal playback thread.
-        storage.deleteStaging(iter->second.stagingId);
-      }
-      cache.erase(iter);
-    }
-
-    storage.deleteObject(id);
-
-    KJ_IF_MAYBE(list, storage.openChildList(id)) {
-      uint64_t size = getFileSize(*list);
-      auto ids = kj::heapArray<ObjectId>(size / sizeof(ObjectId));
-      readAll(*list, ids.asBytes().begin(), ids.asBytes().size());
-      for (auto& id: ids) {
-        deleteObject(id);
-      }
-    }
+  kj::AutoCloseFd createTempFile() {
+    return storage.createTempFile();
   }
 
   template <typename T>
@@ -259,23 +253,22 @@ public:
       KJ_REQUIRE(journal.txInProgress, "transaction already committed");
 
       // Link temp file into staging.
-      uint32_t stagingId = journal.nextStagingId++;
-      if (journal.nextStagingId > MAX_STAGING_ID) {
-        journal.nextStagingId = 1;
-      }
+      uint64_t stagingId = journal.nextStagingId++;
       journal.storage.linkTempIntoStaging(stagingId, tmpFd);
 
       // Add the operation to the transaction.
       entries.add();
       Entry& entry = entries.back();
       memset(&entry, 0, sizeof(entry));
+      entry.type = Entry::Type::UPDATE_OBJECT;
       entry.stagingId = stagingId;
       entry.objectId = id;
-      entry.newXattr = attributes;
+      entry.xattr = attributes;
 
       // Update cache.
       CacheEntry& cache = journal.cache[id];
       cache.lastUpdate = journal.journalEnd + entries.size() * sizeof(Entry);
+      cache.location = CacheEntry::Location::STAGING;
       cache.stagingId = stagingId;
       cache.xattr = attributes;
       journal.cacheDropQueue.push({cache.lastUpdate, entry.objectId});
@@ -290,14 +283,34 @@ public:
       entries.add();
       Entry& entry = entries.back();
       memset(&entry, 0, sizeof(entry));
+      entry.type = Entry::Type::UPDATE_XATTR;
       entry.objectId = id;
-      entry.newXattr = attributes;
+      entry.xattr = attributes;
 
       // Update cache.
       CacheEntry& cache = journal.cache[id];
       cache.lastUpdate = journal.journalEnd + entries.size() * sizeof(Entry);
-      cache.stagingId = 0;
       cache.xattr = attributes;
+      journal.cacheDropQueue.push({cache.lastUpdate, entry.objectId});
+    }
+
+    void moveToDeathRow(ObjectId id) {
+      // Delete an object (recursively, if it has children).
+
+      KJ_REQUIRE(journal.txInProgress, "transaction already committed");
+
+      // Add the operation to the transaction.
+      entries.add();
+      Entry& entry = entries.back();
+      memset(&entry, 0, sizeof(entry));
+      entry.type = Entry::Type::MOVE_TO_DEATH_ROW;
+      entry.objectId = id;
+
+      // Update cache.
+      journal.cache.erase(id);
+      CacheEntry& cache = journal.cache[id];
+      cache.lastUpdate = journal.journalEnd + entries.size() * sizeof(Entry);
+      cache.location = CacheEntry::Location::DELETED;
       journal.cacheDropQueue.push({cache.lastUpdate, entry.objectId});
     }
 
@@ -354,10 +367,25 @@ private:
     // operations unless the full transaction is available and all `txSize` values are correct.
     // If recovering from a failure, ignore an incomplete transaction at the end of the journal.
 
-    unsigned type :4;
-    // Transaction type. Currently must always be zero.
+    enum class Type :uint8_t {
+      UPDATE_OBJECT,
+      // Replace the object with a staging file identified by `stagingId`, first setting the xattrs
+      // on the staging file, then rename()ing it into place. If no such staging file exists, this
+      // operation probably already occurred; ignore it.
 
-    unsigned stagingId :28;
+      UPDATE_XATTR,
+      // Update the xattrs on an existing file.
+
+      MOVE_TO_DEATH_ROW
+      // Move this object's file from main storage to death row.
+    };
+
+    Type type;
+    // Transaction type.
+
+    byte reserved[3];
+
+    uint64_t stagingId;
     // If non-zero, identifies a staging file which should be rename()ed to replace this object.
     // The xattrs should be written to the file just before it is renamed. If no such staging file
     // exists, this operation probably already occurred; ignore it.
@@ -369,14 +397,8 @@ private:
     ObjectId objectId;
     // ID of the object to update.
 
-    Xattr newXattr;
+    Xattr xattr;
     // Updated Xattr structure to write into the file.
-    //
-    // If `refcount` is becoming zero, and does not come back up from zero before the journal
-    // has been fully played back, the file should be deleted.
-
-    uint64_t reserved;
-    // Must be zero. Reserved for possible future expansion of Xattr.
   };
 
   static_assert(sizeof(Entry) == 64,
@@ -408,11 +430,25 @@ private:
   // `journalProcessedEventFd`.
 
   struct CacheEntry {
+    enum class Location :uint8_t {
+      NORMAL,
+      // The file -- if it exists -- is in its normal location.
+
+      STAGING,
+      // The file *may* still be in staging, under `stagingId`. If `stagingId` no longer exists,
+      // then the file is actually now live.
+
+      DELETED
+      // The file has been deleted, but may still be present on disk.
+    };
+
+    Location location = Location::NORMAL;
+
     uint64_t lastUpdate;
     // Offset in the journal of the last update to this object. We may discard the cache entry
     // once the journal has been committed past this point.
 
-    uint32_t stagingId;
+    uint64_t stagingId;
     // ID of staging file which is the object's current content. If this file no longer exists,
     // then it has been moved to the file's final location.
 
@@ -422,11 +458,8 @@ private:
   std::unordered_map<ObjectId, CacheEntry, ObjectId::Hash> cache;
   // Cache of attribute changes that are in the journal but haven't been written to disk yet.
 
-  static constexpr uint32_t MAX_STAGING_ID = (1 << 28) - 1;
-  uint32_t nextStagingId = 1;
-  // Counter to use to generate staging file names. The names are 7-digit zero-padded hex. The
-  // counter wraps around at 2^28, but skips the value zero since it is used to indicate
-  // "no staging".
+  uint32_t nextStagingId = 0;
+  // Counter to use to generate staging file names. The names are 7-digit zero-padded hex.
 
   bool txInProgress = false;
   // True if a `Transaction` exists which has not been committed.
@@ -485,8 +518,6 @@ private:
     off_t position;
     KJ_SYSCALL(position = lseek(journalFd, 0, SEEK_DATA));
 
-    std::unordered_set<ObjectId, ObjectId::Hash> zeroRefcount;
-
     if (journalEnd > position) {
       // Recover from previous journal failure.
 
@@ -497,23 +528,7 @@ private:
       // Process valid entries and discard any incomplete transaction.
       for (auto& entry: validateEntries(entries, true)) {
         executeEntry(entry);
-        if (entry.newXattr.refcount == 0) {
-          zeroRefcount.insert(entry.objectId);
-        } else {
-          zeroRefcount.erase(entry.objectId);
-        }
       }
-    }
-
-    // Delete all objects that reached zero refcount during the course of replaying the journal
-    // and were not revived by the time it finished. Any remaining live references to those objects
-    // were lost when the storage node rebooted.
-    //
-    // TODO(now): This doesn't work: We easily could have actually completed the set-refcount-zero
-    //   op before crashing, and then we'd never see it here.
-    #error "doesn't work"
-    for (auto& id: zeroRefcount) {
-      storage.deleteObject(id);
     }
 
     storage.deleteAllStaging();
@@ -595,7 +610,7 @@ private:
       }
       --expected;
 
-      KJ_ASSERT(entry.type == 0 && entry.reserved == 0,
+      KJ_ASSERT((entry.reserved[0] | entry.reserved[1] | entry.reserved[2]) == 0,
           "journal contains entries I don't understand; seems it was written using a future "
           "version or simply corrupted");
     }
@@ -610,10 +625,16 @@ private:
   }
 
   void executeEntry(const Entry& entry) {
-    if (entry.stagingId != 0) {
-      storage.finalizeStagingIfExists(entry.stagingId, entry.objectId, entry.newXattr);
-    } else {
-      storage.setAttributesIfExists(entry.objectId, entry.newXattr);
+    switch (entry.type) {
+      case Entry::Type::UPDATE_OBJECT:
+        storage.finalizeStagingIfExists(entry.stagingId, entry.objectId, entry.xattr);
+        break;
+      case Entry::Type::UPDATE_XATTR:
+        storage.setAttributesIfExists(entry.objectId, entry.xattr);
+        break;
+      case Entry::Type::MOVE_TO_DEATH_ROW:
+        storage.moveToDeathRow(entry.objectId);
+        break;
     }
   }
 };
@@ -625,24 +646,45 @@ class FilesystemStorage::ObjectBase {
   // unwrapping a Capability::Client into a native object and then doing dynamic_cast.
 
 public:
-  ObjectBase(Journal& journal, ObjectId zone, Type type)
-      : journal(journal), zone(zone), key(ObjectKey::generate()), id(key) {
+  ObjectBase(Journal& journal, Type type)
+      : journal(journal), key(ObjectKey::generate()), id(key), state(ORPHAN) {
     // Create a new object. A key will be generated.
 
     memset(&xattr, 0, sizeof(xattr));
     xattr.type = type;
   }
 
-  ObjectBase(Journal& journal, ObjectId zone, const ObjectKey& key,
-             const ObjectId& id, const Xattr& xattr)
-      : journal(journal), zone(zone), key(key), id(id), xattr(xattr) {}
+  ObjectBase(Journal& journal, const ObjectKey& key, const ObjectId& id, const Xattr& xattr,
+             kj::AutoCloseFd fd)
+      : journal(journal), key(key), id(id), xattr(xattr), state(COMMITTED) {
     // Construct an ObjectBase around an existing on-disk object.
+
+    CurrentData data;
+    data.fd = kj::mv(fd);
+
+    if (isStoredObjectType(xattr.type)) {
+      capnp::StreamFdMessageReader reader(data.fd.get());
+
+      data.children = KJ_MAP(child, reader.getRoot<StoredChildIds>().getChildren()) {
+        return ObjectId(child);
+      };
+
+      data.storedChildIdsWords = getFilePosition(data.fd) / sizeof(capnp::word);
+      data.storedObjectWords = getFileSize(data.fd) / sizeof(capnp::word) -
+                               data.storedChildIdsWords;
+    } else {
+      data.storedChildIdsWords = 0;
+      data.storedObjectWords = 0;
+    }
+  }
 
   ~ObjectBase() noexcept(false) {
     journal.unregisterObject(*this);
-    if (xattr.refcount == 0) {
-      journal.deleteObject(id);
-    }
+
+    // Note: If the object hasn't been committed yet, then our FD is an unlinked temp file and
+    // closing it will delete the data from disk, so we don't have to worry about it here. If the
+    // file has been linked to disk, then either it's in staging as part of a not-yet-committed
+    // transaction, or it's all the way in main storage already.
   }
 
   inline const ObjectId& getId() const { return id; }
@@ -656,128 +698,334 @@ public:
     this->weak = kj::mv(weak);
   }
 
-  bool isInZone(ObjectId zone) {
-    // Returns true if this object's parent zone is `zone`.
+  class AdoptionIntent {
+    // When an orphaned object is being adopted by a new owner, first the new owner has to ensure
+    // that all of the objects it proposed to adopt are adoptable before it actually commits to
+    // the transaction that adopts them. So, it goes around creating AdoptionIntents for each one.
+    // These are reversible -- if an exception is thrown and the AdoptionIntent discarded, no
+    // harm is done. But, only one owner can intend to adopt a particular orphan at a time. Once
+    // all the intents are created, the owner can actually commit a transaction adopting them.
 
-    return xattr.zone == zone;
-  }
-
-  const ObjectKey& addReference(Journal::Transaction& transaction) {
-    // Add a new reference to this object (from a sibling in the same zone).
-
-    uint oldCount = xattr.refcount++;
-    transaction.updateObjectXattr(id, xattr);
-
-    if (oldCount == 0) {
-      for (auto& ref: tenuousRefs) {
-        ref.object->addReference(transaction);
-      }
-      tenuousRefs = nullptr;
+  public:
+    AdoptionIntent(ObjectBase& object, capnp::Capability::Client cap)
+        : object(object), cap(kj::mv(cap)), committed(false) {
+      KJ_REQUIRE(object.state == ORPHAN, "can't take OwnedStorage already owned by someone else");
+      KJ_REQUIRE(object.currentData != nullptr, "can't adopt uninitialized object");
+      object.state = CLAIMED;
     }
 
-    return key;
-  }
-
-  void dropReference(Journal::Transaction& transaction) {
-    // Add an operation to the transaction which decrements this object's refcount. If it reaches
-    // zero, recursively reduces the refcount on all children as well, but holds live refs to them
-    // for possible later revival.
-
-    uint count = --xattr.refcount;
-    transaction.updateObjectXattr(id, xattr);
-
-    if (count == 0) {
-      // Restore all children.
-
-      switch (xattr.type) {
-        case Type::BLOB:
-        case Type::MUTABLE_BLOB:
-        case Type::VOLUME:
-        case Type::REFERENCE:
-        case Type::ZONE:
-          // Doesn't contain sibling references.
-          break;
-
-        case Type::ASSIGNABLE:
-        case Type::IMMUTABLE:
-        case Type::COLLECTION: {
-          capnp::StreamFdMessageReader reader(openCurrent(true));
-          kj::Vector<ClientObjectPair> newTenuousRefs;
-          for (auto cap: reader.getRoot<StoredObject>().getCapTable()) {
-            if (cap.isSibling()) {
-              auto ref = journal.restoreObject(cap.getSibling());
-              ref.object->dropReference(transaction);
-              newTenuousRefs.add(kj::mv(ref));
-            }
-          }
-          tenuousRefs = newTenuousRefs.releaseAsArray();
-          break;
-        }
+    ~AdoptionIntent() {
+      if (!committed) {
+        object.state = ORPHAN;
       }
     }
-  }
+
+    KJ_DISALLOW_COPY(AdoptionIntent);
+    inline AdoptionIntent(AdoptionIntent&& other)
+        : object(other.object), cap(kj::mv(other.cap)), committed(other.committed) {
+      other.committed = true;  // make sure `other`'s destructor does nothing
+    }
+
+    const ObjectId& getId() const { return object.getId(); }
+
+    void commit(ObjectId owner, Journal::Transaction& transaction) {
+      // Add an operation to the transaction which officially adopts this object.
+
+      KJ_ASSERT(!committed);
+      committed = true;
+      object.state = COMMITTED;
+
+      object.xattr.owner = owner;
+
+      auto& data = KJ_ASSERT_NONNULL(object.currentData);
+
+      // Currently, only adopting of newly-created objects is allowed, so we know data.fd is a
+      // temp file, and we should call updateObject() here. Later, when we support ownership
+      // transfers, this may not be true.
+      transaction.updateObject(object.id, object.xattr, data.fd);
+
+      for (auto& adoption: data.transitiveAdoptions) {
+        adoption.commit(object.id, transaction);
+      }
+      data.transitiveAdoptions = nullptr;
+    }
+
+  private:
+    ObjectBase& object;
+    capnp::Capability::Client cap;  // Make sure `object` can't be deleted.
+    bool committed;
+  };
 
 protected:
-  kj::Promise<void> setStoredObject(capnp::AnyPointer::Reader value);
-  // Overwrites the object with the given value saved as a StoredObject.
+  kj::Promise<void> setStoredObject(capnp::AnyPointer::Reader value) {
+    // Overwrites the object with the given value saved as a StoredObject.
 
-  kj::Promise<void> getStoredObject(capnp::AnyPointer::Builder value);
-  // Reads the object as a StoredObject and restores it, filling in `value`.
+    KJ_ASSERT(value.targetSize().wordCount < (1u << 17),
+        "Stored Cap'n Proto objects must be less than 1MB. Use Volume or Blob for bulk data.");
 
-  typedef capnp::Persistent<SturdyRef, SturdyRef::Owner> StandardPersistent;
-  typedef capnp::CallContext<StandardPersistent::SaveParams, StandardPersistent::SaveResults>
-       StandardSaveContext;
+    // Start constructing the message to write to disk, copying over the input.
+    auto message = kj::heap<capnp::MallocMessageBuilder>();
+    auto root = message->getRoot<StoredObject>();
+    root.getPayload().set(value);
 
-  kj::Promise<void> saveImpl(StandardSaveContext context);
-  // Implements the save() RPC method. Creates a new ref, and adds the ref to this object's
-  // backreferences.
+    // Arrange to save each capability ot the cap table.
+    auto capTableIn = message->getCapTable();
+    auto capTableOut = root.initCapTable(capTableIn.size());
+    auto promises = kj::heapArrayBuilder<kj::Promise<kj::Maybe<SavedChild>>>(capTableIn.size());
+    for (auto i: kj::indices(capTableIn)) {
+      KJ_IF_MAYBE(cap, capTableIn[i]) {
+        promises.add(saveCap(kj::mv(*cap), capTableOut[i]));
+      } else {
+        promises.add(kj::READY_NOW);
+      }
+    }
 
-  void updateSize(uint64_t size);
-  // Indicate that the size of the object (in bytes) is now `size`. If this is a change from the
-  // accounted size, arrange to update the accounted size for this object and all parent zones.
+    #error "TODO: don't re-save external refs that haven't changed? drop the ones that have?"
 
-  int openCurrent(bool readonly);
-  // Open the file representing the object's current content. Returns a file descriptor. All calls
-  // made to `openCurrent()` on a particular object must have the same parameter value.
+    // Wait for all the saves to complete.
+    return kj::joinPromises(promises.finish())
+        .then([KJ_MVCAP(message),this](kj::Array<kj::Maybe<SavedChild>> results) mutable
+                                    -> kj::Promise<void> {
+      // Children we need to disown.
+      std::unordered_set<ObjectId, ObjectId::Hash> disowned;
 
-  kj::AutoCloseFd openReplacement(int flags);
-  // Open a new temporary file which will later be passed to replace() to replace the existing
-  // content.
+      // Intents to adopt each child in `adopted`.
+      kj::Vector<AdoptionIntent> adoptions;
 
-  void replace(kj::AutoCloseFd fd, uint64_t newSize, kj::ArrayPtr<ObjectId> oldRefs,
-               kj::ArrayPtr<capnp::Capability> newRefs);
-  // Replace the object's content with an FD created using openReplacement().
+      // New children after the change.
+      std::unordered_set<ObjectId, ObjectId::Hash> newChildren;
 
-  uint64_t getAccountedSize();
-  // Get the accounted size of the object which, if the subclass is careful, may be consistent with
-  // the current size.
+      // Fill in `disowned` and `adoptions` based on results from saves.
+      {
+        auto savedChildren = removeNulls(kj::mv(results));
 
-  kj::Maybe<kj::Own<capnp::ClientHook>> restoreRef(StoredObject::CapDescriptor::Reader reader);
-  kj::Promise<void> saveRef(StoredObject::Builder builder, capnp::Capability::Client);
+        KJ_IF_MAYBE(data, currentData) {
+          // We're replacing some existing data.
+
+          // Children we had before that we're removing, in set form.
+          std::unordered_set<ObjectId, ObjectId::Hash> oldChildren(
+              data->children.begin(), data->children.end());
+
+          // Start with disowned being a copy of oldChildren, and then remove children that we
+          // still have.
+          disowned = oldChildren;
+
+          // Update sets to reflect all the children.
+          for (auto child: savedChildren) {
+            auto& childId = child.object.getId();
+            bool isNew = newChildren.insert(childId).second;
+            if (oldChildren.count(childId)) {
+              // We had this child before, so don't disown it.
+              disowned.erase(childId);
+            } else {
+              // We didn't have this child before, so we need to adopt it if we haven't already.
+              if (isNew) {
+                adoptions.add(child.object, kj::mv(child.client));
+              }
+            }
+          }
+        } else {
+          // We're writing fresh. All children are new.
+
+          for (auto child: savedChildren) {
+            if (newChildren.insert(child.object.getId()).second) {
+              adoptions.add(child.object, kj::mv(child.client));
+            }
+          }
+        }
+      }
+
+      // Write the new temp file.
+      CurrentData newData;
+      newData.fd = journal.createTempFile();
+
+      // Write the StoredChildIds part.
+      {
+        capnp::MallocMessageBuilder childIdsBuilder;
+        auto list = childIdsBuilder.initRoot<StoredChildIds>().initChildren(newChildren.size());
+        auto array = kj::heapArrayBuilder<ObjectId>(newChildren.size());
+        uint i = 0;
+        for (auto& child: newChildren) {
+          array.add(child);
+          child.copyTo(list[i++]);
+        }
+        KJ_ASSERT(i == list.size());
+        capnp::writeMessageToFd(newData.fd, childIdsBuilder);
+        newData.storedChildIdsWords = getFilePosition(newData.fd) / sizeof(capnp::word);
+        newData.children = array.finish();
+      }
+
+      // Write the StoredObject part.
+      capnp::writeMessageToFd(newData.fd, *message);
+      newData.storedObjectWords = getFilePosition(newData.fd) / sizeof(capnp::word) -
+                                  newData.storedChildIdsWords;
+
+      if (state == COMMITTED) {
+        // This object is already in the tree, so any other objects it adopted are now becoming
+        // part of the tree. It's time to commit a transaction adding them.
+
+        // Create the transaction.
+        Journal::Transaction txn(journal);
+
+        txn.updateObject(id, xattr, newData.fd);
+        for (auto& adoption: adoptions) {
+          adoption.commit(id, txn);
+        }
+        for (auto& disown: disowned) {
+          txn.moveToDeathRow(disown);
+        }
+
+        // Update currentData to reflect the transaction before closing it out.
+        currentData = kj::mv(newData);
+
+        return txn.commit();
+      } else {
+        // Save the adoptions for a later transaction that actually links us into the tree.
+        newData.transitiveAdoptions = adoptions.releaseAsArray();
+
+        // We don't need to think about the objects we disowned, as all of them had to have been
+        // uncommitted anyway, since we are uncommitted and an uncommited object cannot be the
+        // parent of a committed object.
+
+        // Update currentData to reflect changes.
+        currentData = kj::mv(newData);
+
+        return kj::READY_NOW;
+      }
+    });
+  }
+
+  template <typename Context>
+  void getStoredObject(Context context) {
+    // Reads the object as a StoredObject and restores it, filling in `value`.
+
+    auto& data = KJ_ASSERT_NONNULL(currentData, "can't read from uninitialized storage object");
+
+    KJ_SYSCALL(lseek(data.fd, data.storedChildIdsWords * sizeof(capnp::word), SEEK_SET));
+
+    capnp::StreamFdMessageReader reader(data.fd.get());
+    auto root = reader.getRoot<StoredObject>();
+    reader.initCapTable(KJ_MAP(cap, root.getCapTable()) {
+      return restoreCap(cap);
+    });
+
+    auto payload = root.getPayload();
+    auto size = payload.targetSize();
+    size.wordCount += capnp::sizeInWords<kj::Decay<decltype(context.getResults())>>();
+    size.capCount += 1;  // for `setter`
+    context.initResults(size).setValue(payload);
+  }
+
+  void updateSize(uint64_t size) {
+    // Indicate that the size of the object (in bytes) is now `size`. If this is a change from the
+    // accounted size, arrange to update the accounted size for this object and all parent zones.
+
+    uint64_t blocks = size / Volume::BLOCK_SIZE;
+    KJ_ASSERT(blocks <= uint32_t(kj::maxValue), "file too big");
+
+    if (blocks != xattr.accountedBlockCount) {
+      #error "TODO: update all parent sizes"
+    }
+  }
+
+  int openRaw() {
+    // Directly get the underlying file descriptor. Used for types that aren't in StoredObject
+    // format and do not have child capabilities.
+
+    KJ_IF_MAYBE(d, currentData) {
+      return d->fd;
+    } else {
+      // First time. Create new file.
+      CurrentData data;
+      data.fd = journal.createTempFile();
+      data.storedChildIdsWords = 0;
+      data.storedObjectWords = 0;
+      int result = data.fd;
+      currentData = kj::mv(data);
+      return result;
+    }
+  }
+
+  capnp::Capability::Client self() {
+    return KJ_ASSERT_NONNULL(weak->get());
+  }
 
 private:
   Journal& journal;
-  ObjectId zone;
   ObjectKey key;
   ObjectId id;
   Xattr xattr;
-  kj::AutoCloseFd fd;
   kj::Own<capnp::WeakCapability<capnp::Capability>> weak;
 
-  struct ClientObjectPair {
-    capnp::Capability::Client client;
-    ObjectBase* object;
+  enum {
+    ORPHAN,
+    // Object is newly-created and not linked into anything.
+
+    CLAIMED,
+    // Object has been claimed by an owner, but that owner could still back out. The object still
+    // exists only as a temporary file, not linked into storage.
+
+    COMMITTED
+    // Object has an owner and is on-disk.
+  } state;
+
+  struct CurrentData {
+    kj::AutoCloseFd fd;
+
+    // Below this point are fields which are only relevant to StoredObject format. Otherwise, they
+    // are empty/zero.
+
+    kj::Array<ObjectId> children;
+
+    uint32_t storedChildIdsWords;
+    // Size (in words) of the StoredChildIds part of the file.
+
+    uint32_t storedObjectWords;
+    // Size (in words) of the StoredObject part of the file.
+
+    kj::Array<AdoptionIntent> transitiveAdoptions;
+    // Objects which this one will adopt if this object is itself adopted.
   };
-  kj::Array<ClientObjectPair> tenuousRefs;
-  // If this object's refcount has reached zero, `tenuousRefs` is a list of live capabilities
-  // representing all outgoing strong references form this object, to prevent them from going away
-  // in the meantime.
+
+  kj::Maybe<CurrentData> currentData;
+  // Null if no data has yet been written.
+
+  struct SavedChild {
+    ObjectBase& object;
+    capnp::Capability::Client client;
+  };
+
+  kj::Promise<kj::Maybe<SavedChild>> saveCap(
+      kj::Own<capnp::ClientHook> cap, StoredObject::CapDescriptor::Builder descriptor) {
+    auto client = capnp::Capability::Client(kj::mv(cap));
+
+    // First see if it's an OwnedStorage.
+    auto promise = journal.getLiveObject(client);
+    return promise.then([KJ_MVCAP(client),descriptor](
+          kj::Maybe<FilesystemStorage::ObjectBase&> object) mutable
+       -> kj::Promise<kj::Maybe<SavedChild>> {
+      KJ_IF_MAYBE(o, object) {
+        o->key.copyTo(descriptor.getChild());
+        return kj::Maybe<SavedChild>(SavedChild { *o, kj::mv(client) });
+      } else {
+        // Not OwnedStorage. Do a regular save().
+        auto req = client.castAs<StandardPersistent>().saveRequest(capnp::MessageSize {16, 0});
+        req.getSealFor().setStorage();
+        return req.send().then([descriptor](auto&& response) mutable {
+          descriptor.setExternal(response.getSturdyRef());
+          return kj::Maybe<SavedChild>(nullptr);
+        });
+      }
+    });
+  }
+
+  kj::Maybe<kj::Own<capnp::ClientHook>> restoreCap(StoredObject::CapDescriptor::Reader descriptor);
 };
 
 template <typename T>
 typename T::Serves::Client FilesystemStorage::Journal::registerObject(kj::Own<T> object) {
   ObjectBase& base = *object;
-  objectCache[base.getId()] = &base;
+  KJ_ASSERT(objectCache.insert(std::make_pair(base.getId(), &base)).second, "duplicate object");
 
   auto clientAndWeak = serverSet.addWeak(kj::mv(object));
   base.setWeak(kj::mv(clientAndWeak.weak));
@@ -808,45 +1056,60 @@ kj::Promise<kj::Maybe<FilesystemStorage::ObjectBase&>> FilesystemStorage::Journa
 
 // =======================================================================================
 
-class FilesystemStorage::AssignableImpl: public PersistentAssignable<>::Server, public ObjectBase {
+class FilesystemStorage::AssignableImpl: public OwnedAssignable<>::Server, public ObjectBase {
 public:
   using ObjectBase::ObjectBase;
 
-  using ObjectBase::getStoredObject;  // make public for Assignable
-  using ObjectBase::setStoredObject;  // make public for Assignable
+  using ObjectBase::setStoredObject;
+  // Make public for Assignable so that StorageFactory can call this to initialize it.
 
   kj::Promise<void> get(GetContext context) override {
+    #error "we should probably wait for the set queue to be consistent... but what about DoS?"
     context.releaseParams();
+    getStoredObject(context);
+    context.getResults().setSetter(kj::heap<SetterImpl>(*this, self(), version));
+  }
 
-    int fd = openCurrent(true);
-    auto words = kj::heapArray<capnp::word>(getAccountedSize() / sizeof(capnp::word));
-    auto bytes = words.asBytes();
+private:
+  uint version = 1;
 
-    off_t offset = 0;
-    while (bytes.size() > 0) {
-      ssize_t n = 0;
-      KJ_SYSCALL(n = pread(fd, bytes.begin(), bytes.size(), offset));
-      KJ_ASSERT(n > 0, "file on disk shorter than expected?");
-      bytes = bytes.slice(n, bytes.size());
-      offset += n;
+  kj::Promise<void> setQueue = kj::READY_NOW;
+  // For now, we serialize set() calls. Arguably, it would be reasonable to cancel unfinised set()s
+  // when a new one comes in, but that could leave dangling (un-drop()ed) refs.
+  //
+  // TODO(perf): We could allow concurrent set()s, but require that they complete in the order they
+  //   were made. That is, `set()` has no need to wait for the previous `set()` to complete before
+  //   it starts calling `save()` on its refs -- it only needs to wait before committing the final
+  //   result.
+
+  class SetterImpl: public sandstorm::Assignable<>::Setter::Server {
+  public:
+    SetterImpl(AssignableImpl& object, capnp::Capability::Client client, uint expectedVersion = 0)
+        : object(object), client(client), expectedVersion(expectedVersion) {}
+
+    kj::Promise<void> set(SetContext context) override {
+      auto fork = object.setQueue.then([this,context]() mutable -> kj::Promise<void> {
+        if (expectedVersion > 0) {
+          if (object.version != expectedVersion) {
+            return KJ_EXCEPTION(DISCONNECTED, "Assignable modified concurrently");
+          }
+          ++expectedVersion;
+        }
+
+        auto promise = object.setStoredObject(context.getParams().getValue());
+        ++object.version;
+        context.releaseParams();
+        return kj::mv(promise);
+      }).fork();
+      object.setQueue = fork.addBranch().catch_([](auto&& e) {});
+      return fork.addBranch();
     }
 
-    capnp::FlatArrayMessageReader reader(words);
-    auto root = reader.getRoot<StoredObject>();
-    reader.initCapTable(KJ_MAP(cap, root.getCapTable()) {
-      return restoreRef(cap);
-    });
-
-    auto payload = root.getPayload();
-    auto size = payload.targetSize();
-    size.wordCount += capnp::sizeInWords<GetResults>();
-    context.initResults(size).setValue(payload);
-    return kj::READY_NOW;
-  }
-
-  kj::Promise<void> save(SaveContext context) override {
-    return saveImpl(context);
-  }
+  private:
+    AssignableImpl& object;
+    capnp::Capability::Client client;  // prevent GC
+    uint expectedVersion;
+  };
 };
 
 // =======================================================================================

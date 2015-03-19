@@ -78,17 +78,19 @@ private:
   // Weak reference to the factory capability.
 
   kj::Maybe<kj::AutoCloseFd> openObject(ObjectId id);
-  kj::Maybe<kj::AutoCloseFd> openStaging(uint32_t number);
-  kj::Maybe<kj::AutoCloseFd> openChildList(ObjectId id);
+  kj::Maybe<kj::AutoCloseFd> openStaging(uint64_t number);
   kj::AutoCloseFd createObject(ObjectId id);
   kj::AutoCloseFd createTempFile();
-  void linkTempIntoStaging(uint32_t number, int fd);
+  void linkTempIntoStaging(uint64_t number, int fd);
   void deleteObject(ObjectId id);
-  void deleteStaging(uint32_t number);
+  void deleteStaging(uint64_t number);
   void deleteAllStaging();
-  void finalizeStagingIfExists(uint32_t stagingId, ObjectId finalId, const Xattr& attributes);
+  void finalizeStagingIfExists(uint64_t stagingId, ObjectId finalId, const Xattr& attributes);
   void setAttributesIfExists(ObjectId objectId, const Xattr& attributes);
+  void moveToDeathRow(ObjectId id);
   void sync();
+
+  static bool isStoredObjectType(Type type);
 };
 
 }  // namespace blackrock
