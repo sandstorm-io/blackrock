@@ -140,6 +140,11 @@ struct SturdyRef {
 
 using Persistent = import "/capnp/persistent.capnp".Persistent(SturdyRef, SturdyRef.Owner);
 
+interface Restorer(Ref) {
+  restore @0 (sturdyRef :Ref) -> (cap :Capability);
+  drop @1 (sturdyRef :Ref);
+}
+
 struct ProvisionId {
   provider @0 :VatId;
   # ID of the vat providing the capability (aka the introducer).

@@ -20,15 +20,40 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <capnp/persistent.capnp.h>
+#include <dirent.h>
 
 namespace blackrock {
 
 namespace {
 
-void readAll(int fd, void* data, size_t size);
-void writeAll(int fd, const void* data, size_t size);
-void preadAll(int fd, void* data, size_t size, off_t offset);
-void pwriteAll(int fd, const void* data, size_t size, off_t offset);
+void preadAllOrZero(int fd, void* data, size_t size, off_t offset) {
+  // pread() the whole buffer. If EOF is reached, zero the remainder of the buffer -- i.e. treat
+  // the file as having infinite size where all bytes not explicitly written are zero.
+
+  while (size > 0) {
+    ssize_t n;
+    KJ_SYSCALL(n = pread(fd, data, size, offset));
+    if (n == 0) {
+      // Reading past EOF. Assume all-zero.
+      memset(data, 0, size);
+      return;
+    }
+    data = reinterpret_cast<byte*>(data) + n;
+    size -= n;
+    offset += n;
+  }
+}
+
+void pwriteAll(int fd, const void* data, size_t size, off_t offset) {
+  while (size > 0) {
+    ssize_t n;
+    KJ_SYSCALL(n = pwrite(fd, data, size, offset));
+    KJ_ASSERT(n != 0, "zero-sized write?");
+    data = reinterpret_cast<const byte*>(data) + n;
+    size -= n;
+    offset += n;
+  }
+}
 
 uint64_t getFileSize(int fd) {
   struct stat stats;
@@ -48,6 +73,20 @@ kj::AutoCloseFd newEventFd(uint value, int flags) {
   return kj::AutoCloseFd(fd);
 }
 
+uint64_t readEvent(int fd) {
+  ssize_t n;
+  uint64_t result;
+  KJ_SYSCALL(n = read(fd, &result, sizeof(result)));
+  KJ_ASSERT(n == 8, "wrong-sized read from eventfd", n);
+  return result;
+}
+
+void writeEvent(int fd, uint64_t value) {
+  ssize_t n;
+  KJ_SYSCALL(n = write(fd, &value, sizeof(value)));
+  KJ_ASSERT(n == 8, "wrong-sized write on eventfd", n);
+}
+
 template <typename T>
 kj::Array<T> removeNulls(kj::Array<kj::Maybe<T>> array) {
   size_t count = 0;
@@ -60,7 +99,7 @@ kj::Array<T> removeNulls(kj::Array<kj::Maybe<T>> array) {
     }
   }
 
-  return result;
+  return result.finish();
 }
 
 static constexpr uint64_t EVENTFD_MAX = (uint64_t)-2;
@@ -69,7 +108,30 @@ typedef capnp::Persistent<SturdyRef, SturdyRef::Owner> StandardPersistent;
 typedef capnp::CallContext<StandardPersistent::SaveParams, StandardPersistent::SaveResults>
      StandardSaveContext;
 
+class RefcountedMallocMessageBuilder: public capnp::MallocMessageBuilder, public kj::Refcounted {
+public:
+  using MallocMessageBuilder::MallocMessageBuilder;
+};
+
+template <size_t size>
+kj::StringPtr fixedStr(kj::FixedArray<char, size>& data) {
+  return kj::StringPtr(data.begin(), size - 1);
+}
+
+kj::FixedArray<char, 17> hex64(uint64_t value) {
+  kj::FixedArray<char, 17> result;
+  static const char DIGITS[] = "0123456789ABCDEF";
+  for (uint i = 0; i < 16; i++) {
+    // Big-endian sucks. Look at this ugly subtraction.
+    result[15 - i] = DIGITS[(value >> (4*i)) & 0x0fu];
+  }
+  result[16] = '\0';
+  return result;
+}
+
 }  // namespace
+
+// =======================================================================================
 
 FilesystemStorage::ObjectKey FilesystemStorage::ObjectKey::generate() {
   ObjectKey result;
@@ -122,12 +184,11 @@ kj::FixedArray<char, 24> FilesystemStorage::ObjectId::filename(char prefix) cons
 
 enum class FilesystemStorage::Type: uint8_t {
   BLOB,
-  MUTABLE_BLOB,
+  VOLUME,
   IMMUTABLE,
   ASSIGNABLE,
   COLLECTION,
-  VOLUME,
-  ZONE,
+  OPAQUE,
   REFERENCE
 };
 
@@ -159,10 +220,9 @@ struct FilesystemStorage::Xattr {
 class FilesystemStorage::Journal {
   struct Entry;
 public:
-  explicit Journal(FilesystemStorage& storage, kj::UnixEventPort& unixEventPort,
-                   kj::AutoCloseFd journalFd)
+  explicit Journal(FilesystemStorage& storage, kj::UnixEventPort& unixEventPort, int journalFd)
       : storage(storage),
-        journalFd(kj::mv(journalFd)),
+        journalFd(journalFd),
         journalEnd(getFileSize(this->journalFd)),
         journalSynced(journalEnd),
         journalExecuted(journalEnd),
@@ -171,6 +231,7 @@ public:
         journalProcessedEventFdObserver(unixEventPort, journalProcessedEventFd,
             kj::UnixEventPort::FdObserver::OBSERVE_READ),
         processingThread([this]() { doProcessingThread(); }) {
+    KJ_ON_SCOPE_FAILURE(writeEvent(journalReadyEventFd, EVENTFD_MAX));
     doRecovery();
   }
 
@@ -179,8 +240,7 @@ public:
     // eventfd reaches 0, which is nice because it means the processing thread will be able to
     // receive the previous event and process it before it receives this one, resulting in clean
     // shutdown.
-    uint64_t stop = EVENTFD_MAX;
-    writeAll(journalReadyEventFd, &stop, sizeof(stop));
+    writeEvent(journalReadyEventFd, EVENTFD_MAX);
 
     // Now the destructor of the thread will wait for the thread to exit.
   }
@@ -210,20 +270,6 @@ public:
   kj::AutoCloseFd createTempFile() {
     return storage.createTempFile();
   }
-
-  template <typename T>
-  typename T::Serves::Client registerObject(kj::Own<T> object);
-  void unregisterObject(ObjectBase& object);
-  kj::Maybe<ObjectBase&> getLiveObject(ObjectId id);
-  kj::Promise<kj::Maybe<ObjectBase&>> getLiveObject(capnp::Capability::Client& client);
-  // Interfaces for use only by StorageFactoryImpl and RestorerImpl.
-
-  struct ClientObjectPair {
-    capnp::Capability::Client client;
-    ObjectBase* object;
-  };
-
-  ClientObjectPair restoreObject(ObjectKey key);
 
   class Transaction {
   public:
@@ -337,8 +383,7 @@ public:
       journal.journalEnd += bytes.size();
 
       // Notify journal thread.
-      uint64_t entryCount = entries.size();
-      writeAll(journal.journalReadyEventFd, &entryCount, sizeof(entryCount));
+      writeEvent(journal.journalReadyEventFd, entries.size());
 
       journal.txInProgress = false;
 
@@ -407,14 +452,7 @@ private:
 
   FilesystemStorage& storage;
 
-  capnp::CapabilityServerSet<capnp::Capability> serverSet;
-  // Lets us map our own capabilities -- when they come back from the caller -- back to the
-  // underlying objects.
-
-  std::unordered_map<ObjectId, ObjectBase*, ObjectId::Hash> objectCache;
-  // Maps object IDs to live objects representing them, if any.
-
-  kj::AutoCloseFd journalFd;
+  int journalFd;
   uint64_t journalEnd;
   uint64_t journalSynced;
   uint64_t journalExecuted;
@@ -515,15 +553,26 @@ private:
 
   void doRecovery() {
     // Find the first actual data (skip leading hole).
-    off_t position;
-    KJ_SYSCALL(position = lseek(journalFd, 0, SEEK_DATA));
+  retry:
+    off_t position = lseek(journalFd, 0, SEEK_DATA);
+    if (position < 0) {
+      int error = errno;
+      if (error == EINTR) {
+        goto retry;
+      } else if (error == ENXIO) {
+        // The journal is empty.
+        return;
+      } else {
+        KJ_FAIL_SYSCALL("lseek", error);
+      }
+    }
 
     if (journalEnd > position) {
       // Recover from previous journal failure.
 
       // Read all entries.
       auto entries = kj::heapArray<Entry>((journalEnd - position) / sizeof(Entry));
-      preadAll(journalFd, entries.begin(), entries.asBytes().size(), position);
+      preadAllOrZero(journalFd, entries.begin(), entries.asBytes().size(), position);
 
       // Process valid entries and discard any incomplete transaction.
       for (auto& entry: validateEntries(entries, true)) {
@@ -545,8 +594,7 @@ private:
 
     for (;;) {
       // Wait for some data to read.
-      uint64_t count;
-      readAll(journalReadyEventFd, &count, sizeof(count));
+      uint64_t count = readEvent(journalReadyEventFd);
 
       KJ_ASSERT(count > 0);
 
@@ -557,14 +605,14 @@ private:
 
       // Read the entries.
       auto entries = kj::heapArray<Entry>(count);
-      preadAll(journalFd, entries.begin(), entries.asBytes().size(), position);
+      preadAllOrZero(journalFd, entries.begin(), entries.asBytes().size(), position);
 
       // Make sure this data is synced.
       KJ_SYSCALL(fdatasync(journalFd));
 
       // Post back to main thread that sync is finished through these bytes.
       uint64_t byteCount = entries.asBytes().size();
-      writeAll(journalProcessedEventFd, &byteCount, sizeof(byteCount));
+      writeEvent(journalProcessedEventFd, byteCount);
 
       // Now process them.
       for (auto& entry: validateEntries(entries, false)) {
@@ -641,22 +689,86 @@ private:
 
 // =======================================================================================
 
+class FilesystemStorage::ObjectFactory {
+  // Class responsible for keeping track of live objects.
+
+public:
+  explicit ObjectFactory(Journal& journal, kj::Timer& timer,
+                         Restorer<SturdyRef>::Client&& restorer);
+
+  template <typename T, typename U>
+  struct ClientObjectPair {
+    typename T::Client client;
+    U& object;
+
+    template <typename OtherT, typename OtherU>
+    ClientObjectPair(ClientObjectPair<OtherT, OtherU>&& other)
+        : client(kj::mv(other.client)), object(other.object) {}
+    ClientObjectPair(typename T::Client client, U& object)
+        : client(kj::mv(client)), object(object) {}
+  };
+
+  template <typename T>
+  ClientObjectPair<typename T::Serves, T> newObject();
+  // Create a new storage object with random ID of type T, where T is a subclass of ObjectBase
+  // inheriting all of ObjectBase's constructors.
+
+  ClientObjectPair<capnp::Capability, ObjectBase> openObject(ObjectKey key);
+
+  kj::Promise<kj::Maybe<ObjectBase&>> getLiveObject(capnp::Capability::Client& client);
+  // If the given capability points to an OwnedStorage implemented by this server, get the
+  // underlying ObjectBase.
+
+  void destroyed(ObjectBase& object);
+  // Called by destructor of ObjectBase. Shouldn't be called anywhere else.
+
+  auto restoreRequest() { return restorer.restoreRequest(); }
+  auto dropRequest() { return restorer.dropRequest(); }
+  // Call methods on the `Restorer` capbaility.
+
+  inline kj::Timer& getTimer() { return timer; }
+
+  StorageFactory::Client getFactoryClient() { return factoryCap; }
+
+  void modifyTransitiveSize(ObjectId id, int64_t deltaBlocks, Journal::Transaction& txn);
+
+private:
+  Journal& journal;
+  kj::Timer& timer;
+
+  capnp::CapabilityServerSet<capnp::Capability> serverSet;
+  // Lets us map our own capabilities -- when they come back from the caller -- back to the
+  // underlying objects.
+
+  std::unordered_map<ObjectId, ObjectBase*, ObjectId::Hash> objectCache;
+  // Maps object IDs to live objects representing them, if any.
+
+  Restorer<SturdyRef>::Client restorer;
+  StorageFactory::Client factoryCap;
+
+  template <typename T>
+  ClientObjectPair<typename T::Serves, T> registerObject(kj::Own<T> object);
+};
+
+// =======================================================================================
+
 class FilesystemStorage::ObjectBase {
   // Base class which all persistent storage objects implement. Often accessed by first
   // unwrapping a Capability::Client into a native object and then doing dynamic_cast.
 
 public:
-  ObjectBase(Journal& journal, Type type)
-      : journal(journal), key(ObjectKey::generate()), id(key), state(ORPHAN) {
+  ObjectBase(Journal& journal, ObjectFactory& factory, Type type)
+      : journal(journal), factory(factory), key(ObjectKey::generate()), id(key), state(ORPHAN) {
     // Create a new object. A key will be generated.
 
     memset(&xattr, 0, sizeof(xattr));
     xattr.type = type;
   }
 
-  ObjectBase(Journal& journal, const ObjectKey& key, const ObjectId& id, const Xattr& xattr,
+  ObjectBase(Journal& journal, ObjectFactory& factory,
+             const ObjectKey& key, const ObjectId& id, const Xattr& xattr,
              kj::AutoCloseFd fd)
-      : journal(journal), key(key), id(id), xattr(xattr), state(COMMITTED) {
+      : journal(journal), factory(factory), key(key), id(id), xattr(xattr), state(COMMITTED) {
     // Construct an ObjectBase around an existing on-disk object.
 
     CurrentData data;
@@ -679,7 +791,7 @@ public:
   }
 
   ~ObjectBase() noexcept(false) {
-    journal.unregisterObject(*this);
+    factory.destroyed(*this);
 
     // Note: If the object hasn't been committed yet, then our FD is an unlinked temp file and
     // closing it will delete the data from disk, so we don't have to worry about it here. If the
@@ -687,7 +799,12 @@ public:
     // transaction, or it's all the way in main storage already.
   }
 
+  capnp::Capability::Client self() {
+    return KJ_ASSERT_NONNULL(weak->get());
+  }
+
   inline const ObjectId& getId() const { return id; }
+  inline Xattr& getXattrRef() { return xattr; }
 
   inline capnp::Capability::Client getClient() {
     return KJ_ASSERT_NONNULL(weak->get());
@@ -763,8 +880,10 @@ protected:
     KJ_ASSERT(value.targetSize().wordCount < (1u << 17),
         "Stored Cap'n Proto objects must be less than 1MB. Use Volume or Blob for bulk data.");
 
+    uint seqnum = nextSetSeqnum++;
+
     // Start constructing the message to write to disk, copying over the input.
-    auto message = kj::heap<capnp::MallocMessageBuilder>();
+    auto message = kj::refcounted<RefcountedMallocMessageBuilder>();
     auto root = message->getRoot<StoredObject>();
     root.getPayload().set(value);
 
@@ -776,16 +895,41 @@ protected:
       KJ_IF_MAYBE(cap, capTableIn[i]) {
         promises.add(saveCap(kj::mv(*cap), capTableOut[i]));
       } else {
-        promises.add(kj::READY_NOW);
+        promises.add(kj::Maybe<SavedChild>(nullptr));
       }
     }
 
-    #error "TODO: don't re-save external refs that haven't changed? drop the ones that have?"
+    // Cache the value that we are writing, to serve get()s in the meantime.
+    auto oldCachedValue = kj::mv(cachedValue);
+    auto oldSeqnum = nextSetSeqnum - 1;
+    cachedValue = kj::addRef(*message);
+    RefcountedMallocMessageBuilder& msgRef = *message;
+    auto dropCache = kj::defer([&msgRef,KJ_MVCAP(oldCachedValue),oldSeqnum,this]() mutable {
+      KJ_IF_MAYBE(c, cachedValue) {
+        if (c->get() == &msgRef) {
+          // The value we are writing is still cached. Remove it.
+
+          if (commitedSetSeqnum < oldSeqnum) {
+            // The old value is not commited yet (and neither was the new value, so I guess an
+            // exception was thrown), so restore it.
+            cachedValue = kj::mv(oldCachedValue);
+          } else {
+            cachedValue = nullptr;
+          }
+        }
+      }
+    });
 
     // Wait for all the saves to complete.
     return kj::joinPromises(promises.finish())
-        .then([KJ_MVCAP(message),this](kj::Array<kj::Maybe<SavedChild>> results) mutable
-                                    -> kj::Promise<void> {
+        .then([KJ_MVCAP(message),KJ_MVCAP(dropCache),seqnum,this](
+            kj::Array<kj::Maybe<SavedChild>> results) mutable -> kj::Promise<void> {
+      if (commitedSetSeqnum > seqnum) {
+        // Some later set() was already written to disk.
+        // TODO(soon): Drop references that we just saved.
+        return kj::READY_NOW;
+      }
+
       // Children we need to disown.
       std::unordered_set<ObjectId, ObjectId::Hash> disowned;
 
@@ -877,6 +1021,7 @@ protected:
 
         // Update currentData to reflect the transaction before closing it out.
         currentData = kj::mv(newData);
+        commitedSetSeqnum = seqnum;
 
         return txn.commit();
       } else {
@@ -889,15 +1034,32 @@ protected:
 
         // Update currentData to reflect changes.
         currentData = kj::mv(newData);
+        commitedSetSeqnum = seqnum;
 
         return kj::READY_NOW;
       }
+
+      // TODO(soon): Call drop() on all references from the old object. These don't have to
+      //   succeed.
+      // TODO(perf): Detect which external references from the old capability are being re-saved
+      //   in the new capability to avoid a redundant save/drop pair.
     });
   }
 
   template <typename Context>
   void getStoredObject(Context context) {
     // Reads the object as a StoredObject and restores it, filling in `value`.
+
+    KJ_IF_MAYBE(c, cachedValue) {
+      // A set() is in progress. Return a copy of the cached value.
+      auto payload = c->get()->getRoot<StoredObject>().getPayload();
+      auto size = payload.targetSize();
+      size.wordCount += capnp::sizeInWords<
+          capnp::FromBuilder<kj::Decay<decltype(context.getResults())>>>();
+      size.capCount += 1;  // for `setter`
+      context.initResults(size).setValue(payload);
+      return;
+    }
 
     auto& data = KJ_ASSERT_NONNULL(currentData, "can't read from uninitialized storage object");
 
@@ -911,7 +1073,8 @@ protected:
 
     auto payload = root.getPayload();
     auto size = payload.targetSize();
-    size.wordCount += capnp::sizeInWords<kj::Decay<decltype(context.getResults())>>();
+    size.wordCount += capnp::sizeInWords<
+        capnp::FromBuilder<kj::Decay<decltype(context.getResults())>>>();
     size.capCount += 1;  // for `setter`
     context.initResults(size).setValue(payload);
   }
@@ -924,7 +1087,10 @@ protected:
     KJ_ASSERT(blocks <= uint32_t(kj::maxValue), "file too big");
 
     if (blocks != xattr.accountedBlockCount) {
-      #error "TODO: update all parent sizes"
+      int64_t delta = blocks - xattr.accountedBlockCount;
+      Journal::Transaction txn(journal);
+      factory.modifyTransitiveSize(id, delta, txn);
+      txn.commit();
     }
   }
 
@@ -946,16 +1112,26 @@ protected:
     }
   }
 
-  capnp::Capability::Client self() {
-    return KJ_ASSERT_NONNULL(weak->get());
-  }
-
 private:
   Journal& journal;
+  ObjectFactory& factory;
   ObjectKey key;
   ObjectId id;
   Xattr xattr;
   kj::Own<capnp::WeakCapability<capnp::Capability>> weak;
+
+  uint64_t nextSetSeqnum = 1;
+  // Each time setStoredObject() is called, it takes a sequence number.
+
+  uint64_t commitedSetSeqnum = 0;
+  // Each time setStoredObject() is ready to commit to disk, it first checks this value to make
+  // sure no future sets have already completed. If not, it updates this sequence number.
+
+  kj::Maybe<kj::Own<RefcountedMallocMessageBuilder>> cachedValue;
+  // A cached live copy (with live capabilities) of the last-set value. If non-null, this
+  // corresponds to set sequence number (nextSetSeqnum - 1). getStoredObject() will return this
+  // value if available so that it can be consistent with the most-recent set() even if that set()
+  // hasn't hit disk yet.
 
   enum {
     ORPHAN,
@@ -1000,7 +1176,7 @@ private:
     auto client = capnp::Capability::Client(kj::mv(cap));
 
     // First see if it's an OwnedStorage.
-    auto promise = journal.getLiveObject(client);
+    auto promise = factory.getLiveObject(client);
     return promise.then([KJ_MVCAP(client),descriptor](
           kj::Maybe<FilesystemStorage::ObjectBase&> object) mutable
        -> kj::Promise<kj::Maybe<SavedChild>> {
@@ -1011,6 +1187,7 @@ private:
         // Not OwnedStorage. Do a regular save().
         auto req = client.castAs<StandardPersistent>().saveRequest(capnp::MessageSize {16, 0});
         req.getSealFor().setStorage();
+
         return req.send().then([descriptor](auto&& response) mutable {
           descriptor.setExternal(response.getSturdyRef());
           return kj::Maybe<SavedChild>(nullptr);
@@ -1019,68 +1196,51 @@ private:
     });
   }
 
-  kj::Maybe<kj::Own<capnp::ClientHook>> restoreCap(StoredObject::CapDescriptor::Reader descriptor);
-};
-
-template <typename T>
-typename T::Serves::Client FilesystemStorage::Journal::registerObject(kj::Own<T> object) {
-  ObjectBase& base = *object;
-  KJ_ASSERT(objectCache.insert(std::make_pair(base.getId(), &base)).second, "duplicate object");
-
-  auto clientAndWeak = serverSet.addWeak(kj::mv(object));
-  base.setWeak(kj::mv(clientAndWeak.weak));
-  return kj::mv(clientAndWeak.client).template castAs<typename T::Serves>();
-}
-
-void FilesystemStorage::Journal::unregisterObject(ObjectBase& object) {
-  objectCache.erase(object.getId());
-}
-
-kj::Maybe<FilesystemStorage::ObjectBase&> FilesystemStorage::Journal::getLiveObject(ObjectId id) {
-  auto iter = objectCache.find(id);
-  if (iter == objectCache.end()) {
-    return nullptr;
-  } else {
-    return *iter->second;
+  kj::Maybe<kj::Own<capnp::ClientHook>> restoreCap(
+      StoredObject::CapDescriptor::Reader descriptor) {
+    switch (descriptor.which()) {
+      case StoredObject::CapDescriptor::NONE:
+        return nullptr;
+      case StoredObject::CapDescriptor::CHILD: {
+        kj::Own<capnp::ClientHook> result;
+        KJ_IF_MAYBE(exception, kj::runCatchingExceptions([&]() {
+          auto obj = factory.openObject(descriptor.getChild());
+          result = capnp::ClientHook::from(kj::mv(obj.client));
+        })) {
+          result = capnp::newBrokenCap(kj::mv(*exception));
+        }
+        return kj::mv(result);
+      }
+      case StoredObject::CapDescriptor::EXTERNAL: {
+        auto req = factory.restoreRequest();
+        req.setSturdyRef(descriptor.getExternal());
+        capnp::Capability::Client cap(req.send().getCap());
+        return capnp::ClientHook::from(kj::mv(cap));
+      }
+    }
+    return capnp::newBrokenCap(KJ_EXCEPTION(FAILED, "unknown cap descriptor type on disk"));
   }
-}
-
-kj::Promise<kj::Maybe<FilesystemStorage::ObjectBase&>> FilesystemStorage::Journal::getLiveObject(
-    capnp::Capability::Client& client) {
-  return serverSet.getLocalServer(client).then([](auto&& maybeServer) {
-    return maybeServer.map([](auto& server) -> ObjectBase& {
-      return dynamic_cast<ObjectBase&>(server);
-    });
-  });
-}
+};
 
 // =======================================================================================
 
 class FilesystemStorage::AssignableImpl: public OwnedAssignable<>::Server, public ObjectBase {
 public:
+  static constexpr Type TYPE = Type::ASSIGNABLE;
   using ObjectBase::ObjectBase;
 
   using ObjectBase::setStoredObject;
   // Make public for Assignable so that StorageFactory can call this to initialize it.
 
   kj::Promise<void> get(GetContext context) override {
-    #error "we should probably wait for the set queue to be consistent... but what about DoS?"
     context.releaseParams();
     getStoredObject(context);
     context.getResults().setSetter(kj::heap<SetterImpl>(*this, self(), version));
+    return kj::READY_NOW;
   }
 
 private:
   uint version = 1;
-
-  kj::Promise<void> setQueue = kj::READY_NOW;
-  // For now, we serialize set() calls. Arguably, it would be reasonable to cancel unfinised set()s
-  // when a new one comes in, but that could leave dangling (un-drop()ed) refs.
-  //
-  // TODO(perf): We could allow concurrent set()s, but require that they complete in the order they
-  //   were made. That is, `set()` has no need to wait for the previous `set()` to complete before
-  //   it starts calling `save()` on its refs -- it only needs to wait before committing the final
-  //   result.
 
   class SetterImpl: public sandstorm::Assignable<>::Setter::Server {
   public:
@@ -1088,21 +1248,21 @@ private:
         : object(object), client(client), expectedVersion(expectedVersion) {}
 
     kj::Promise<void> set(SetContext context) override {
-      auto fork = object.setQueue.then([this,context]() mutable -> kj::Promise<void> {
-        if (expectedVersion > 0) {
-          if (object.version != expectedVersion) {
-            return KJ_EXCEPTION(DISCONNECTED, "Assignable modified concurrently");
-          }
-          ++expectedVersion;
+      if (expectedVersion > 0) {
+        if (object.version != expectedVersion) {
+          return KJ_EXCEPTION(DISCONNECTED, "Assignable modified concurrently");
         }
+        ++expectedVersion;
+      }
 
-        auto promise = object.setStoredObject(context.getParams().getValue());
-        ++object.version;
-        context.releaseParams();
-        return kj::mv(promise);
-      }).fork();
-      object.setQueue = fork.addBranch().catch_([](auto&& e) {});
-      return fork.addBranch();
+      context.allowCancellation();
+      // If a save() call never returns we don't want this call context to be stuck here. So, only
+      // keep trying for as long as the caller hasn't canceled.
+
+      auto promise = object.setStoredObject(context.getParams().getValue());
+      ++object.version;
+      context.releaseParams();
+      return kj::mv(promise);
     }
 
   private:
@@ -1112,10 +1272,13 @@ private:
   };
 };
 
+constexpr FilesystemStorage::Type FilesystemStorage::AssignableImpl::TYPE;
+
 // =======================================================================================
 
-class FilesystemStorage::VolumeImpl: public PersistentVolume::Server, public ObjectBase {
+class FilesystemStorage::VolumeImpl: public OwnedVolume::Server, public ObjectBase {
 public:
+  static constexpr Type TYPE = Type::VOLUME;
   using ObjectBase::ObjectBase;
 
   kj::Promise<void> read(ReadContext context) override {
@@ -1133,13 +1296,7 @@ public:
     auto results = context.getResults(capnp::MessageSize {16 + size / sizeof(capnp::word), 0});
     auto data = results.initData(size);
 
-    int fd = openCurrent(false);
-    while (data.size() > 0) {
-      ssize_t n;
-      KJ_SYSCALL(n = pread(fd, data.begin(), data.size(), offset));
-      data = data.slice(n, data.size());
-      offset += n;
-    }
+    preadAllOrZero(openRaw(), data.begin(), data.size(), offset);
 
     return kj::READY_NOW;
   }
@@ -1155,14 +1312,7 @@ public:
 
     uint64_t offset = blockNum * Volume::BLOCK_SIZE;
 
-    int fd = openCurrent(false);
-    while (data.size() > 0) {
-      ssize_t n;
-      KJ_SYSCALL(n = pwrite(fd, data.begin(), data.size(), offset));
-      data = data.slice(n, data.size());
-      offset += n;
-    }
-
+    pwriteAll(openRaw(), data.begin(), data.size(), offset);
     maybeUpdateSize(count);
 
     return kj::READY_NOW;
@@ -1180,7 +1330,7 @@ public:
     uint64_t offset = blockNum * Volume::BLOCK_SIZE;
     uint size = count * Volume::BLOCK_SIZE;
 
-    int fd = openCurrent(false);
+    int fd = openRaw();
     KJ_SYSCALL(fallocate(fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, offset, size));
 
     maybeUpdateSize(count);
@@ -1189,24 +1339,14 @@ public:
   }
 
   kj::Promise<void> sync(SyncContext context) override {
-    int fd = openCurrent(false);
+    int fd = openRaw();
     KJ_SYSCALL(fdatasync(fd));
     return kj::READY_NOW;
   }
 
-  kj::Promise<void> getBlockCount(GetBlockCountContext context) override {
-    struct stat stats;
-    int fd = openCurrent(false);
-    KJ_SYSCALL(fstat(fd, &stats));
-    uint64_t size = stats.st_blocks * 512u;
-    context.getResults().setCount(size / Volume::BLOCK_SIZE);
-    updateSize(size);
-    return kj::READY_NOW;
-  }
-
-  kj::Promise<void> watchBlockCount(WatchBlockCountContext context) override {
-    KJ_UNIMPLEMENTED("Volume.watchBlockCount()");
-  }
+//  kj::Promise<void> asBlob(AsBlobContext context) override {
+    // TODO(someday)
+//  }
 
 private:
   uint32_t counter = 0;
@@ -1219,7 +1359,7 @@ private:
     counter += count;
     if (counter > 128) {
       struct stat stats;
-      KJ_SYSCALL(fstat(openCurrent(false), &stats));
+      KJ_SYSCALL(fstat(openRaw(), &stats));
       uint64_t size = stats.st_blocks * 512u;
       updateSize(size);
       counter = 0;
@@ -1227,29 +1367,234 @@ private:
   }
 };
 
+constexpr FilesystemStorage::Type FilesystemStorage::VolumeImpl::TYPE;
+
 // =======================================================================================
 
 class FilesystemStorage::StorageFactoryImpl: public StorageFactory::Server {
 public:
-  explicit StorageFactoryImpl(Journal& journal, ObjectId zone)
-      : journal(journal), zone(zone) {}
+  explicit StorageFactoryImpl(ObjectFactory& factory): factory(factory) {}
 
-  kj::Promise<void> newAssignable(NewAssignableContext context) override {
-    auto result = kj::heap<AssignableImpl>(journal, zone, Type::VOLUME);
-    result->setStoredObject(context.getParams().getInitialValue());
-    context.getResults().setAssignable(journal.registerObject(kj::mv(result)));
+  kj::Promise<void> newVolume(NewVolumeContext context) override {
+    context.getResults().setVolume(factory.newObject<VolumeImpl>().client);
     return kj::READY_NOW;
   }
 
-  kj::Promise<void> newVolume(NewVolumeContext context) override {
-    context.getResults().setVolume(journal.registerObject(
-        kj::heap<VolumeImpl>(journal, zone, Type::VOLUME)));
+  kj::Promise<void> newAssignable(NewAssignableContext context) override {
+    auto result = factory.newObject<AssignableImpl>();
+    result.object.setStoredObject(context.getParams().getInitialValue());
+    context.getResults().setAssignable(kj::mv(result.client));
     return kj::READY_NOW;
   }
 
 private:
-  Journal& journal;
-  ObjectId zone;
+  ObjectFactory& factory;
 };
+
+// =======================================================================================
+// finish implementing ObjectFactory
+
+FilesystemStorage::ObjectFactory::ObjectFactory(Journal& journal, kj::Timer& timer,
+                                                Restorer<SturdyRef>::Client&& restorer)
+    : journal(journal), timer(timer), restorer(kj::mv(restorer)),
+      factoryCap(kj::heap<StorageFactoryImpl>(*this)) {}
+
+template <typename T>
+auto FilesystemStorage::ObjectFactory::newObject() -> ClientObjectPair<typename T::Serves, T> {
+  return registerObject<T>(kj::heap<T>(journal, *this, T::TYPE));
+}
+
+auto FilesystemStorage::ObjectFactory::openObject(ObjectKey key)
+    -> ClientObjectPair<capnp::Capability, ObjectBase> {
+  ObjectId id = key;
+  auto iter = objectCache.find(id);
+  if (iter != objectCache.end()) {
+    ObjectBase& object = *iter->second;
+    return { object.self(), object };
+  }
+
+  // Not in cache. Create it.
+  Xattr xattr;
+  auto fd = journal.openObject(id, xattr);
+
+  switch (xattr.type) {
+#define HANDLE_TYPE(tag, type) \
+    case Type::tag: \
+      return registerObject(kj::heap<type>(journal, *this, key, id, xattr, kj::mv(fd)))
+//    HANDLE_TYPE(BLOB, BlobImpl);
+    HANDLE_TYPE(VOLUME, VolumeImpl);
+//    HANDLE_TYPE(IMMUTABLE, ImmutableImpl);
+    HANDLE_TYPE(ASSIGNABLE, AssignableImpl);
+//    HANDLE_TYPE(COLLECTION, CollectionImpl);
+//    HANDLE_TYPE(OPAQUE, OpaqueImpl);
+#undef HANDLE_TYPE
+//    case Type::REFERENCE:
+    default:
+      KJ_UNIMPLEMENTED("unimplemented storage object type seen on disk", (uint)xattr.type);
+  }
+}
+
+auto FilesystemStorage::ObjectFactory::getLiveObject(capnp::Capability::Client& client)
+    -> kj::Promise<kj::Maybe<FilesystemStorage::ObjectBase&>> {
+  return serverSet.getLocalServer(client).then([](auto&& maybeServer) {
+    return maybeServer.map([](auto& server) -> ObjectBase& {
+      return dynamic_cast<ObjectBase&>(server);
+    });
+  });
+}
+
+void FilesystemStorage::ObjectFactory::destroyed(ObjectBase& object) {
+  objectCache.erase(object.getId());
+}
+
+void FilesystemStorage::ObjectFactory::modifyTransitiveSize(
+    ObjectId id, int64_t deltaBlocks, Journal::Transaction& txn) {
+  if (id == nullptr) {
+    // Root. Skip.
+    return;
+  }
+
+  Xattr scratchXattr;
+  Xattr* xattr;
+
+  auto iter = objectCache.find(id);
+  if (iter == objectCache.end()) {
+    // Object not loaded. Edit directly.
+    journal.openObject(id, scratchXattr);
+    xattr = &scratchXattr;
+  } else {
+    xattr = &iter->second->getXattrRef();
+  }
+
+  if (deltaBlocks < 0 && -deltaBlocks > xattr->transitiveBlockCount) {
+    KJ_LOG(ERROR, "storage object had inconsistent transitive block count",
+        deltaBlocks, xattr->transitiveBlockCount);
+    deltaBlocks = -xattr->transitiveBlockCount;
+  }
+
+  xattr->transitiveBlockCount += deltaBlocks;
+  txn.updateObjectXattr(id, *xattr);
+
+  modifyTransitiveSize(xattr->owner, deltaBlocks, txn);
+}
+
+template <typename T>
+auto FilesystemStorage::ObjectFactory::registerObject(kj::Own<T> object)
+    -> ClientObjectPair<typename T::Serves, T> {
+  T& ref = *object;
+
+  ObjectBase& base = ref;
+  KJ_ASSERT(objectCache.insert(std::make_pair(base.getId(), &base)).second, "duplicate object");
+
+  auto clientAndWeak = serverSet.addWeak(kj::mv(object));
+  base.setWeak(kj::mv(clientAndWeak.weak));
+  return { kj::mv(clientAndWeak.client).template castAs<typename T::Serves>(), ref };
+}
+
+// =======================================================================================
+
+FilesystemStorage::FilesystemStorage(
+    int mainDirFd, int stagingDirFd, int deathRowFd, int journalFd,
+    kj::UnixEventPort& eventPort, kj::Timer& timer, Restorer<SturdyRef>::Client&& restorer)
+    : mainDirFd(mainDirFd), stagingDirFd(stagingDirFd), deathRowFd(deathRowFd),
+      journal(kj::heap<Journal>(*this, eventPort, journalFd)),
+      factory(kj::heap<ObjectFactory>(*journal, timer, kj::mv(restorer))) {}
+
+FilesystemStorage::~FilesystemStorage() noexcept(false) {}
+
+OwnedAssignable<>::Client FilesystemStorage::getRoot(ObjectKey key) {
+  return factory->openObject(key).client.castAs<OwnedAssignable<>>();
+}
+
+StorageFactory::Client FilesystemStorage::getFactory() {
+  return factory->getFactoryClient();
+}
+
+kj::Maybe<kj::AutoCloseFd> FilesystemStorage::openObject(ObjectId id) {
+  return sandstorm::raiiOpenAtIfExists(mainDirFd, id.filename('o').begin(), O_RDWR);
+}
+
+kj::Maybe<kj::AutoCloseFd> FilesystemStorage::openStaging(uint64_t number) {
+  auto name = hex64(number);
+  return sandstorm::raiiOpenAtIfExists(stagingDirFd, fixedStr(name), O_RDWR);
+}
+
+kj::AutoCloseFd FilesystemStorage::createObject(ObjectId id) {
+  return sandstorm::raiiOpenAt(mainDirFd, id.filename('o').begin(), O_RDWR | O_CREAT | O_EXCL);
+}
+
+kj::AutoCloseFd FilesystemStorage::createTempFile() {
+  return sandstorm::raiiOpenAt(mainDirFd, ".", O_RDWR | O_TMPFILE);
+}
+
+void FilesystemStorage::linkTempIntoStaging(uint64_t number, int fd) {
+  KJ_SYSCALL(linkat(AT_FDCWD, kj::str("/proc/self/fd/", fd).cStr(), stagingDirFd,
+                    hex64(number).begin(), AT_SYMLINK_FOLLOW));
+}
+
+void FilesystemStorage::deleteStaging(uint64_t number) {
+  KJ_SYSCALL(unlinkat(stagingDirFd, hex64(number).begin(), 0));
+}
+
+void FilesystemStorage::deleteAllStaging() {
+  for (auto& file: sandstorm::listDirectoryFd(stagingDirFd)) {
+    KJ_SYSCALL(unlinkat(stagingDirFd, file.cStr(), 0));
+  }
+}
+
+void FilesystemStorage::finalizeStagingIfExists(
+    uint64_t stagingId, ObjectId finalId, const Xattr& attributes) {
+  auto stagingName = hex64(stagingId);
+  auto finalName = finalId.filename('o');
+retry:
+  if (renameat(stagingDirFd, stagingName.begin(), mainDirFd, finalName.begin()) < 0) {
+    int error = errno;
+    switch (error) {
+      case EINTR:
+        goto retry;
+      case ENOENT:
+        // Acceptable;
+        break;
+      default:
+        KJ_FAIL_SYSCALL("renameat(staging -> final)", error,
+                        fixedStr(stagingName), fixedStr(finalName));
+    }
+  }
+}
+
+void FilesystemStorage::setAttributesIfExists(ObjectId objectId, const Xattr& attributes) {
+  // Sadly, there is no setxattrat(). But we can use /proc/self/fd to emulate it.
+  auto name = objectId.filename('o');
+  auto hackname = kj::str("/proc/self/fd/", mainDirFd, "/", fixedStr(name));
+  KJ_SYSCALL(setxattr(hackname.cStr(), Xattr::NAME, &attributes, sizeof(attributes), 0));
+}
+
+void FilesystemStorage::moveToDeathRow(ObjectId id) {
+  auto name = id.filename('o');
+  KJ_SYSCALL(renameat(stagingDirFd, name.begin(), deathRowFd, name.begin()), name.begin());
+}
+
+void FilesystemStorage::sync() {
+  KJ_SYSCALL(syncfs(mainDirFd));
+}
+
+bool FilesystemStorage::isStoredObjectType(Type type) {
+  switch (type) {
+    case Type::BLOB:
+    case Type::VOLUME:
+      return false;
+
+    case Type::IMMUTABLE:
+    case Type::ASSIGNABLE:
+    case Type::COLLECTION:
+    case Type::OPAQUE:
+      return true;
+
+    case Type::REFERENCE:
+      return false;
+  }
+
+  KJ_FAIL_ASSERT("unknown object type on disk", (uint)type);
+}
 
 }  // namespace blackrock

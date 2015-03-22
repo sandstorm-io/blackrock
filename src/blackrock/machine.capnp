@@ -14,14 +14,10 @@ using Util = import "/sandstorm/util.capnp";
 using VatId = ClusterRpc.VatId;
 using Address = ClusterRpc.Address;
 using SturdyRef = ClusterRpc.SturdyRef;
+using Restorer = ClusterRpc.Restorer;
 
 struct ObjectStorageCredentials {
   # TODO(soon): Credentials for accessing S3, GCS, etc.
-}
-
-interface Restorer(Ref) {
-  restore @0 (sturdyRef :Ref) -> (value :AnyPointer);
-  release @1 (sturdyRef :Ref);
 }
 
 interface MasterRestorer(Ref) {
