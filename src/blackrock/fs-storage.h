@@ -42,7 +42,17 @@ public:
   };
 
   OwnedAssignable<>::Client getRoot(ObjectKey key);
+  kj::Promise<ObjectKey> setRoot(OwnedAssignable<>::Client object);
   StorageFactory::Client getFactory();
+
+  template <typename T>
+  typename OwnedAssignable<T>::Client getRoot(ObjectKey key) {
+    return getRoot(key).castAs<OwnedAssignable<T>>();
+  }
+  template <typename T>
+  kj::Promise<ObjectKey> setRoot(T object) {
+    return setRoot(object.template asGeneric<>());
+  }
 
 private:
   struct ObjectId {
@@ -50,6 +60,7 @@ private:
     // The object ID. Equals the 16-byte blake2b hash of the key.
 
     ObjectId() = default;
+    ObjectId(decltype(nullptr)): id {0, 0} {}
     ObjectId(StoredObjectId::Reader reader)
         : id { reader.getId0(), reader.getId1() } {}
     ObjectId(const ObjectKey& key);

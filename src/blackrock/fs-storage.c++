@@ -183,7 +183,8 @@ kj::FixedArray<char, 24> FilesystemStorage::ObjectId::filename(char prefix) cons
 }
 
 enum class FilesystemStorage::Type: uint8_t {
-  BLOB,
+  // (zero skipped to help detect errors)
+  BLOB = 1,
   VOLUME,
   IMMUTABLE,
   ASSIGNABLE,
@@ -230,6 +231,10 @@ public:
         journalProcessedEventFd(newEventFd(0, EFD_CLOEXEC | EFD_NONBLOCK)),
         journalProcessedEventFdObserver(unixEventPort, journalProcessedEventFd,
             kj::UnixEventPort::FdObserver::OBSERVE_READ),
+        syncQueueTask(syncQueueLoop().catch_([](kj::Exception&& exception) {
+          KJ_LOG(FATAL, "journal sync loop threw exception", exception);
+          abort();
+        })),
         processingThread([this]() { doProcessingThread(); }) {
     KJ_ON_SCOPE_FAILURE(writeEvent(journalReadyEventFd, EVENTFD_MAX));
     doRecovery();
@@ -507,6 +512,7 @@ private:
     kj::Own<kj::PromiseFulfiller<void>> fulfiller;
   };
   std::queue<SyncQueueEntry> syncQueue;
+  kj::Promise<void> syncQueueTask;
 
   struct CacheDropQueueEntry {
     uint64_t offset;
@@ -587,58 +593,66 @@ private:
     // This thread reads the journal, makes sure things are synced to disk, and actually executes
     // the transactions.
 
-    // Get the current position from journalSynced rather than journalEnd since journalEnd could
-    // possibly have changed already, but journalSynced can't change until we signal back to the
-    // main thread.
-    uint64_t position = journalSynced;
+    KJ_IF_MAYBE(exception, kj::runCatchingExceptions([&]() {
+      // Get the current position from journalSynced rather than journalEnd since journalEnd could
+      // possibly have changed already, but journalSynced can't change until we signal back to the
+      // main thread.
+      uint64_t position = journalSynced;
 
-    for (;;) {
-      // Wait for some data to read.
-      uint64_t count = readEvent(journalReadyEventFd);
+      for (;;) {
+        // Wait for some data to read.
+        uint64_t count = readEvent(journalReadyEventFd);
 
-      KJ_ASSERT(count > 0);
+        KJ_ASSERT(count > 0);
 
-      if (count == EVENTFD_MAX) {
-        // Clean shutdown requested.
-        break;
+        if (count == EVENTFD_MAX) {
+          // Clean shutdown requested.
+          break;
+        }
+
+        // Read the entries.
+        auto entries = kj::heapArray<Entry>(count);
+        preadAllOrZero(journalFd, entries.begin(), entries.asBytes().size(), position);
+
+        // Make sure this data is synced.
+        KJ_SYSCALL(fdatasync(journalFd));
+
+        // Post back to main thread that sync is finished through these bytes.
+        uint64_t byteCount = entries.asBytes().size();
+        writeEvent(journalProcessedEventFd, byteCount);
+
+        // Now process them.
+        for (auto& entry: validateEntries(entries, false)) {
+          executeEntry(entry);
+        }
+
+        storage.sync();
+
+        // Now we can punch out any journal pages we've completed.
+        static constexpr uint64_t pageMask = ~4095ull;
+        uint64_t holeStart = position & pageMask;
+        position += byteCount;
+        uint64_t holeEnd = position & pageMask;
+
+        // Instead of using a second eventFd, we just update `journalExecuted` with a sloppy memory
+        // write, because it's only used to decide when to clear cache entries anyway.
+        __atomic_store_n(&journalExecuted, position, __ATOMIC_RELAXED);
+
+        if (holeStart < holeEnd) {
+          KJ_SYSCALL(fallocate(journalFd, FALLOC_FL_PUNCH_HOLE, holeStart, holeEnd - holeStart));
+        }
       }
 
-      // Read the entries.
-      auto entries = kj::heapArray<Entry>(count);
-      preadAllOrZero(journalFd, entries.begin(), entries.asBytes().size(), position);
+      // On clean shutdown, the journal is empty and we can discard it all.
+      KJ_ASSERT(getFileSize(journalFd) == position, "journal not empty after clean shutdown");
+      KJ_SYSCALL(ftruncate(journalFd, 0));
+    })) {
+      // exception!
+      KJ_LOG(FATAL, "exception in journal thread", *exception);
 
-      // Make sure this data is synced.
-      KJ_SYSCALL(fdatasync(journalFd));
-
-      // Post back to main thread that sync is finished through these bytes.
-      uint64_t byteCount = entries.asBytes().size();
-      writeEvent(journalProcessedEventFd, byteCount);
-
-      // Now process them.
-      for (auto& entry: validateEntries(entries, false)) {
-        executeEntry(entry);
-      }
-
-      storage.sync();
-
-      // Now we can punch out any journal pages we've completed.
-      static constexpr uint64_t pageMask = ~4095ull;
-      uint64_t holeStart = position & pageMask;
-      position += byteCount;
-      uint64_t holeEnd = position & pageMask;
-
-      // Instead of using a second eventFd, we just update `journalExecuted` with a sloppy memory
-      // write, because it's only used to decide when to clear cache entries anyway.
-      __atomic_store_n(&journalExecuted, position, __ATOMIC_RELAXED);
-
-      if (holeStart < holeEnd) {
-        KJ_SYSCALL(fallocate(journalFd, FALLOC_FL_PUNCH_HOLE, holeStart, holeEnd - holeStart));
-      }
+      // Tear down the process because otherwise it will probably deadlock.
+      abort();
     }
-
-    // On clean shutdown, the journal is empty and we can discard it all.
-    KJ_ASSERT(getFileSize(journalFd) == position, "journal not empty after clean shutdown");
-    KJ_SYSCALL(ftruncate(journalFd, 0));
   }
 
   kj::ArrayPtr<const Entry> validateEntries(
@@ -689,8 +703,13 @@ private:
 
 // =======================================================================================
 
-class FilesystemStorage::ObjectFactory {
+class FilesystemStorage::ObjectFactory: public kj::Refcounted {
   // Class responsible for keeping track of live objects.
+  //
+  // This is refcounted because ObjectBase's destructor needs to call it, and it's hard to ensure
+  // that ObjectBase's destructor runs before FilesystemStorage's destructor when an exception
+  // unwinds the stack while an RPC to storage is in-progress in parallel. (This mostly happens in
+  // tests.)
 
 public:
   explicit ObjectFactory(Journal& journal, kj::Timer& timer,
@@ -757,18 +776,20 @@ class FilesystemStorage::ObjectBase {
   // unwrapping a Capability::Client into a native object and then doing dynamic_cast.
 
 public:
-  ObjectBase(Journal& journal, ObjectFactory& factory, Type type)
-      : journal(journal), factory(factory), key(ObjectKey::generate()), id(key), state(ORPHAN) {
+  ObjectBase(Journal& journal, kj::Own<ObjectFactory> factory, Type type)
+      : journal(journal), factory(kj::mv(factory)),
+        key(ObjectKey::generate()), id(key), state(ORPHAN) {
     // Create a new object. A key will be generated.
 
     memset(&xattr, 0, sizeof(xattr));
     xattr.type = type;
   }
 
-  ObjectBase(Journal& journal, ObjectFactory& factory,
+  ObjectBase(Journal& journal, kj::Own<ObjectFactory> factory,
              const ObjectKey& key, const ObjectId& id, const Xattr& xattr,
              kj::AutoCloseFd fd)
-      : journal(journal), factory(factory), key(key), id(id), xattr(xattr), state(COMMITTED) {
+      : journal(journal), factory(kj::mv(factory)),
+        key(key), id(id), xattr(xattr), state(COMMITTED) {
     // Construct an ObjectBase around an existing on-disk object.
 
     CurrentData data;
@@ -788,10 +809,12 @@ public:
       data.storedChildIdsWords = 0;
       data.storedObjectWords = 0;
     }
+
+    currentData = kj::mv(data);
   }
 
   ~ObjectBase() noexcept(false) {
-    factory.destroyed(*this);
+    factory->destroyed(*this);
 
     // Note: If the object hasn't been committed yet, then our FD is an unlinked temp file and
     // closing it will delete the data from disk, so we don't have to worry about it here. If the
@@ -804,6 +827,7 @@ public:
   }
 
   inline const ObjectId& getId() const { return id; }
+  inline const ObjectKey& getKey() const { return key; }
   inline Xattr& getXattrRef() { return xattr; }
 
   inline capnp::Capability::Client getClient() {
@@ -887,13 +911,13 @@ protected:
     auto root = message->getRoot<StoredObject>();
     root.getPayload().set(value);
 
-    // Arrange to save each capability ot the cap table.
+    // Arrange to save each capability to the cap table.
     auto capTableIn = message->getCapTable();
     auto capTableOut = root.initCapTable(capTableIn.size());
     auto promises = kj::heapArrayBuilder<kj::Promise<kj::Maybe<SavedChild>>>(capTableIn.size());
     for (auto i: kj::indices(capTableIn)) {
       KJ_IF_MAYBE(cap, capTableIn[i]) {
-        promises.add(saveCap(kj::mv(*cap), capTableOut[i]));
+        promises.add(saveCap(cap->get()->addRef(), capTableOut[i]));
       } else {
         promises.add(kj::Maybe<SavedChild>(nullptr));
       }
@@ -908,7 +932,6 @@ protected:
       KJ_IF_MAYBE(c, cachedValue) {
         if (c->get() == &msgRef) {
           // The value we are writing is still cached. Remove it.
-
           if (commitedSetSeqnum < oldSeqnum) {
             // The old value is not commited yet (and neither was the new value, so I guess an
             // exception was thrown), so restore it.
@@ -1089,7 +1112,7 @@ protected:
     if (blocks != xattr.accountedBlockCount) {
       int64_t delta = blocks - xattr.accountedBlockCount;
       Journal::Transaction txn(journal);
-      factory.modifyTransitiveSize(id, delta, txn);
+      factory->modifyTransitiveSize(id, delta, txn);
       txn.commit();
     }
   }
@@ -1114,7 +1137,7 @@ protected:
 
 private:
   Journal& journal;
-  ObjectFactory& factory;
+  kj::Own<ObjectFactory> factory;
   ObjectKey key;
   ObjectId id;
   Xattr xattr;
@@ -1132,6 +1155,11 @@ private:
   // corresponds to set sequence number (nextSetSeqnum - 1). getStoredObject() will return this
   // value if available so that it can be consistent with the most-recent set() even if that set()
   // hasn't hit disk yet.
+  //
+  // TODO(perf): We currently only keep the value cached while set() is in progress. We could keep
+  //   it for some defined time after that, possibly improving performance. Alternatively, if we
+  //   don't do that, we don't really need it to be refcounted because the set() task owns the
+  //   other reference anyway, so it can make sure the object stays live.
 
   enum {
     ORPHAN,
@@ -1176,12 +1204,12 @@ private:
     auto client = capnp::Capability::Client(kj::mv(cap));
 
     // First see if it's an OwnedStorage.
-    auto promise = factory.getLiveObject(client);
+    auto promise = factory->getLiveObject(client);
     return promise.then([KJ_MVCAP(client),descriptor](
           kj::Maybe<FilesystemStorage::ObjectBase&> object) mutable
        -> kj::Promise<kj::Maybe<SavedChild>> {
       KJ_IF_MAYBE(o, object) {
-        o->key.copyTo(descriptor.getChild());
+        o->key.copyTo(descriptor.initChild());
         return kj::Maybe<SavedChild>(SavedChild { *o, kj::mv(client) });
       } else {
         // Not OwnedStorage. Do a regular save().
@@ -1204,7 +1232,7 @@ private:
       case StoredObject::CapDescriptor::CHILD: {
         kj::Own<capnp::ClientHook> result;
         KJ_IF_MAYBE(exception, kj::runCatchingExceptions([&]() {
-          auto obj = factory.openObject(descriptor.getChild());
+          auto obj = factory->openObject(descriptor.getChild());
           result = capnp::ClientHook::from(kj::mv(obj.client));
         })) {
           result = capnp::newBrokenCap(kj::mv(*exception));
@@ -1212,7 +1240,7 @@ private:
         return kj::mv(result);
       }
       case StoredObject::CapDescriptor::EXTERNAL: {
-        auto req = factory.restoreRequest();
+        auto req = factory->restoreRequest();
         req.setSturdyRef(descriptor.getExternal());
         capnp::Capability::Client cap(req.send().getCap());
         return capnp::ClientHook::from(kj::mv(cap));
@@ -1382,9 +1410,9 @@ public:
 
   kj::Promise<void> newAssignable(NewAssignableContext context) override {
     auto result = factory.newObject<AssignableImpl>();
-    result.object.setStoredObject(context.getParams().getInitialValue());
+    auto promise = result.object.setStoredObject(context.getParams().getInitialValue());
     context.getResults().setAssignable(kj::mv(result.client));
-    return kj::READY_NOW;
+    return kj::mv(promise);
   }
 
 private:
@@ -1401,7 +1429,7 @@ FilesystemStorage::ObjectFactory::ObjectFactory(Journal& journal, kj::Timer& tim
 
 template <typename T>
 auto FilesystemStorage::ObjectFactory::newObject() -> ClientObjectPair<typename T::Serves, T> {
-  return registerObject<T>(kj::heap<T>(journal, *this, T::TYPE));
+  return registerObject<T>(kj::heap<T>(journal, kj::addRef(*this), T::TYPE));
 }
 
 auto FilesystemStorage::ObjectFactory::openObject(ObjectKey key)
@@ -1420,7 +1448,7 @@ auto FilesystemStorage::ObjectFactory::openObject(ObjectKey key)
   switch (xattr.type) {
 #define HANDLE_TYPE(tag, type) \
     case Type::tag: \
-      return registerObject(kj::heap<type>(journal, *this, key, id, xattr, kj::mv(fd)))
+      return registerObject(kj::heap<type>(journal, kj::addRef(*this), key, id, xattr, kj::mv(fd)))
 //    HANDLE_TYPE(BLOB, BlobImpl);
     HANDLE_TYPE(VOLUME, VolumeImpl);
 //    HANDLE_TYPE(IMMUTABLE, ImmutableImpl);
@@ -1498,12 +1526,25 @@ FilesystemStorage::FilesystemStorage(
     kj::UnixEventPort& eventPort, kj::Timer& timer, Restorer<SturdyRef>::Client&& restorer)
     : mainDirFd(mainDirFd), stagingDirFd(stagingDirFd), deathRowFd(deathRowFd),
       journal(kj::heap<Journal>(*this, eventPort, journalFd)),
-      factory(kj::heap<ObjectFactory>(*journal, timer, kj::mv(restorer))) {}
+      factory(kj::refcounted<ObjectFactory>(*journal, timer, kj::mv(restorer))) {}
 
 FilesystemStorage::~FilesystemStorage() noexcept(false) {}
 
 OwnedAssignable<>::Client FilesystemStorage::getRoot(ObjectKey key) {
   return factory->openObject(key).client.castAs<OwnedAssignable<>>();
+}
+
+auto FilesystemStorage::setRoot(OwnedAssignable<>::Client object) -> kj::Promise<ObjectKey> {
+  auto promise = factory->getLiveObject(object);
+  return promise.then([KJ_MVCAP(object),this](kj::Maybe<ObjectBase&>&& unwrapped) mutable {
+    ObjectBase& base = KJ_ASSERT_NONNULL(unwrapped,
+        "tried to set non-OwnedStorage object as storage root");
+    ObjectBase::AdoptionIntent adoption(base, kj::mv(object));
+    Journal::Transaction txn(*journal);
+    adoption.commit(nullptr, txn);
+    auto key = base.getKey();
+    return txn.commit().then([key]() { return key; });
+  });
 }
 
 StorageFactory::Client FilesystemStorage::getFactory() {
@@ -1575,7 +1616,25 @@ void FilesystemStorage::moveToDeathRow(ObjectId id) {
 }
 
 void FilesystemStorage::sync() {
-  KJ_SYSCALL(syncfs(mainDirFd));
+  static bool noSyncfs = false;
+
+retry:
+  if (noSyncfs) {
+    ::sync();  // apparently does not return errors
+  } else if (syncfs(mainDirFd) < 0) {
+    int error = errno;
+    if (error == EINTR) {
+      goto retry;
+    } else if (error == ENOSYS) {
+      // syncfs() is not implemented under Valgrind. Fall back to sync().
+      noSyncfs = true;
+      KJ_LOG(WARNING, "syncfs() syscall not implemented, falling back to sync(); "
+                      "if you're valgrinding, ignore this, otherwise, please investigate");
+      goto retry;
+    } else {
+      KJ_FAIL_SYSCALL("syncfs", error);
+    }
+  }
 }
 
 bool FilesystemStorage::isStoredObjectType(Type type) {
