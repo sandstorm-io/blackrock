@@ -305,7 +305,7 @@ public:
 
       // Link temp file into staging.
       uint64_t stagingId = journal.nextStagingId++;
-      journal.storage.linkTempIntoStaging(stagingId, tmpFd);
+      journal.storage.linkTempIntoStaging(stagingId, tmpFd, attributes);
 
       // Add the operation to the transaction.
       entries.add();
@@ -1568,7 +1568,8 @@ kj::AutoCloseFd FilesystemStorage::createTempFile() {
   return sandstorm::raiiOpenAt(mainDirFd, ".", O_RDWR | O_TMPFILE);
 }
 
-void FilesystemStorage::linkTempIntoStaging(uint64_t number, int fd) {
+void FilesystemStorage::linkTempIntoStaging(uint64_t number, int fd, const Xattr& xattr) {
+  KJ_SYSCALL(fsetxattr(fd, Xattr::NAME, &xattr, sizeof(xattr), 0));
   KJ_SYSCALL(linkat(AT_FDCWD, kj::str("/proc/self/fd/", fd).cStr(), stagingDirFd,
                     hex64(number).begin(), AT_SYMLINK_FOLLOW));
 }
@@ -1612,7 +1613,7 @@ void FilesystemStorage::setAttributesIfExists(ObjectId objectId, const Xattr& at
 
 void FilesystemStorage::moveToDeathRow(ObjectId id) {
   auto name = id.filename('o');
-  KJ_SYSCALL(renameat(stagingDirFd, name.begin(), deathRowFd, name.begin()), name.begin());
+  KJ_SYSCALL(renameat(mainDirFd, name.begin(), deathRowFd, name.begin()), name.begin());
 }
 
 void FilesystemStorage::sync() {

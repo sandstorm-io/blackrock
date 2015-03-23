@@ -114,7 +114,7 @@ private:
   kj::Maybe<kj::AutoCloseFd> openStaging(uint64_t number);
   kj::AutoCloseFd createObject(ObjectId id);
   kj::AutoCloseFd createTempFile();
-  void linkTempIntoStaging(uint64_t number, int fd);
+  void linkTempIntoStaging(uint64_t number, int fd, const Xattr& xattr);
   void deleteStaging(uint64_t number);
   void deleteAllStaging();
   void finalizeStagingIfExists(uint64_t stagingId, ObjectId finalId, const Xattr& attributes);

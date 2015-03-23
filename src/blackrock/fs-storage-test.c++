@@ -11,6 +11,8 @@
 #include <sched.h>
 #include <sys/mount.h>
 #include <unistd.h>
+#include <sys/types.h>
+#include <sys/stat.h>
 #include "fs-storage-test.capnp.h"
 
 namespace blackrock {
@@ -32,51 +34,49 @@ public:
 UnshareTmp unshareTmp;
 #endif
 
-class Tempdir {
-public:
-  Tempdir() {
-    char path[] = "/tmp/fs-storage-test.XXXXXX";
-    if (mkdtemp(path) == nullptr) {
-      KJ_FAIL_SYSCALL("mkdtemp", errno);
+
+struct TestTempdir {
+  static constexpr char PATH[] = "/tmp/blackrock-fs-storage-test";
+
+  TestTempdir() {
+    if (access(PATH, F_OK) >= 0) {
+      sandstorm::recursivelyDelete(PATH);
     }
-
-    this->path = kj::heapString(path);
+    KJ_SYSCALL(mkdir(PATH, 0777));
   }
 
-  ~Tempdir() {
-    sandstorm::recursivelyDelete(path);
+  kj::AutoCloseFd subdir(kj::StringPtr name) {
+    auto fullname = kj::str(PATH, '/', name);
+    mkdir(fullname.cStr(), 0777);  // ignore already-exists
+    return sandstorm::raiiOpen(fullname, O_RDONLY | O_DIRECTORY);
   }
 
-  operator const char*() { return path.cStr(); }
-  operator kj::StringPtr() { return path; }
+  FilesystemStorage::ObjectKey rootKey;  // initialized in first test
 
-private:
-  kj::String path;
+  // We don't delete on shutdown because it's useful to poke at the files for debugging. We always
+  // use the same directory so it will be deleted on the next run.
 };
+constexpr char TestTempdir::PATH[];
 
-class TempdirFd {
-public:
-  TempdirFd(): fd(sandstorm::raiiOpen(dir, O_RDONLY | O_DIRECTORY)) {}
-
-  operator int() { return fd; }
-
-private:
-  Tempdir dir;
-  kj::AutoCloseFd fd;
-};
+TestTempdir testTempdir;
+// For this test, we set up a temporary directory once for the whole test, and each test case runs
+// on it. This means that each test case will potentially see the data left from the previous.
 
 struct StorageTestFixture {
   StorageTestFixture()
       : io(kj::setupAsyncIo()),
+        staging(testTempdir.subdir("staging")),
+        main(testTempdir.subdir("main")),
+        deathRow(testTempdir.subdir("deathRow")),
         journal(sandstorm::raiiOpen("/tmp", O_RDWR | O_TMPFILE)),
         storage(staging, main, deathRow, journal,
                 io.unixEventPort, io.provider->getTimer(),
                 nullptr) {}
 
   kj::AsyncIoContext io;
-  TempdirFd staging;
-  TempdirFd main;
-  TempdirFd deathRow;
+  kj::AutoCloseFd staging;
+  kj::AutoCloseFd main;
+  kj::AutoCloseFd deathRow;
   kj::AutoCloseFd journal;
   FilesystemStorage storage;
 
@@ -93,14 +93,13 @@ struct StorageTestFixture {
   }
 };
 
-KJ_TEST("set root") {
+KJ_TEST("basic assignables") {
   StorageTestFixture env;
 
-  FilesystemStorage::ObjectKey rootKey =
-      env.storage.setRoot(env.newTextObject("foo")).wait(env.io.waitScope);
+  testTempdir.rootKey = env.storage.setRoot(env.newTextObject("foo")).wait(env.io.waitScope);
 
   {
-    auto root = env.storage.getRoot<TestStoredObject>(rootKey);
+    auto root = env.storage.getRoot<TestStoredObject>(testTempdir.rootKey);
     auto response = root.getRequest().send().wait(env.io.waitScope);
     KJ_EXPECT(response.getValue().getText() == "foo");
 
@@ -127,7 +126,7 @@ KJ_TEST("set root") {
   env.io.provider->getTimer().afterDelay(10 * kj::MILLISECONDS).wait(env.io.waitScope);
 
   {
-    auto root = env.storage.getRoot<TestStoredObject>(rootKey);
+    auto root = env.storage.getRoot<TestStoredObject>(testTempdir.rootKey);
     auto response = root.getRequest().send().wait(env.io.waitScope);
     auto value = response.getValue();
     KJ_EXPECT(value.getText() == "bar");
@@ -138,6 +137,44 @@ KJ_TEST("set root") {
     KJ_EXPECT(subResponse2.getValue().getText() == "qux");
   }
 }
+
+KJ_TEST("use after reload") {
+  StorageTestFixture env;
+
+  auto root = env.storage.getRoot<TestStoredObject>(testTempdir.rootKey);
+  auto response = root.getRequest().send().wait(env.io.waitScope);
+  auto value = response.getValue();
+  KJ_EXPECT(value.getText() == "bar");
+
+  auto subResponse1 = value.getSub1().getRequest().send().wait(env.io.waitScope);
+  KJ_EXPECT(subResponse1.getValue().getText() == "baz");
+  auto subResponse2 = value.getSub2().getRequest().send().wait(env.io.waitScope);
+  KJ_EXPECT(subResponse2.getValue().getText() == "qux");
+}
+
+KJ_TEST("delete some children") {
+  StorageTestFixture env;
+
+  auto root = env.storage.getRoot<TestStoredObject>(testTempdir.rootKey);
+
+  {
+    auto response = root.getRequest().send().wait(env.io.waitScope);
+    auto req = response.getSetter().setRequest();
+    auto value = req.initValue();
+    value.setText("quux");
+    value.setSub1(response.getValue().getSub1());
+    // don't set sub2
+    req.send().wait(env.io.waitScope);
+
+    // TODO(test): verify that sub2 is deleted from disk somehow
+  }
+}
+
+// TODO(test): journal recovery
+// TODO(test): recursive delete
+// TODO(test): volumes
+// TODO(test): outgoing SturdyRefs
+// TODO(test): incoming SturdyRefs
 
 }  // namespace
 }  // namespace blackrock
