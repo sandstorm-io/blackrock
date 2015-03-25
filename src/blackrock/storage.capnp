@@ -178,19 +178,10 @@ interface OwnedStorage(T) {
   #
   # TODO(someday): Let caller store some petname on this?
 
-  getStats @1 () -> (totalBytes :UInt64, usedBytes :UInt64);
-  # Get total available quota and space currently used. Note that the latter can actually be greater
-  # than the former in two cases:
-  # - Some "courtesy" space is provided beyond the specified quota so that users don't lose data
-  #   if they go a little over. However, the user will be receiving dire warnings at this point and
-  #   eventually writes will start failing.
-  # - If quota is reduced to be less than the space already used, the storage system will NOT
-  #   delete anything. The user simply won't be able to write anything new until they reduce their
-  #   usage or get their quota back. This is important to make sure a mistake (e.g. a missed
-  #   payment while they're in the hospital) doesn't cause the user to immediately lose all their
-  #   data.
+  getSize @1 () -> (totalBytes :UInt64);
+  # Get the total storage space consumed by this object, including owned sub-objects.
 
-  # TODO(someday): Get / observe the total size of this object (including children). Use cases:
+  # TODO(someday): Observe the total size of this object (including children). Use cases:
   # - Track size of grain to display to user. This only needs to run on-demand.
   # - Track size of user's storage to enforce quotas. This may need to take a persistent callback
   #   capability to invoke when some watermark is reached?

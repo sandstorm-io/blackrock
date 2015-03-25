@@ -103,6 +103,8 @@ KJ_TEST("basic assignables") {
     auto response = root.getRequest().send().wait(env.io.waitScope);
     KJ_EXPECT(response.getValue().getText() == "foo");
 
+    KJ_EXPECT(root.getSizeRequest().send().wait(env.io.waitScope).getTotalBytes() == 4096);
+
     // Modify the value.
     auto req = response.getSetter().setRequest();
     auto newVal = req.initValue();
@@ -119,6 +121,8 @@ KJ_TEST("basic assignables") {
     KJ_EXPECT(subResponse1.getValue().getText() == "baz");
     auto subResponse2 = readback.getSub2().getRequest().send().wait(env.io.waitScope);
     KJ_EXPECT(subResponse2.getValue().getText() == "qux");
+
+    KJ_EXPECT(root.getSizeRequest().send().wait(env.io.waitScope).getTotalBytes() == 4096 * 3);
 
     promise.wait(env.io.waitScope);
   }
@@ -150,6 +154,8 @@ KJ_TEST("use after reload") {
   KJ_EXPECT(subResponse1.getValue().getText() == "baz");
   auto subResponse2 = value.getSub2().getRequest().send().wait(env.io.waitScope);
   KJ_EXPECT(subResponse2.getValue().getText() == "qux");
+
+  KJ_EXPECT(root.getSizeRequest().send().wait(env.io.waitScope).getTotalBytes() == 4096 * 3);
 }
 
 KJ_TEST("delete some children") {
@@ -165,6 +171,8 @@ KJ_TEST("delete some children") {
     value.setSub1(response.getValue().getSub1());
     // don't set sub2
     req.send().wait(env.io.waitScope);
+
+    KJ_EXPECT(root.getSizeRequest().send().wait(env.io.waitScope).getTotalBytes() == 4096 * 2);
 
     // TODO(test): verify that sub2 is deleted from disk somehow
   }

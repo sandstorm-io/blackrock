@@ -61,6 +61,12 @@ uint64_t getFileSize(int fd) {
   return stats.st_size;
 }
 
+uint64_t getFileBlockCount(int fd) {
+  struct stat stats;
+  KJ_SYSCALL(fstat(fd, &stats));
+  return (stats.st_blocks * 512 + Volume::BLOCK_SIZE - 1) / Volume::BLOCK_SIZE;
+}
+
 uint64_t getFilePosition(int fd) {
   off_t offset;
   KJ_SYSCALL(offset = lseek(fd, 0, SEEK_CUR));
@@ -345,8 +351,10 @@ public:
       journal.cacheDropQueue.push({cache.lastUpdate, entry.objectId});
     }
 
-    void moveToDeathRow(ObjectId id) {
+    uint64_t moveToDeathRow(ObjectId id) {
       // Delete an object (recursively, if it has children).
+      //
+      // Returns the number of blocks transitively erased.
 
       KJ_REQUIRE(journal.txInProgress, "transaction already committed");
 
@@ -358,11 +366,24 @@ public:
       entry.objectId = id;
 
       // Update cache.
-      journal.cache.erase(id);
       CacheEntry& cache = journal.cache[id];
+      bool isNew = cache.location == CacheEntry::Location::UNDEFINED;
       cache.lastUpdate = journal.journalEnd + entries.size() * sizeof(Entry);
       cache.location = CacheEntry::Location::DELETED;
       journal.cacheDropQueue.push({cache.lastUpdate, entry.objectId});
+
+      if (isNew) {
+        // I guess we have to open this file to get the transitive size.
+        memset(&cache.xattr, 0, sizeof(cache.xattr));
+        KJ_IF_MAYBE(fd, journal.storage.openObject(id)) {
+          KJ_SYSCALL(fgetxattr(*fd, Xattr::NAME, &cache.xattr, sizeof(cache.xattr)));
+        } else {
+          // Apparently this object isn't on disk. Don't assert-fail because it will bring down
+          // the server since we're in the middle of a transaction.
+          KJ_LOG(ERROR, "asked to delete object that doesn't exist?");
+        }
+      }
+      return cache.xattr.transitiveBlockCount;
     }
 
     kj::Promise<void> commit() {
@@ -474,6 +495,9 @@ private:
 
   struct CacheEntry {
     enum class Location :uint8_t {
+      UNDEFINED,
+      // Indicates a blank cache entry.
+
       NORMAL,
       // The file -- if it exists -- is in its normal location.
 
@@ -485,7 +509,7 @@ private:
       // The file has been deleted, but may still be present on disk.
     };
 
-    Location location = Location::NORMAL;
+    Location location = Location::UNDEFINED;
 
     uint64_t lastUpdate;
     // Offset in the journal of the last update to this object. We may discard the cache entry
@@ -750,6 +774,8 @@ public:
   StorageFactory::Client getFactoryClient() { return factoryCap; }
 
   void modifyTransitiveSize(ObjectId id, int64_t deltaBlocks, Journal::Transaction& txn);
+  // Update the transitive size of the given object and its parents, adding `deltaBlocks` to each.
+  // Call this when a new child was added.
 
 private:
   Journal& journal;
@@ -869,8 +895,10 @@ public:
 
     const ObjectId& getId() const { return object.getId(); }
 
-    void commit(ObjectId owner, Journal::Transaction& transaction) {
+    uint64_t commit(ObjectId owner, Journal::Transaction& transaction) {
       // Add an operation to the transaction which officially adopts this object.
+      //
+      // Returns the transitive block count just adopted.
 
       KJ_ASSERT(!committed);
       committed = true;
@@ -880,15 +908,17 @@ public:
 
       auto& data = KJ_ASSERT_NONNULL(object.currentData);
 
+      for (auto& adoption: data.transitiveAdoptions) {
+        object.xattr.transitiveBlockCount += adoption.commit(object.id, transaction);
+      }
+      data.transitiveAdoptions = nullptr;
+
       // Currently, only adopting of newly-created objects is allowed, so we know data.fd is a
       // temp file, and we should call updateObject() here. Later, when we support ownership
       // transfers, this may not be true.
       transaction.updateObject(object.id, object.xattr, data.fd);
 
-      for (auto& adoption: data.transitiveAdoptions) {
-        adoption.commit(object.id, transaction);
-      }
-      data.transitiveAdoptions = nullptr;
+      return object.xattr.transitiveBlockCount;
     }
 
   private:
@@ -982,7 +1012,7 @@ protected:
             auto& childId = child.object.getId();
             bool isNew = newChildren.insert(childId).second;
             if (oldChildren.count(childId)) {
-              // We had this child before, so don't disown it.
+              // We had this child before, and we still have it. Don't disown it.
               disowned.erase(childId);
             } else {
               // We didn't have this child before, so we need to adopt it if we haven't already.
@@ -1027,6 +1057,8 @@ protected:
       newData.storedObjectWords = getFilePosition(newData.fd) / sizeof(capnp::word) -
                                   newData.storedChildIdsWords;
 
+      uint64_t newBlockCount = getFileBlockCount(newData.fd);
+
       if (state == COMMITTED) {
         // This object is already in the tree, so any other objects it adopted are now becoming
         // part of the tree. It's time to commit a transaction adding them.
@@ -1034,13 +1066,26 @@ protected:
         // Create the transaction.
         Journal::Transaction txn(journal);
 
-        txn.updateObject(id, xattr, newData.fd);
+        int64_t deltaBlocks = newBlockCount - xattr.accountedBlockCount;
+
         for (auto& adoption: adoptions) {
-          adoption.commit(id, txn);
+          deltaBlocks += adoption.commit(id, txn);
         }
         for (auto& disown: disowned) {
-          txn.moveToDeathRow(disown);
+          deltaBlocks -= txn.moveToDeathRow(disown);
         }
+
+        if (deltaBlocks < 0 && -deltaBlocks > xattr.transitiveBlockCount) {
+          KJ_LOG(ERROR, "storage object had inconsistent transitive block count",
+              deltaBlocks, xattr.transitiveBlockCount);
+          deltaBlocks = -xattr.transitiveBlockCount;
+        }
+
+        xattr.accountedBlockCount = newBlockCount;
+        xattr.transitiveBlockCount += deltaBlocks;
+        txn.updateObject(id, xattr, newData.fd);
+
+        factory->modifyTransitiveSize(xattr.owner, deltaBlocks, txn);
 
         // Update currentData to reflect the transaction before closing it out.
         currentData = kj::mv(newData);
@@ -1058,6 +1103,10 @@ protected:
         // Update currentData to reflect changes.
         currentData = kj::mv(newData);
         commitedSetSeqnum = seqnum;
+
+        // We don't bother counting child size until we're committed to disk.
+        xattr.accountedBlockCount = newBlockCount;
+        xattr.transitiveBlockCount = newBlockCount;
 
         return kj::READY_NOW;
       }
@@ -1102,16 +1151,16 @@ protected:
     context.initResults(size).setValue(payload);
   }
 
-  void updateSize(uint64_t size) {
-    // Indicate that the size of the object (in bytes) is now `size`. If this is a change from the
+  void updateSize(uint64_t blocks) {
+    // Indicate that the size of the object (in blocks) is now `size`. If this is a change from the
     // accounted size, arrange to update the accounted size for this object and all parent zones.
 
-    uint64_t blocks = size / Volume::BLOCK_SIZE;
     KJ_ASSERT(blocks <= uint32_t(kj::maxValue), "file too big");
 
     if (blocks != xattr.accountedBlockCount) {
       int64_t delta = blocks - xattr.accountedBlockCount;
       Journal::Transaction txn(journal);
+      xattr.accountedBlockCount = blocks;
       factory->modifyTransitiveSize(id, delta, txn);
       txn.commit();
     }
@@ -1133,6 +1182,10 @@ protected:
       currentData = kj::mv(data);
       return result;
     }
+  }
+
+  uint64_t getSizeImpl() {
+    return xattr.transitiveBlockCount * Volume::BLOCK_SIZE;
   }
 
 private:
@@ -1260,6 +1313,11 @@ public:
   using ObjectBase::setStoredObject;
   // Make public for Assignable so that StorageFactory can call this to initialize it.
 
+  kj::Promise<void> getSize(GetSizeContext context) override {
+    context.getResults().setTotalBytes(getSizeImpl());
+    return kj::READY_NOW;
+  }
+
   kj::Promise<void> get(GetContext context) override {
     context.releaseParams();
     getStoredObject(context);
@@ -1308,6 +1366,11 @@ class FilesystemStorage::VolumeImpl: public OwnedVolume::Server, public ObjectBa
 public:
   static constexpr Type TYPE = Type::VOLUME;
   using ObjectBase::ObjectBase;
+
+  kj::Promise<void> getSize(GetSizeContext context) override {
+    context.getResults().setTotalBytes(getSizeImpl());
+    return kj::READY_NOW;
+  }
 
   kj::Promise<void> read(ReadContext context) override {
     auto params = context.getParams();
@@ -1386,10 +1449,7 @@ private:
 
     counter += count;
     if (counter > 128) {
-      struct stat stats;
-      KJ_SYSCALL(fstat(openRaw(), &stats));
-      uint64_t size = stats.st_blocks * 512u;
-      updateSize(size);
+      updateSize(getFileBlockCount(openRaw()));
       counter = 0;
     }
   }
