@@ -9,6 +9,7 @@
 #include <blackrock/storage.capnp.h>
 #include <blackrock/fs-storage.capnp.h>
 #include <kj/io.h>
+#include <sodium/utils.h>
 
 namespace kj {
   class UnixEventPort;
@@ -30,6 +31,9 @@ public:
     ObjectKey() = default;
     ObjectKey(StoredObjectKey::Reader reader)
         : key { reader.getKey0(), reader.getKey1(), reader.getKey2(), reader.getKey3() } {}
+    ~ObjectKey() {
+      sodium_memzero(key, sizeof(key));
+    }
 
     static ObjectKey generate();
 

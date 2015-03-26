@@ -937,6 +937,8 @@ protected:
     uint seqnum = nextSetSeqnum++;
 
     // Start constructing the message to write to disk, copying over the input.
+    // TODO(security): Protect encryption keys in this message by zeroing it in the destructor.
+    //   Also, make sure the RPC system zeros plaintext of messages when encryption is used.
     auto message = kj::refcounted<RefcountedMallocMessageBuilder>();
     auto root = message->getRoot<StoredObject>();
     root.getPayload().set(value);
