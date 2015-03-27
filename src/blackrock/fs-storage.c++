@@ -73,26 +73,6 @@ uint64_t getFilePosition(int fd) {
   return offset;
 }
 
-kj::AutoCloseFd newEventFd(uint value, int flags) {
-  int fd;
-  KJ_SYSCALL(fd = eventfd(0, flags));
-  return kj::AutoCloseFd(fd);
-}
-
-uint64_t readEvent(int fd) {
-  ssize_t n;
-  uint64_t result;
-  KJ_SYSCALL(n = read(fd, &result, sizeof(result)));
-  KJ_ASSERT(n == 8, "wrong-sized read from eventfd", n);
-  return result;
-}
-
-void writeEvent(int fd, uint64_t value) {
-  ssize_t n;
-  KJ_SYSCALL(n = write(fd, &value, sizeof(value)));
-  KJ_ASSERT(n == 8, "wrong-sized write on eventfd", n);
-}
-
 template <typename T>
 kj::Array<T> removeNulls(kj::Array<kj::Maybe<T>> array) {
   size_t count = 0;
@@ -663,7 +643,9 @@ private:
         __atomic_store_n(&journalExecuted, position, __ATOMIC_RELAXED);
 
         if (holeStart < holeEnd) {
-          KJ_SYSCALL(fallocate(journalFd, FALLOC_FL_PUNCH_HOLE, holeStart, holeEnd - holeStart));
+          KJ_SYSCALL(fallocate(journalFd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
+                               holeStart, holeEnd - holeStart),
+                     holeStart, holeEnd);
         }
       }
 
@@ -1369,6 +1351,10 @@ public:
   static constexpr Type TYPE = Type::VOLUME;
   using ObjectBase::ObjectBase;
 
+  void init() {
+    openRaw();
+  }
+
   kj::Promise<void> getSize(GetSizeContext context) override {
     context.getResults().setTotalBytes(getSizeImpl());
     return kj::READY_NOW;
@@ -1418,13 +1404,13 @@ public:
     context.releaseParams();
 
     KJ_REQUIRE(blockNum + count < (1ull << 32), "volume write overflow");
-    KJ_REQUIRE(count < 2048, "can't read over 8MB from a volume per call");
 
     uint64_t offset = blockNum * Volume::BLOCK_SIZE;
     uint size = count * Volume::BLOCK_SIZE;
 
     int fd = openRaw();
-    KJ_SYSCALL(fallocate(fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, offset, size));
+    KJ_SYSCALL(fallocate(fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, offset, size),
+               offset, size);
 
     maybeUpdateSize(count);
 
@@ -1466,7 +1452,9 @@ public:
   explicit StorageFactoryImpl(ObjectFactory& factory): factory(factory) {}
 
   kj::Promise<void> newVolume(NewVolumeContext context) override {
-    context.getResults().setVolume(factory.newObject<VolumeImpl>().client);
+    auto result = factory.newObject<VolumeImpl>();
+    result.object.init();
+    context.getResults().setVolume(kj::mv(result.client));
     return kj::READY_NOW;
   }
 

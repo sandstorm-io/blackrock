@@ -6,6 +6,8 @@
 #define BLACKROCK_COMMON_H_
 
 #include <kj/common.h>
+#include <kj/io.h>
+#include <inttypes.h>
 
 namespace blackrock {
 
@@ -21,6 +23,11 @@ namespace blackrock {
 
 using kj::uint;
 using kj::byte;
+
+kj::AutoCloseFd newEventFd(uint value, int flags);
+uint64_t readEvent(int fd);
+void writeEvent(int fd, uint64_t value);
+// TODO(cleanup): Find a better home for these.
 
 }  // namespace blackrock
 
