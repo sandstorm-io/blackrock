@@ -62,13 +62,23 @@ struct NbdVolumeAdapter::ReplyAndIovec {
   struct nbd_reply reply;
 
   ReplyAndIovec(kj::Array<capnp::Response<Volume::ReadResults>> responsesParam,
-                RequestHandle handle)
+                RequestHandle handle, uint startPad, uint endPad)
       : responses(kj::mv(responsesParam)),
         iov(kj::heapArray<kj::ArrayPtr<const byte>>(responses.size() + 1)) {
     iov[0] = kj::arrayPtr(&reply, 1).asBytes();
     for (uint i: kj::indices(responses)) {
       iov[i + 1] = responses[i].getData();
     }
+
+    if (startPad != 0) {
+      auto piece = iov[1];
+      iov[1] = piece.slice(startPad, piece.size());
+    }
+    if (endPad != 0) {
+      auto piece = iov.back();
+      iov.back() = piece.slice(0, piece.size() - endPad);
+    }
+
     reply.magic = htonl(NBD_REPLY_MAGIC);
     reply.error = 0;
     memcpy(reply.handle, handle.handle, sizeof(handle.handle));
@@ -81,30 +91,38 @@ kj::Promise<void> NbdVolumeAdapter::run() {
     KJ_ASSERT(ntohl(request.magic) == NBD_REQUEST_MAGIC);
     switch (ntohl(request.type)) {
       case NBD_CMD_READ: {
-        uint64_t offset = ntohll(request.from);
-        uint32_t size = ntohl(request.len);
-        KJ_ASSERT(offset % Volume::BLOCK_SIZE == 0);
-        KJ_ASSERT(size % Volume::BLOCK_SIZE == 0);
-        uint64_t blockNum = offset / Volume::BLOCK_SIZE;
-        uint32_t count = size / Volume::BLOCK_SIZE;
+        // Unfortunately, NBD sometimes receives read requests that are not block-aligned. For
+        // example, on mount, it receives a request for the first 1024 bytes of the volume.
+        uint64_t startByte = ntohll(request.from);
+        uint64_t endByte = startByte + ntohl(request.len);
+        uint32_t startBlock = startByte / Volume::BLOCK_SIZE;
+        uint32_t startPad = startByte % Volume::BLOCK_SIZE;
+        uint32_t endBlock = endByte / Volume::BLOCK_SIZE;
+        uint32_t endPad = endByte % Volume::BLOCK_SIZE;
+        if (endPad != 0) {
+          endPad = Volume::BLOCK_SIZE - endPad;
+          ++endBlock;
+        }
+
+        uint32_t blockCount = endBlock - startBlock;
 
         // Split into requests of no more than the maximum size.
-        uint reqCount = (count + (MAX_RPC_BLOCKS - 1)) / MAX_RPC_BLOCKS;
+        uint reqCount = (blockCount + (MAX_RPC_BLOCKS - 1)) / MAX_RPC_BLOCKS;
         auto promises =
             kj::heapArrayBuilder<kj::Promise<capnp::Response<Volume::ReadResults>>>(reqCount);
         for (uint i = 0; i < reqCount; i++) {
           auto req = volume.readRequest();
           uint o = i * MAX_RPC_BLOCKS;
-          req.setBlockNum(blockNum + o);
-          req.setCount(kj::min(count - o, MAX_RPC_BLOCKS));
+          req.setBlockNum(startBlock + o);
+          req.setCount(kj::min(blockCount - o, MAX_RPC_BLOCKS));
           promises.add(req.send());
         }
 
         // Send all requests and handle responses.
         RequestHandle reqHandle = request.handle;
         tasks.add(kj::joinPromises(promises.finish())
-            .then([this,reqHandle](auto responses) {
-          auto reply = kj::heap<ReplyAndIovec>(kj::mv(responses), reqHandle);
+            .then([this,reqHandle,startPad,endPad](auto responses) {
+          auto reply = kj::heap<ReplyAndIovec>(kj::mv(responses), reqHandle, startPad, endPad);
           replyQueue = replyQueue.then([this,KJ_MVCAP(reply)]() mutable {
             auto promise = socket->write(reply->iov);
             return promise.attach(kj::mv(reply));
@@ -115,7 +133,6 @@ kj::Promise<void> NbdVolumeAdapter::run() {
         return run();
       }
       case NBD_CMD_WRITE: {
-        // TODO(soon): Check for blocks full of zeros and convert to zero()?
         auto req = volume.writeRequest();
         uint64_t offset = ntohll(request.from);
         uint32_t size = ntohl(request.len);
@@ -126,12 +143,47 @@ kj::Promise<void> NbdVolumeAdapter::run() {
 
         RequestHandle reqHandle = request.handle;
         return socket->read(data.begin(), data.size())
-            .then([this,reqHandle,KJ_MVCAP(req)]() mutable {
-          tasks.add(req.send().then([this,reqHandle](auto resp) {
-            reply(reqHandle);
-          }, [this,reqHandle](kj::Exception&& e) {
-            replyError(reqHandle, kj::mv(e), "write");
-          }));
+            .then([this,reqHandle,data,KJ_MVCAP(req)]() mutable {
+          // Check if the data is all-zero.
+          bool allZero = true;
+          for (const uint64_t* ptr = reinterpret_cast<uint64_t*>(data.begin()),
+               *end = reinterpret_cast<uint64_t*>(data.end());
+               ptr < end; ++ptr) {
+            if (*ptr != 0) {
+              allZero = false;
+              break;
+            }
+          }
+
+          if (allZero) {
+            // Oh, this write is just zeros. Convert it to a zero() call instead. This optimization
+            // alone drastically cuts the initial size of an ext4 filesystem and also works around
+            // many databases aggressively preallocating space.
+            //
+            // TODO(perf): What if a large write has many pages of zeros interleaved with non-zero
+            //   pages? Do we want to break it up into some writes and some zeros? This would
+            //   fragment the request and also possibly fragment the storage. To avoid fragmenting
+            //   the request, we might want to do this detection server-side, or attach a list of
+            //   hints on the client side. Fragmenting the disk might not be worth it, though.
+            //
+            // TODO(perf): Apparently the Linux kernel supports block drivers informing it that
+            //   TRIMed bytes will be read back as zeros, and ext4 takes advantage of this.
+            //   NBD doesn't appear to have a way to set this. Maybe we should tweak the driver?
+            auto req2 = volume.zeroRequest();
+            req2.setBlockNum(req.getBlockNum());
+            req2.setCount(data.size() / Volume::BLOCK_SIZE);
+            tasks.add(req2.send().then([this,reqHandle](auto resp) {
+              reply(reqHandle);
+            }, [this,reqHandle](kj::Exception&& e) {
+              replyError(reqHandle, kj::mv(e), "zero");
+            }));
+          } else {
+            tasks.add(req.send().then([this,reqHandle](auto resp) {
+              reply(reqHandle);
+            }, [this,reqHandle](kj::Exception&& e) {
+              replyError(reqHandle, kj::mv(e), "write");
+            }));
+          }
           return run();
         });
       }
@@ -209,7 +261,7 @@ NbdDevice::NbdDevice() {
   uint step = randombytes_uniform(MAX_NBDS);
   for (uint i = 0; i < MAX_NBDS; i++) {
     kj::String tryPath = kj::str("/dev/nbd", index);
-    auto tryFd = sandstorm::raiiOpen(tryPath, O_RDWR);
+    auto tryFd = sandstorm::raiiOpen(tryPath, O_RDWR | O_CLOEXEC);
 
     // Try to lock the file.
     int flockResult;
@@ -233,10 +285,19 @@ NbdDevice::NbdDevice() {
 void NbdDevice::resetAll() {
   for (uint i = 0; i < MAX_NBDS; i++) {
     auto devname = kj::str("/dev/nbd", i);
-    KJ_DBG("killing", devname);
-    auto fd = sandstorm::raiiOpen(devname, O_RDWR);
+    KJ_LOG(WARNING, "killing nbd device", devname);
+    auto fd = sandstorm::raiiOpen(devname, O_RDWR | O_CLOEXEC);
+    int flockResult;
+    KJ_NONBLOCKING_SYSCALL(flockResult = flock(fd, LOCK_EX | LOCK_NB));
+    if (flockResult < 0) {
+      KJ_LOG(WARNING, "device still locked", devname);
+    }
     KJ_SYSCALL(ioctl(fd, NBD_CLEAR_SOCK));
   }
+}
+
+void NbdDevice::loadKernelModule() {
+  sandstorm::Subprocess({"modprobe", "nbd", kj::str("nbds_max=", MAX_NBDS)}).waitForSuccess();
 }
 
 // =======================================================================================

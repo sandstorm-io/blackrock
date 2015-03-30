@@ -63,6 +63,9 @@ public:
   //
   // THIS WILL BREAK EVERYTHING CURRENTLY USING ANY NBD DEVICE.
 
+  static void loadKernelModule();
+  // Make sure the NBD kernel module is loaded.
+
 private:
   kj::String path;
   kj::AutoCloseFd fd;

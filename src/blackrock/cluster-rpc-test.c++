@@ -54,9 +54,7 @@ struct TestEnv {
         waitScope(ioContext.waitScope),
         start(ioContext.provider->getTimer().now()) {}
 
-  ~TestEnv() {
-    KJ_DBG((ioContext.provider->getTimer().now() - start) / kj::MICROSECONDS);
-  }
+  ~TestEnv() {}
 
   void sendMessage(VatNetwork::Connection& conn, kj::StringPtr text) {
     auto msg = conn.newOutgoingMessage(32);

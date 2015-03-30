@@ -1602,20 +1602,21 @@ StorageFactory::Client FilesystemStorage::getFactory() {
 }
 
 kj::Maybe<kj::AutoCloseFd> FilesystemStorage::openObject(ObjectId id) {
-  return sandstorm::raiiOpenAtIfExists(mainDirFd, id.filename('o').begin(), O_RDWR);
+  return sandstorm::raiiOpenAtIfExists(mainDirFd, id.filename('o').begin(), O_RDWR | O_CLOEXEC);
 }
 
 kj::Maybe<kj::AutoCloseFd> FilesystemStorage::openStaging(uint64_t number) {
   auto name = hex64(number);
-  return sandstorm::raiiOpenAtIfExists(stagingDirFd, fixedStr(name), O_RDWR);
+  return sandstorm::raiiOpenAtIfExists(stagingDirFd, fixedStr(name), O_RDWR | O_CLOEXEC);
 }
 
 kj::AutoCloseFd FilesystemStorage::createObject(ObjectId id) {
-  return sandstorm::raiiOpenAt(mainDirFd, id.filename('o').begin(), O_RDWR | O_CREAT | O_EXCL);
+  return sandstorm::raiiOpenAt(mainDirFd, id.filename('o').begin(),
+                               O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC);
 }
 
 kj::AutoCloseFd FilesystemStorage::createTempFile() {
-  return sandstorm::raiiOpenAt(mainDirFd, ".", O_RDWR | O_TMPFILE);
+  return sandstorm::raiiOpenAt(mainDirFd, ".", O_RDWR | O_TMPFILE | O_CLOEXEC);
 }
 
 void FilesystemStorage::linkTempIntoStaging(uint64_t number, int fd, const Xattr& xattr) {
