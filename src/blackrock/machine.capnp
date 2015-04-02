@@ -8,6 +8,7 @@ $import "/capnp/c++.capnp".namespace("blackrock");
 
 using ClusterRpc = import "cluster-rpc.capnp";
 using Storage = import "storage.capnp";
+using StorageSchema = import "storage-schema.capnp";
 using Worker = import "worker.capnp";
 using Util = import "/sandstorm/util.capnp";
 
@@ -79,19 +80,19 @@ interface Machine {
                     hostedRestorers :Collection(Restorer(SturdyRef.Hosted)).Cursor,
                     gatewayRestorers :Collection(Restorer(SturdyRef.Stored)).Cursor)
                 -> (sibling :Storage.StorageSibling,
-                    root :Storage.Assignable(Storage.StorageRoot),
+                    root :Storage.Assignable(StorageSchema.StorageRoot),
                     storageRestorer :MasterRestorer(SturdyRef.Stored));
   becomeWorker @1 () -> (worker :Worker.Worker);
   becomeCoordinator @2 (workers :Collection(Worker.Worker).Observer,
                         storageRestorers :Collection(Restorer(SturdyRef.Stored)).Cursor)
                     -> (coordinator :Worker.Coordinator,
                         hostedRestorer :MasterRestorer(SturdyRef.Hosted));
-  becomeGateway @3 (storage :Storage.Assignable(Storage.GatewayStorage),
+  becomeGateway @3 (storage :Storage.Assignable(StorageSchema.GatewayStorage),
                     storageRestorers :Collection(Restorer(SturdyRef.Stored)).Cursor,
                     frontends :Collection(Frontend).Observer)
                 -> (gateway :Gateway,
                     externalRestorer :MasterRestorer(SturdyRef.External));
-  becomeFrontend @4 (userStorage :Storage.Assignable(Storage.Collection(Storage.AccountStorage)),
+  becomeFrontend @4 (userStorage :Storage.Assignable(Storage.Collection(StorageSchema.AccountStorage)),
                      storageRestorers :Collection(Restorer(SturdyRef.Stored)).Cursor,
                      hostedRestorers :Collection(Restorer(SturdyRef.Hosted)).Cursor,
                      mongo :Collection(Mongo).Observer)

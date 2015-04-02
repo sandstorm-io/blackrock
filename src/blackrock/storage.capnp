@@ -98,36 +98,85 @@ struct Box(T) {
 }
 
 interface Collection(T) {
-  # Use cases:
-  # - Read all.
-  # - Insert.
-  # - Get slot as Assignable.
-  # - Observe changes.
-  # - Set up index.
+  # A collection of values of type T.
+  #
+  # T must be an OwnedStorage type. Items in a collection have no notion of a "primary key" -- the
+  # capability itself is the key.
 
-  insert @0 (value :T) -> (slot :Assignable(T));
+  insert @0 (value :T);
+  # Add an item to the collection.
+  #
+  # Keep in mind that because the item must be an OwnedStorage derivative, either it must be a
+  # newly-created object or this `insert()` must be performed as part of a transaction.
 
-  getAll @1 () -> (cursor :Cursor);
+  remove @1 (value :T);
+  # Remove an item from the collection.
 
-  makeIndex @2 [Key] (selector :Function(T, Key)) -> (index :Index(Key));
+  getAll @2 () -> (cursor :Cursor);
+  # Query all items in the set, returned in arbitrary order.
 
-  interface Index(Key) $persistent {
-    getMatching @0 (key :Key) -> (cursor :Cursor);
-    getRange @1 (start :Key, end :Key) -> (cursor :Cursor);
+  makeIndex @3 [Key] (selector :Function(T, Key)) -> (index :OwnedIndex(Key));
+  # Make an index allowing an item to be looked up by key. This index does not allow range queries;
+  # only equality. The index is probably backed by a hashtable. The index is automatically updated
+  # when items are inserted, removed, or modified in a way that changes the key.
+
+  makeOrderedIndex @4 [Key] (selector :Function(T, Key)) -> (index :OwnedOrderedIndex(Key));
+  # Make an index allowing ordered ranges of items to be queried. For example, you could index on
+  # timestamp in order to get chronological lists of items, or you could order on titles to get
+  # alphabetical lists. The index is probably backed by a b-tree. The index is automatically
+  # updated when items are inserted, removed, or modified in a way that changes the key.
+
+  interface Index(Key) {
+    find @0 (key :Key) -> (value :T);
+    # Look up the value matching `key`. `value` is null if there was no match.
+  }
+  interface OrderedIndex(Key) extends(Index(Key)) {
+    findRange @0 (start :Key, end :Key) -> (cursor :Cursor);
+    # Get a cursor over a range of values. The values will be sorted by key. To sort in descending
+    # order, reverse `start` and `end`.
   }
 
+  interface OwnedIndex(Key) extends (Index(Key), OwnedStorage(Index(Key))) {}
+  interface OwnedOrderedIndex(Key) extends (OrderedIndex(Key), OwnedStorage(OrderedIndex(Key))) {}
+
   interface Cursor {
+    # Represents a stream of results of a query.
+
     getNext @0 (count :UInt32) -> (elements :List(Box(T)));
-    getAll @1 () -> (elements :List(Box(T)));
-    getOne @2 () -> (value :T);
-    skip @3 (count :UInt64);
-    count @4 () -> (count :UInt64);
-    observeChanges @5 () -> (observer :Observer);
+    # Get the next `count` items, or fewer if the end of the stream is reached.
+    #
+    # Hint: Set `count` to a very large number to read the whole collection at once, but keep in
+    #   mind that RPC messages have a maximum size so this won't work on large data sets.
+
+    skip @1 (count :UInt64);
+    # Skip `count` items in the stream.
+
+    count @2 () -> (count :UInt64);
+    # Count the number of items remaining in the stream. This also advances the cursor to the end
+    # of the stream, so you'll need to start a new query if you wanted to read any of the items.
+
+    observeChanges @3 (observer :Observer) -> (handle :Util.Handle);
+    # Begin observing insertions and removals that match the query which created this cursor,
+    # starting from the set of items that have already been read, skipped, or counted through this
+    # cursor. That is, if `observeChanges()` is the first call you make on a cursor, then the
+    # observer will immediately receive a series of `inserted()` calls for all existing items
+    # matching the query. On the other hand, if you first traverse over all the items using other
+    # methods, then call `observeChanges()` last, you'll only receive notifications relative to
+    # what you already saw.
+    #
+    # Either way, after `observeChanges()` is called, other methods will behave as if the cursor
+    # has already seeked to the end of the stream.
+    #
+    # If `observer` is persistent, `handle` is persistent, meaning you can observe changes to this
+    # collection over the long haul.
   }
 
   interface Observer {
-    inserted @0 (value :T);
-    removed @1 (value :T);
+    inserted @0 (values :List(Box(T)));
+    # One or more items have been inserted into the collection.
+
+    removed @1 (values :List(Box(T)));
+    # One or more items have been removed from the collection.
   }
 }
 
@@ -181,6 +230,17 @@ interface OwnedStorage(T) {
   getSize @1 () -> (totalBytes :UInt64);
   # Get the total storage space consumed by this object, including owned sub-objects.
 
+  disconnectAllClients @2 () -> (self :OwnedStorage(T));
+  # Causes all outstanding capabilities to this object -- including this one -- to immediately
+  # begin throwing DISCONNECTED exceptions from all methods. The method returns a new capability
+  # to this object which is not disconnected. Additionally, it is possible for other clients to
+  # restore access by re-loading the parent object and getting a new capability through it.
+  #
+  # The purpose of this method is to effectively implement STONITH ("Shoot The Other Node In The
+  # Head"). For example, it's unsafe to restart a grain on a new worker node when it might still
+  # be running and connected to storage elsewhere. If the old node is not responding to requests
+  # to kill the grain, it may be necessary to disconnect it forcefully.
+
   # TODO(someday): Observe the total size of this object (including children). Use cases:
   # - Track size of grain to display to user. This only needs to run on-demand.
   # - Track size of user's storage to enforce quotas. This may need to take a persistent callback
@@ -220,8 +280,12 @@ interface StorageFactory {
   newAssignable @4 [T] (initialValue :T) -> (assignable :OwnedAssignable(T));
   # Create a new assignable slot, the value of which can be changed over time.
 
-  newCollection @5 [T] () -> (collection :OwnedCollection(T));
-  # Create a new collection.
+  newAssignableCollection @5 [T] () -> (collection :OwnedCollection(OwnedAssignable(T)));
+  newImmutableCollection @8 [T] () -> (collection :OwnedCollection(OwnedImmutable(T)));
+  # Create a new collection of assignable or immutable values. The performance characteristics of
+  # these two may differ; assignable collections are optimized to allow item sizes to change,
+  # whereas immutable collections are not. This affects things like allocation strategies and
+  # indexing complexity.
 
   newOpaque @6 [T] (object :OwnedStorage(T)) -> (opaque :OwnedStorage(Opaque));
   # Create an opaque object wrapping some other object.
@@ -237,38 +301,30 @@ interface Transaction {
   # Commit the transaction atomically. Throws a DISCONNECTED exception if the transaction has been
   # invalidated by concurrent writes.
 
-  set @1 [T] (assignable :Util.Assignable(T).Setter, value :T);
-  # Set the given assignable as part of the transaction. If the setter is implementing optimistic
-  # concurrency, the entire transaction will fail if the assignable has been modified concurrently.
-
-  # TODO(someday): Collection modifications.
-}
-
-# ========================================================================================
-# Main storage schemas for Blackrock.
-#
-# TODO(cleanup): Maybe this belongs in a different file? It's more "private" than most of the
-#   stuff here.
-
-struct StorageRoot {
-  # The root of the storage system is an Assignable(StorageRoot).
-
-  # TODO(someday):
-  # - Collection of users.
-  # - Collection of apps.
-  # - Gateway storage.
-  # - Others?
-}
-
-struct AccountStorage {
-  # TODO(someday):
-  # - Basic metadata.
-  # - Quota etc.
-  # - Opaque collection of owned grains.
-  # - Opaque collection of received capabilities.
-}
-
-struct GatewayStorage {
-  # TODO(someday):
-  # - Incoming and outgoing SturdyRefs.
+  getTransactional @1 [T] (object :T) -> (transactionalObject :T);
+  # Given any storage object capability `object`, get an alternate version of the object where any
+  # methods called will be added to the transaction rather than executed directly. Note that any
+  # methods which cannot be executed transactionally will throw UNIMPLEMENTED exceptions.
+  #
+  # The following operations can be performed transactionally:
+  #   Assignable.get()
+  #   Assignable.Setter.set()
+  #   Collection.insert()
+  #   Collection.remove()
+  #   Collection.getAll()
+  #   Collection.Index.find()
+  #   Collection.OrderedIndex.findRange()
+  #   OwnedStorage.disconnectAllClients() (returned capability is a promise not resolved until
+  #                                        transaction is committed)
+  #
+  # The following explicitly do not support transactions:
+  #   Volumes (you must implement your own journal on top of Volume.sync(); or, more likely, use
+  #            an existing journaling filesystem)
+  #   Blob and Immutable (because there's no point)
+  #   Opaque (no methods)
+  #
+  # All methods return immediately despite not having acctually occurred yet. If any read methods
+  # (get, find) are included in the transaction, the transaction fails if the values change before
+  # the transaction is committed. The transaction may start throwing DISCONNECTED ecxeptions before
+  # `commit()` if it has already become apparent that the transaction will fail.
 }

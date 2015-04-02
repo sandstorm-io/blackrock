@@ -9,6 +9,10 @@ $import "/capnp/c++.capnp".namespace("blackrock");
 using Supervisor = import "/sandstorm/supervisor.capnp".Supervisor;
 using Grain = import "/sandstorm/grain.capnp";
 using Storage = import "storage.capnp";
+using StorageSchema = import "storage-schema.capnp";
+using Package = import "/sandstorm/package.capnp";
+
+using GrainState = StorageSchema.GrainState;
 
 using Timepoint = UInt64;
 # Nanoseconds since epoch.
@@ -16,12 +20,16 @@ using Timepoint = UInt64;
 interface Worker {
   # Top-level interface to a Sandstorm worker node, which runs apps.
 
-  newGrain @0 (package :Storage.Blob, actionIndex :UInt32, storage :Storage.StorageFactory)
+  newGrain @0 (package :PackageInfo,
+               command :Package.Manifest.Command,
+               storage :Storage.StorageFactory)
            -> (grain :HostedGrain, grainState :Storage.OwnedAssignable(GrainState));
   # Start a new grain using the given package. `actionIndex` is an index into the package's
   # manifest's action table specifying the action to run.
 
-  restoreGrain @1 (package :Storage.Blob, storage :Storage.StorageFactory,
+  restoreGrain @1 (package :PackageInfo,
+                   command :Package.Manifest.Command,
+                   storage :Storage.StorageFactory,
                    grainState :Storage.OwnedAssignable(GrainState))
                -> (grain :HostedGrain);
   # Continue an existing grain.
@@ -41,17 +49,23 @@ interface HostedGrain {
   # Kills the running grain. The next call to getMainView() or attempt to restore a capability
   # hosted by this grain will restore it.
 
-  setPackage @2 (package :Storage.Blob) -> ();
+  setPackage @2 (package :PackageInfo) -> ();
   # Switch the grain to a new package. Implies shutdown().
 
-  backup @3 () -> (package :Storage.Blob);
+  backup @3 () -> (blob :Storage.Blob);
   # Creates a zip of the grain and stores it to blob storage.
+
+  checkHealth @4 ();
+  # If the grain is operating normally, returns. Otherwise, throws an exception of type FAILED
+  # or OVERLOADED.
 }
 
 interface Coordinator {
   # Decides which workers should be running which apps.
 
-  newGrain @0 (package :Storage.Blob, actionIndex :UInt32, storage :Storage.StorageFactory)
+  newGrain @0 (package :PackageInfo,
+               command :Package.Manifest.Command,
+               storage :Storage.StorageFactory)
            -> (grain :HostedGrain, grainZone :Storage.OwnedAssignable(GrainState));
   # Create a new grain.
   #
@@ -67,20 +81,12 @@ interface Coordinator {
   #   zone in order to persist long-term.
 }
 
-struct GrainState {
-  union {
-    inactive @0 :Void;
-    # No worker is currently assigned to this grain.
+struct PackageInfo {
+  id @0 :Data;
+  # First half of SHA-256 hash of the original package file.
+  #
+  # TODO(someday): Switch to BLAKE2b?
 
-    active @1 :HostedGrain;
-    # This grain is currently running on a worker machine.
-  }
-
-  volume @2 :Storage.OwnedVolume;
-
-  savedCaps @3 :Storage.OwnedCollection(SavedCap);
-  struct SavedCap {
-    id @0 :UInt64;
-    cap @1 :AnyPointer;
-  }
+  volume @1 :Storage.Volume;
+  # Read-only volume containing the unpacked package.
 }
