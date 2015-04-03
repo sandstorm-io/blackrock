@@ -10,6 +10,7 @@ $import "/capnp/c++.capnp".namespace("blackrock");
 using Storage = import "storage.capnp";
 using OwnedAssignable = Storage.OwnedAssignable;
 using OwnedVolume = Storage.OwnedVolume;
+using Supervisor = import "/sandstorm/supervisor.capnp".Supervisor;
 
 struct StorageRoot {
   # The root of the storage system is an Assignable(StorageRoot).
@@ -43,15 +44,15 @@ struct GrainState {
     inactive @0 :Void;
     # No worker is currently assigned to this grain.
 
-    active @1 :Capability;
+    active @1 :Supervisor;
     # This grain is currently running on a worker machine.
     #
     # Upon loading the `GrainState` from storage and finding `active` is set, the first thing you
-    # should do is call `checkHealth()` on this capability. If that fails or times out, then it
-    # would appear that the worker running this grain no longer exists or is no longer responsive.
-    #
-    # TODO(cleanup): This should be type `HostedGrain` from `worker.capnp` but that seems to
-    #   create a cyclic dependency between capnp files.
+    # should do is call `keepAlive()` on this capability. If that fails or times out, then it
+    # would appear that the grain is no longer running. Now we get into a complicated situation
+    # where it's necessary to either convince the worker holding the grain to give it up or revoke
+    # that worker's access to the grain state and volume entirely, but hopefully this is
+    # infrequent.
   }
 
   volume @2 :OwnedVolume;

@@ -23,41 +23,25 @@ interface Worker {
   newGrain @0 (package :PackageInfo,
                command :Package.Manifest.Command,
                storage :Storage.StorageFactory)
-           -> (grain :HostedGrain, grainState :Storage.OwnedAssignable(GrainState));
+           -> (grain :Supervisor, grainState :Storage.OwnedAssignable(GrainState));
   # Start a new grain using the given package. `actionIndex` is an index into the package's
   # manifest's action table specifying the action to run.
 
   restoreGrain @1 (package :PackageInfo,
                    command :Package.Manifest.Command,
                    storage :Storage.StorageFactory,
-                   grainState :Storage.OwnedAssignable(GrainState))
-               -> (grain :HostedGrain);
+                   grainState :Storage.Assignable(GrainState),
+                   volume :Storage.Volume)
+               -> (grain :Supervisor);
   # Continue an existing grain.
+  #
+  # It is the caller's (coordinator's) responsibility to have updated `grainState` to take
+  # ownership of the grain before calling this. `volume` is the volume from `grainState`, but the
+  # caller must have already called `disconnectAllClients()` at the same time as it claimed the
+  # grain.
 
   # TODO(now): Enumerate grains.
   # TODO(now): Resource usage stats.
-}
-
-interface HostedGrain {
-  # "Admin" interface to a grain. Includes functionality that only the owner should be allowed to
-  # access. Holding a live reference to HostedGrain does not necessarily mean the grain is running.
-
-  getMainView @0 () -> (view :Grain.UiView);
-  # Get the grain's main UiView. Starts up the grain if it is not already started.
-
-  shutdown @1 () -> ();
-  # Kills the running grain. The next call to getMainView() or attempt to restore a capability
-  # hosted by this grain will restore it.
-
-  setPackage @2 (package :PackageInfo) -> ();
-  # Switch the grain to a new package. Implies shutdown().
-
-  backup @3 () -> (blob :Storage.Blob);
-  # Creates a zip of the grain and stores it to blob storage.
-
-  checkHealth @4 ();
-  # If the grain is operating normally, returns. Otherwise, throws an exception of type FAILED
-  # or OVERLOADED.
 }
 
 interface Coordinator {
@@ -66,7 +50,7 @@ interface Coordinator {
   newGrain @0 (package :PackageInfo,
                command :Package.Manifest.Command,
                storage :Storage.StorageFactory)
-           -> (grain :HostedGrain, grainZone :Storage.OwnedAssignable(GrainState));
+           -> (grain :Supervisor, grainState :Storage.OwnedAssignable(GrainState));
   # Create a new grain.
   #
   # Params:
@@ -77,16 +61,21 @@ interface Coordinator {
   #
   # Results:
   # `grain`: The interface to the new grain.
-  # `grainZone`: The StorageZone created using `storage`. This needs to be linked into the parent
-  #   zone in order to persist long-term.
+  # `grainState`: The storage object created using `storage`. This needs to be linked into the
+  #   parent storage in order to persist long-term.
 }
 
 struct PackageInfo {
   id @0 :Data;
-  # First half of SHA-256 hash of the original package file.
+  # Some unique identifier for this package (not assigned by the worker).
   #
-  # TODO(someday): Switch to BLAKE2b?
+  # TODO(someday): Identify packages by capability. If it's the same `Volume`, it's the same
+  #   package. This is arguably a security issue if an attacker can get access to the `Worker`
+  #   or `Coordinator` interfaces and then poison workers by forging package IDs, though no
+  #   attacker should ever have direct access to those interfaces, of course.
 
   volume @1 :Storage.Volume;
   # Read-only volume containing the unpacked package.
+  #
+  # TODO(security): Enforce read-only.
 }

@@ -324,10 +324,10 @@ NbdDevice& NbdBinding::setup(NbdDevice& device, kj::AutoCloseFd socket) {
 
 // =======================================================================================
 
-Mount::Mount(kj::StringPtr devPath, kj::StringPtr mountPoint, kj::StringPtr options)
+Mount::Mount(kj::StringPtr devPath, kj::StringPtr mountPoint, uint64_t flags, kj::StringPtr options)
     : mountPoint(kj::heapString(mountPoint)) {
   KJ_SYSCALL(mount(devPath.cStr(), mountPoint.cStr(), "ext4",
-                   MS_NODEV | MS_NOATIME | MS_NOSUID, options.cStr()));
+                   MS_NODEV | MS_NOATIME | MS_NOSUID | flags, options.cStr()));
 }
 
 Mount::~Mount() noexcept(false) {

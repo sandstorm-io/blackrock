@@ -158,7 +158,7 @@ private:
     }
 
     context.warning("mounting...");
-    Mount mount(device.getPath(), mountPoint, options);
+    Mount mount(device.getPath(), mountPoint, 0, options);
     KJ_DEFER(context.warning("unmounting..."));
 
     KJ_SYSCALL(unshare(CLONE_NEWPID));

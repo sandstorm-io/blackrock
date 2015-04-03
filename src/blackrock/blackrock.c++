@@ -11,6 +11,7 @@
 #include <sandstorm/util.h>
 #include <blackrock/machine.capnp.h>
 #include "cluster-rpc.h"
+#include "worker.h"
 
 namespace blackrock {
 
@@ -49,6 +50,7 @@ public:
                            "Starts Blackrock.")
         .addSubCommand("master", KJ_BIND_METHOD(*this, getMasterMain), "run as master node")
         .addSubCommand("slave", KJ_BIND_METHOD(*this, getSlaveMain), "run as slave node")
+        .addSubCommand("grain", KJ_BIND_METHOD(*this, getSupervisorMain), "run a supervised grain")
         .build();
   }
 
@@ -67,8 +69,14 @@ public:
         .build();
   }
 
+  kj::MainFunc getSupervisorMain() {
+    alternateMain = kj::heap<SupervisorMain>(context);
+    return alternateMain->getMain();
+  }
+
 private:
   kj::ProcessContext& context;
+  kj::Own<sandstorm::AbstractMain> alternateMain;
 
   bool runMaster() {
     auto ioContext = kj::setupAsyncIo();

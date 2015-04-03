@@ -101,7 +101,7 @@ class Mount {
   // that is executing the NbdVolumeAdapter implementing the device.
 
 public:
-  Mount(kj::StringPtr devPath, kj::StringPtr mountPoint, kj::StringPtr options);
+  Mount(kj::StringPtr devPath, kj::StringPtr mountPoint, uint64_t flags, kj::StringPtr options);
   ~Mount() noexcept(false);
 
 private:
