@@ -779,7 +779,7 @@ private:
 
 // =======================================================================================
 
-class FilesystemStorage::ObjectBase {
+class FilesystemStorage::ObjectBase: public virtual capnp::Capability::Server {
   // Base class which all persistent storage objects implement. Often accessed by first
   // unwrapping a Capability::Client into a native object and then doing dynamic_cast.
 
@@ -831,21 +831,12 @@ public:
   }
 
   capnp::Capability::Client self() {
-    return KJ_ASSERT_NONNULL(weak->get());
+    return thisCap();
   }
 
   inline const ObjectId& getId() const { return id; }
   inline const ObjectKey& getKey() const { return key; }
   inline Xattr& getXattrRef() { return xattr; }
-
-  inline capnp::Capability::Client getClient() {
-    return KJ_ASSERT_NONNULL(weak->get());
-  }
-
-  inline void setWeak(kj::Own<capnp::WeakCapability<capnp::Capability>> weak) {
-    KJ_IREQUIRE(this->weak.get() == nullptr);
-    this->weak = kj::mv(weak);
-  }
 
   class AdoptionIntent {
     // When an orphaned object is being adopted by a new owner, first the new owner has to ensure
@@ -1178,7 +1169,6 @@ private:
   ObjectKey key;
   ObjectId id;
   Xattr xattr;
-  kj::Own<capnp::WeakCapability<capnp::Capability>> weak;
 
   uint64_t nextSetSeqnum = 1;
   // Each time setStoredObject() is called, it takes a sequence number.
@@ -1305,7 +1295,7 @@ public:
   kj::Promise<void> get(GetContext context) override {
     context.releaseParams();
     getStoredObject(context);
-    context.getResults().setSetter(kj::heap<SetterImpl>(*this, self(), version));
+    context.getResults().setSetter(kj::heap<SetterImpl>(*this, thisCap(), version));
     return kj::READY_NOW;
   }
 
@@ -1564,9 +1554,7 @@ auto FilesystemStorage::ObjectFactory::registerObject(kj::Own<T> object)
   ObjectBase& base = ref;
   KJ_ASSERT(objectCache.insert(std::make_pair(base.getId(), &base)).second, "duplicate object");
 
-  auto clientAndWeak = serverSet.addWeak(kj::mv(object));
-  base.setWeak(kj::mv(clientAndWeak.weak));
-  return { kj::mv(clientAndWeak.client).template castAs<typename T::Serves>(), ref };
+  return { serverSet.add(kj::mv(object)).template castAs<typename T::Serves>(), ref };
 }
 
 // =======================================================================================
