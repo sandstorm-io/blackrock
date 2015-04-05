@@ -12,16 +12,6 @@ using OwnedAssignable = Storage.OwnedAssignable;
 using OwnedVolume = Storage.OwnedVolume;
 using Supervisor = import "/sandstorm/supervisor.capnp".Supervisor;
 
-struct StorageRoot {
-  # The root of the storage system is an Assignable(StorageRoot).
-
-  # TODO(someday):
-  # - Collection of users.
-  # - Collection of apps.
-  # - Gateway storage.
-  # - Others?
-}
-
 struct AccountStorage {
   # TODO(someday):
   # - Basic metadata.

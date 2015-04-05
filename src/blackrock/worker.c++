@@ -16,7 +16,7 @@ namespace blackrock {
 byte PackageMountSet::dummyByte = 0;
 
 PackageMountSet::PackageMountSet(kj::AsyncIoContext& ioContext)
-    : ioContext(ioContext) {}
+    : ioContext(ioContext), tasks(*this) {}
 PackageMountSet::~PackageMountSet() noexcept(false) {
   KJ_ASSERT(mounts.empty(), "PackageMountSet destroyed while packages still mounted!") { break; }
 }
@@ -38,7 +38,7 @@ auto PackageMountSet::getPackage(PackageInfo::Reader package)
         kj::LowLevelAsyncIoProvider::ALREADY_NONBLOCK);
 
     packageMount = kj::heap<PackageMount>(*this, id,
-        kj::str("/var/sandstorm/packages/", counter++), package.getVolume(),
+        kj::str("/var/blackrock/packages/", counter++), package.getVolume(),
         kj::mv(nbdUserEnd), kj::mv(nbdKernelEnd));
     slot = packageMount.get();
   } else {
@@ -49,6 +49,19 @@ auto PackageMountSet::getPackage(PackageInfo::Reader package)
   return promise.then([KJ_MVCAP(packageMount)]() mutable {
     return kj::mv(packageMount);
   });
+}
+
+void PackageMountSet::returnPackage(kj::Own<PackageMount> package) {
+  if (!package->isShared()) {
+    // This is the last reference. Keep the package mounted for at least 5 minutes to avoid
+    // purging the kernel cache if it is needed again.
+    tasks.add(ioContext.lowLevelProvider->getTimer()
+        .afterDelay(5 * kj::MINUTES).attach(kj::mv(package)));
+  }
+}
+
+void PackageMountSet::taskFailed(kj::Exception&& exception) {
+  KJ_LOG(ERROR, exception);
 }
 
 PackageMountSet::PackageMount::PackageMount(PackageMountSet& mountSet,
@@ -63,6 +76,10 @@ PackageMountSet::PackageMount::PackageMount(PackageMountSet& mountSet,
             kj::AsyncIoProvider& ioProvider,
             kj::AsyncIoStream& pipe,
             kj::WaitScope& waitScope) mutable {
+        // Make sure mount point exists, and try to remove it later.
+        mkdir(path.cStr(), 0777);
+        KJ_DEFER(rmdir(path.cStr()));
+
         // Set up NBD.
         NbdDevice device;
         NbdBinding binding(device, kj::mv(nbdKernelEnd));
@@ -116,6 +133,7 @@ class WorkerImpl::RunningGrain {
 
 public:
   RunningGrain(WorkerImpl& worker,
+               Worker::Client workerCap,
                Assignable<GrainState>::Client&& grainState,
                kj::Own<kj::AsyncIoStream> nbdSocket,
                Volume::Client volume,
@@ -125,6 +143,7 @@ public:
                kj::PromiseFulfillerPair<sandstorm::Supervisor::Client> paf =
                    kj::newPromiseAndFulfiller<sandstorm::Supervisor::Client>())
       : worker(worker),
+        workerCap(kj::mv(workerCap)),
         grainState(kj::mv(grainState)),
         packageMount(kj::mv(packageMount)),
         nbdVolume(kj::mv(nbdSocket), kj::mv(volume)),
@@ -146,6 +165,8 @@ public:
       worker.runningGrainsByPid.erase(process.getPid());
     }
     worker.runningGrains.erase(id);
+
+    worker.packageMountSet.returnPackage(kj::mv(packageMount));
   }
 
   kj::ArrayPtr<const byte> getId() { return id; }
@@ -173,6 +194,7 @@ public:
 
 private:
   WorkerImpl& worker;
+  Worker::Client workerCap;
   byte id[16];
   Assignable<GrainState>::Client grainState;
 
@@ -197,8 +219,9 @@ private:
   // after exit.
 };
 
-WorkerImpl::WorkerImpl(kj::LowLevelAsyncIoProvider& ioProvider, PackageMountSet& packageMountSet)
-    : ioProvider(ioProvider), packageMountSet(packageMountSet) {}
+WorkerImpl::WorkerImpl(kj::AsyncIoContext& ioContext)
+    : ioProvider(*ioContext.lowLevelProvider), packageMountSet(ioContext) {}
+WorkerImpl::~WorkerImpl() noexcept(false) {}
 
 kj::Maybe<sandstorm::Supervisor::Client> WorkerImpl::getRunningGrain(kj::ArrayPtr<const byte> id) {
   auto iter = runningGrains.find(id);
@@ -339,7 +362,7 @@ sandstorm::Supervisor::Client WorkerImpl::bootGrain(PackageInfo::Reader packageI
 
     // Make the RunningGrain.
     auto grain = kj::heap<RunningGrain>(
-        *this, kj::mv(grainState), kj::mv(nbdUserEnd), kj::mv(grainVolume),
+        *this, thisCap(), kj::mv(grainState), kj::mv(nbdUserEnd), kj::mv(grainVolume),
         kj::mv(capnpWorkerEnd), kj::mv(packageMount), kj::mv(options));
 
     auto supervisor = grain->getSupervisor();

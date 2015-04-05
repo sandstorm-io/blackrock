@@ -9,7 +9,8 @@ using persistent = import "/capnp/persistent.capnp".persistent;
 
 using Util = import "/sandstorm/util.capnp";
 using ByteStream = Util.ByteStream;
-using StoredObjectId = import "cluster-rpc.capnp".StoredObjectId;
+using ClusterRpc = import "cluster-rpc.capnp";
+using StoredObjectId = ClusterRpc.StoredObjectId;
 
 using Timepoint = UInt64;
 # Nanoseconds since epoch.
@@ -253,6 +254,9 @@ interface OwnedImmutable(T) extends(Immutable(T), OwnedStorage(Immutable(T))) {}
 interface OwnedAssignable(T) extends(Assignable(T), OwnedStorage(Assignable(T))) {}
 interface OwnedCollection(T) extends(Collection(T), OwnedStorage(Collection(T))) {}
 interface OwnedOpaque extends(Opaque, OwnedStorage(Opaque)) {}
+# TODO(soon): This inheritance heirarchy turns out to be unruly. It would be better to change
+#   OwnedStorage.getPersistentWeakRef() to just get() and require callers to call that in order
+#   to use the object.
 
 # ========================================================================================
 
@@ -292,6 +296,30 @@ interface StorageFactory {
 
   newTransaction @7 () -> (transaction :Transaction);
   # Start a transaction.
+}
+
+interface StorageRootSet {
+  # Manages the set of "root" objects in storage. These are objects which are logically "owned" by
+  # entities outside of the storage system (typically, the frontend's MongoDB).
+  #
+  # Root objects have names which are valid filenames. By convention, for objects corresponding
+  # to MongoDB objects, there should be "<collection-name>-<row-id>".
+  #
+  # This is meant as somewhat of a temporary solution. Long-term, storage should have a single
+  # root object which contains everything else in collections.
+
+  set @0 [T] (name :Text, object :OwnedStorage(T));
+  # Turn `object` into a root object with the given name. Overwrites any existing root with the
+  # same name (NOT ATOMIC).
+
+  get @1 [T] (name :Text) -> (object :OwnedStorage(T));
+  # Get the named root object.
+
+  remove @2 (name :Text);
+  # Recursively delete the named root object.
+
+  getFactory @3 () -> (factory :StorageFactory);
+  # Convenience.
 }
 
 interface Transaction {

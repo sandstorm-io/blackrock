@@ -37,21 +37,15 @@ UnshareTmp unshareTmp;
 
 struct TestTempdir {
   static constexpr char PATH[] = "/tmp/blackrock-fs-storage-test";
+  kj::AutoCloseFd fd;
 
   TestTempdir() {
     if (access(PATH, F_OK) >= 0) {
       sandstorm::recursivelyDelete(PATH);
     }
     KJ_SYSCALL(mkdir(PATH, 0777));
+    fd = sandstorm::raiiOpen(PATH, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
   }
-
-  kj::AutoCloseFd subdir(kj::StringPtr name) {
-    auto fullname = kj::str(PATH, '/', name);
-    mkdir(fullname.cStr(), 0777);  // ignore already-exists
-    return sandstorm::raiiOpen(fullname, O_RDONLY | O_DIRECTORY);
-  }
-
-  FilesystemStorage::ObjectKey rootKey;  // initialized in first test
 
   // We don't delete on shutdown because it's useful to poke at the files for debugging. We always
   // use the same directory so it will be deleted on the next run.
@@ -65,24 +59,24 @@ TestTempdir testTempdir;
 struct StorageTestFixture {
   StorageTestFixture()
       : io(kj::setupAsyncIo()),
-        staging(testTempdir.subdir("staging")),
-        main(testTempdir.subdir("main")),
-        deathRow(testTempdir.subdir("deathRow")),
-        journal(sandstorm::raiiOpen("/tmp", O_RDWR | O_TMPFILE)),
-        storage(staging, main, deathRow, journal,
+        storage(kj::heap<FilesystemStorage>(testTempdir.fd,
                 io.unixEventPort, io.provider->getTimer(),
-                nullptr) {}
+                nullptr)),
+        factory(storage.getFactoryRequest().send().getFactory()) {}
 
   kj::AsyncIoContext io;
   kj::AutoCloseFd staging;
   kj::AutoCloseFd main;
   kj::AutoCloseFd deathRow;
+  kj::AutoCloseFd roots;
   kj::AutoCloseFd journal;
-  FilesystemStorage storage;
+
+  StorageRootSet::Client storage;
+  StorageFactory::Client factory;
 
   template <typename InitFunc>
   OwnedAssignable<TestStoredObject>::Client newObject(InitFunc&& init) {
-    auto req = storage.getFactory().newAssignableRequest<TestStoredObject>();
+    auto req = factory.newAssignableRequest<TestStoredObject>();
     auto value = req.getInitialValue();
     init(value);
     return req.send().getAssignable();
@@ -91,15 +85,28 @@ struct StorageTestFixture {
   OwnedAssignable<TestStoredObject>::Client newTextObject(kj::StringPtr text) {
     return newObject([&](auto value) { value.setText(text); });
   }
+
+  void setRoot(kj::StringPtr name, OwnedStorage<Assignable<TestStoredObject>>::Client object) {
+    auto req = storage.setRequest<Assignable<TestStoredObject>>();
+    req.setName(name);
+    req.setObject(kj::mv(object));
+    req.send().wait(io.waitScope);
+  }
+
+  OwnedAssignable<TestStoredObject>::Client getRoot(kj::StringPtr name) {
+    auto req = storage.getRequest<Assignable<TestStoredObject>>();
+    req.setName(name);
+    return req.send().getObject().castAs<OwnedAssignable<TestStoredObject>>();
+  }
 };
 
 KJ_TEST("basic assignables") {
   StorageTestFixture env;
 
-  testTempdir.rootKey = env.storage.setRoot(env.newTextObject("foo")).wait(env.io.waitScope);
+  env.setRoot("root", env.newTextObject("foo"));
 
   {
-    auto root = env.storage.getRoot<TestStoredObject>(testTempdir.rootKey);
+    auto root = env.getRoot("root");
     auto response = root.getRequest().send().wait(env.io.waitScope);
     KJ_EXPECT(response.getValue().getText() == "foo");
 
@@ -130,7 +137,7 @@ KJ_TEST("basic assignables") {
   env.io.provider->getTimer().afterDelay(10 * kj::MILLISECONDS).wait(env.io.waitScope);
 
   {
-    auto root = env.storage.getRoot<TestStoredObject>(testTempdir.rootKey);
+    auto root = env.getRoot("root");
     auto response = root.getRequest().send().wait(env.io.waitScope);
     auto value = response.getValue();
     KJ_EXPECT(value.getText() == "bar");
@@ -145,7 +152,7 @@ KJ_TEST("basic assignables") {
 KJ_TEST("use after reload") {
   StorageTestFixture env;
 
-  auto root = env.storage.getRoot<TestStoredObject>(testTempdir.rootKey);
+  auto root = env.getRoot("root");
   auto response = root.getRequest().send().wait(env.io.waitScope);
   auto value = response.getValue();
   KJ_EXPECT(value.getText() == "bar");
@@ -161,7 +168,7 @@ KJ_TEST("use after reload") {
 KJ_TEST("delete some children") {
   StorageTestFixture env;
 
-  auto root = env.storage.getRoot<TestStoredObject>(testTempdir.rootKey);
+  auto root = env.getRoot("root");
 
   {
     auto response = root.getRequest().send().wait(env.io.waitScope);

@@ -6,12 +6,13 @@
 #include <kj/async-io.h>
 #include <capnp/rpc.h>
 #include <capnp/rpc-twoparty.h>
-#include <capnp/serialize.h>
+#include <capnp/serialize-packed.h>
 #include <sandstorm/version.h>
 #include <sandstorm/util.h>
 #include <blackrock/machine.capnp.h>
 #include "cluster-rpc.h"
 #include "worker.h"
+#include "fs-storage.h"
 
 namespace blackrock {
 
@@ -24,18 +25,44 @@ static struct sockaddr_in ip4Wildcard() {
 
 class MachineImpl: public Machine::Server {
   // TODO(security): For most become*() methods, we should probably actually spawn a child process.
+  //   (But before we do that we probably need to implement Cap'n Proto Level 3.)
 
 public:
-  kj::Promise<void> becomeWorker(BecomeWorkerContext context) override {
+  MachineImpl(kj::AsyncIoContext& ioContext): ioContext(ioContext) {}
+  ~MachineImpl() {
+    KJ_LOG(WARNING, "master disconnected");
+  }
 
+  kj::Promise<void> becomeStorage(BecomeStorageContext context) override {
+    mkdir("/var", 0777);
+    mkdir("/var/blackrock", 0777);
+    mkdir("/var/blackrock/storage", 0777);
+
+    StorageRootSet::Client storage = kj::heap<FilesystemStorage>(
+        sandstorm::raiiOpen("/var/blackrock/storage", O_RDONLY | O_DIRECTORY | O_CLOEXEC),
+        ioContext.unixEventPort, ioContext.lowLevelProvider->getTimer(), nullptr);
+    // TODO(someday): restorers, both incoming and outgoing
+    auto results = context.getResults();
+    results.setStorageFactory(storage.getFactoryRequest().send().getFactory());
+    results.setRootSet(kj::mv(storage));
+
+    return kj::READY_NOW;
+  }
+
+  kj::Promise<void> becomeWorker(BecomeWorkerContext context) override {
+    context.getResults().setWorker(kj::heap<WorkerImpl>(ioContext));
+    return kj::READY_NOW;
   }
 
 private:
+  kj::AsyncIoContext& ioContext;
 };
 
 class MasterImpl: public Master::Server {
 public:
   kj::Promise<void> addMachine(AddMachineContext context) override {
+    KJ_DBG("slave connected");
+    return kj::READY_NOW;
   }
 
 private:
@@ -83,9 +110,24 @@ private:
 
     VatNetwork network(ioContext.provider->getNetwork(),
         ioContext.provider->getTimer(), ip4Wildcard());
-    auto rpcSystem = capnp::makeRpcClient(network);
+    auto rpcSystem = capnp::makeRpcServer(network, kj::heap<MasterImpl>());
 
-    return true;
+    // Print the master path.
+    {
+      capnp::MallocMessageBuilder message;
+      message.setRoot(network.getSelf());
+
+      byte bytes[256];
+      kj::ArrayOutputStream stream(bytes);
+      capnp::writePackedMessage(stream, message);
+
+      auto text = sandstorm::base64Encode(stream.getArray(), false);
+      context.warning(kj::str("master path: ", text));
+    }
+
+    // Loop forever handling messages.
+    kj::NEVER_DONE.wait(ioContext.waitScope);
+    KJ_UNREACHABLE;
   }
 
   bool runSlave(kj::StringPtr masterAddr) {
@@ -95,21 +137,22 @@ private:
         ioContext.provider->getTimer(), ip4Wildcard());
     auto rpcSystem = capnp::makeRpcClient(network);
 
-    auto bytes = sandstorm::base64Decode(masterAddr);
-    auto words = kj::heapArray<capnp::word>(bytes.size() / 8);
-    memcpy(words.begin(), bytes.begin(), words.asBytes().size());
-    capnp::FlatArrayMessageReader masterAddrReader(words);
-    auto masterPath = masterAddrReader.getRoot<VatPath>();
+    // Decode the master path and connect to the master.
+    {
+      auto bytes = sandstorm::base64Decode(masterAddr);
+      kj::ArrayInputStream stream(bytes);
+      capnp::PackedMessageReader masterAddrReader(stream);
+      auto masterPath = masterAddrReader.getRoot<VatPath>();
 
-    auto master = rpcSystem.bootstrap(masterPath).castAs<Master>();
-    auto request = master.addMachineRequest();
-    request.setMachine(kj::heap<MachineImpl>());
-    request.send().wait(ioContext.waitScope);
+      auto master = rpcSystem.bootstrap(masterPath).castAs<Master>();
+      auto request = master.addMachineRequest();
+      request.setMachine(kj::heap<MachineImpl>(ioContext));
+      request.send().wait(ioContext.waitScope);
+    }
 
     // Loop forever handling messages.
     kj::NEVER_DONE.wait(ioContext.waitScope);
-
-    return true;
+    KJ_UNREACHABLE;
   }
 };
 

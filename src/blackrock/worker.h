@@ -33,7 +33,7 @@ struct ByteStringHash {
   }
 };
 
-class PackageMountSet {
+class PackageMountSet: private kj::TaskSet::ErrorHandler {
 public:
   explicit PackageMountSet(kj::AsyncIoContext& ioContext);
   ~PackageMountSet() noexcept(false);
@@ -78,6 +78,10 @@ public:
 
   kj::Promise<kj::Own<PackageMount>> getPackage(PackageInfo::Reader package);
 
+  void returnPackage(kj::Own<PackageMount> package);
+  // Grains "return" packages to the mount set where the package may remain mounted for some time
+  // in case it is used again.
+
 private:
   kj::AsyncIoContext& ioContext;
   std::unordered_map<kj::ArrayPtr<const byte>, PackageMount*,
@@ -86,11 +90,16 @@ private:
 
   static byte dummyByte;
   // Target of pipe reads and writes where we don't care about the content.
+
+  kj::TaskSet tasks;
+
+  void taskFailed(kj::Exception&& exception) override;
 };
 
 class WorkerImpl: public Worker::Server {
 public:
-  WorkerImpl(kj::LowLevelAsyncIoProvider& ioProvider, PackageMountSet& packageMountSet);
+  explicit WorkerImpl(kj::AsyncIoContext& ioContext);
+  ~WorkerImpl() noexcept(false);
 
   kj::Maybe<sandstorm::Supervisor::Client> getRunningGrain(kj::ArrayPtr<const byte> id);
   bool childExited(pid_t pid, int status);
@@ -104,7 +113,7 @@ private:
   struct CommandInfo;
 
   kj::LowLevelAsyncIoProvider& ioProvider;
-  PackageMountSet& packageMountSet;
+  PackageMountSet packageMountSet;
   std::unordered_map<kj::ArrayPtr<const byte>, kj::Own<RunningGrain>,
                      ByteStringHash, ByteStringHash> runningGrains;
   std::unordered_map<pid_t, RunningGrain*> runningGrainsByPid;

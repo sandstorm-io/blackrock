@@ -207,9 +207,10 @@ struct FilesystemStorage::Xattr {
 class FilesystemStorage::Journal {
   struct Entry;
 public:
-  explicit Journal(FilesystemStorage& storage, kj::UnixEventPort& unixEventPort, int journalFd)
+  explicit Journal(FilesystemStorage& storage, kj::UnixEventPort& unixEventPort,
+                   kj::AutoCloseFd journalFd)
       : storage(storage),
-        journalFd(journalFd),
+        journalFd(kj::mv(journalFd)),
         journalEnd(getFileSize(this->journalFd)),
         journalSynced(journalEnd),
         journalExecuted(journalEnd),
@@ -458,7 +459,7 @@ private:
 
   FilesystemStorage& storage;
 
-  int journalFd;
+  kj::AutoCloseFd journalFd;
   uint64_t journalEnd;
   uint64_t journalSynced;
   uint64_t journalExecuted;
@@ -753,8 +754,6 @@ public:
 
   inline kj::Timer& getTimer() { return timer; }
 
-  StorageFactory::Client getFactoryClient() { return factoryCap; }
-
   void modifyTransitiveSize(ObjectId id, int64_t deltaBlocks, Journal::Transaction& txn);
   // Update the transitive size of the given object and its parents, adding `deltaBlocks` to each.
   // Call this when a new child was added.
@@ -771,7 +770,6 @@ private:
   // Maps object IDs to live objects representing them, if any.
 
   Restorer<SturdyRef>::Client restorer;
-  StorageFactory::Client factoryCap;
 
   template <typename T>
   ClientObjectPair<typename T::Serves, T> registerObject(kj::Own<T> object);
@@ -1439,7 +1437,8 @@ constexpr FilesystemStorage::Type FilesystemStorage::VolumeImpl::TYPE;
 
 class FilesystemStorage::StorageFactoryImpl: public StorageFactory::Server {
 public:
-  explicit StorageFactoryImpl(ObjectFactory& factory): factory(factory) {}
+  StorageFactoryImpl(ObjectFactory& factory, capnp::Capability::Client storage)
+      : factory(factory), storage(kj::mv(storage)) {}
 
   kj::Promise<void> newVolume(NewVolumeContext context) override {
     auto result = factory.newObject<VolumeImpl>();
@@ -1457,6 +1456,7 @@ public:
 
 private:
   ObjectFactory& factory;
+  capnp::Capability::Client storage;  // ensures storage is not destroyed while factory exists
 };
 
 // =======================================================================================
@@ -1464,8 +1464,7 @@ private:
 
 FilesystemStorage::ObjectFactory::ObjectFactory(Journal& journal, kj::Timer& timer,
                                                 Restorer<SturdyRef>::Client&& restorer)
-    : journal(journal), timer(timer), restorer(kj::mv(restorer)),
-      factoryCap(kj::heap<StorageFactoryImpl>(*this)) {}
+    : journal(journal), timer(timer), restorer(kj::mv(restorer)) {}
 
 template <typename T>
 auto FilesystemStorage::ObjectFactory::newObject() -> ClientObjectPair<typename T::Serves, T> {
@@ -1559,34 +1558,80 @@ auto FilesystemStorage::ObjectFactory::registerObject(kj::Own<T> object)
 
 // =======================================================================================
 
+static kj::AutoCloseFd openOrCreateDirectory(int parentFd, kj::StringPtr name) {
+  mkdirat(parentFd, name.cStr(), 0777);
+  return sandstorm::raiiOpenAt(parentFd, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+}
+
 FilesystemStorage::FilesystemStorage(
-    int mainDirFd, int stagingDirFd, int deathRowFd, int journalFd,
-    kj::UnixEventPort& eventPort, kj::Timer& timer, Restorer<SturdyRef>::Client&& restorer)
-    : mainDirFd(mainDirFd), stagingDirFd(stagingDirFd), deathRowFd(deathRowFd),
-      journal(kj::heap<Journal>(*this, eventPort, journalFd)),
+    int directoryFd, kj::UnixEventPort& eventPort, kj::Timer& timer,
+    Restorer<SturdyRef>::Client&& restorer)
+    : mainDirFd(openOrCreateDirectory(directoryFd, "main")),
+      stagingDirFd(openOrCreateDirectory(directoryFd, "staging")),
+      deathRowFd(openOrCreateDirectory(directoryFd, "death-row")),
+      rootsFd(openOrCreateDirectory(directoryFd, "roots")),
+      journal(kj::heap<Journal>(*this, eventPort,
+          sandstorm::raiiOpenAt(directoryFd, "journal", O_RDWR | O_CREAT | O_CLOEXEC))),
       factory(kj::refcounted<ObjectFactory>(*journal, timer, kj::mv(restorer))) {}
 
 FilesystemStorage::~FilesystemStorage() noexcept(false) {}
 
-OwnedAssignable<>::Client FilesystemStorage::getRoot(ObjectKey key) {
-  return factory->openObject(key).client.castAs<OwnedAssignable<>>();
-}
+kj::Promise<void> FilesystemStorage::set(SetContext context) {
+  auto params = context.getParams();
+  auto object = params.getObject();
+  auto name = kj::heapString(params.getName());
+  context.releaseParams();
 
-auto FilesystemStorage::setRoot(OwnedAssignable<>::Client object) -> kj::Promise<ObjectKey> {
+  KJ_ASSERT(name.size() > 0, "invalid storage root name", name);
+  KJ_ASSERT(('a' <= name[0] && name[0] <= 'z') ||
+            ('A' <= name[0] && name[0] <= 'Z') ||
+            ('0' <= name[0] && name[0] <= '9') ||
+             name[0] == '_', "invalid storage root name", name);
+
+  for (char c: name) {
+    KJ_ASSERT(c > ' ' && c <= '~' && c != '/', "invalid storage root name", name);
+  }
+
   auto promise = factory->getLiveObject(object);
-  return promise.then([KJ_MVCAP(object),this](kj::Maybe<ObjectBase&>&& unwrapped) mutable {
+  return promise
+      .then([this,KJ_MVCAP(object),KJ_MVCAP(name)](kj::Maybe<ObjectBase&>&& unwrapped) mutable {
     ObjectBase& base = KJ_ASSERT_NONNULL(unwrapped,
         "tried to set non-OwnedStorage object as storage root");
     ObjectBase::AdoptionIntent adoption(base, kj::mv(object));
+
+    capnp::MallocMessageBuilder rootMessage(64);
+    base.getKey().copyTo(rootMessage.getRoot<StoredRoot>().initKey());
+    capnp::writeMessageToFd(
+        sandstorm::raiiOpenAt(rootsFd, name, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC),
+        rootMessage);
+
     Journal::Transaction txn(*journal);
     adoption.commit(nullptr, txn);
-    auto key = base.getKey();
-    return txn.commit().then([key]() { return key; });
+    return txn.commit();
   });
 }
 
-StorageFactory::Client FilesystemStorage::getFactory() {
-  return factory->getFactoryClient();
+kj::Promise<void> FilesystemStorage::get(GetContext context) {
+  capnp::StreamFdMessageReader message(sandstorm::raiiOpenAt(
+      rootsFd, context.getParams().getName(), O_RDONLY | O_CLOEXEC));
+  ObjectKey key(message.getRoot<StoredRoot>().getKey());
+  context.getResults().setObject(factory->openObject(key).client.castAs<OwnedStorage<>>());
+  return kj::READY_NOW;
+}
+
+kj::Promise<void> FilesystemStorage::remove(RemoveContext context) {
+  capnp::StreamFdMessageReader message(sandstorm::raiiOpenAt(
+      rootsFd, context.getParams().getName(), O_RDONLY | O_CLOEXEC));
+  ObjectKey key(message.getRoot<StoredRoot>().getKey());
+  Journal::Transaction txn(*journal);
+  txn.moveToDeathRow(key);
+  txn.commit();
+  return kj::READY_NOW;
+}
+
+kj::Promise<void> FilesystemStorage::getFactory(GetFactoryContext context) {
+  context.getResults().setFactory(kj::heap<StorageFactoryImpl>(*factory, thisCap()));
+  return kj::READY_NOW;
 }
 
 kj::Maybe<kj::AutoCloseFd> FilesystemStorage::openObject(ObjectId id) {

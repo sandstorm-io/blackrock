@@ -46,7 +46,7 @@ private:
   kj::ProcessContext& context;
   kj::StringPtr options;
   kj::StringPtr mountPoint;
-  kj::AutoCloseFd storage;
+  kj::AutoCloseFd storageDir;
   kj::Vector<kj::StringPtr> command;
 
   kj::MainBuilder::Validity setOptions(kj::StringPtr arg) {
@@ -60,7 +60,7 @@ private:
   }
 
   kj::MainBuilder::Validity setStorageDir(kj::StringPtr arg) {
-    storage = sandstorm::raiiOpen(arg.cStr(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    storageDir = sandstorm::raiiOpen(arg.cStr(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
     return true;
   }
 
@@ -78,28 +78,7 @@ private:
     KJ_SYSCALL(unshare(CLONE_NEWNS), "are you root?");
 
     NbdDevice::loadKernelModule();
-
-    mkdirat(storage, "staging", 0777);
-    mkdirat(storage, "main", 0777);
-    mkdirat(storage, "death-row", 0777);
-
-    auto stagingFd = sandstorm::raiiOpenAt(storage, "staging", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    auto mainFd = sandstorm::raiiOpenAt(storage, "main", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    auto deathRowFd = sandstorm::raiiOpenAt(storage, "death-row",
-                                            O_RDONLY | O_DIRECTORY | O_CLOEXEC);
-    auto journalFd = sandstorm::raiiOpenAt(storage, "journal", O_RDWR | O_CREAT | O_CLOEXEC);
-
-    // Read the root key, or generate it.
-    FilesystemStorage::ObjectKey key;
-    auto rootKeyFd = sandstorm::raiiOpenAt(storage, "root-key", O_RDWR | O_CREAT | O_CLOEXEC);
-    bool newKey = false;
-    {
-      ssize_t n;
-      KJ_SYSCALL(n = read(rootKeyFd, &key, sizeof(key)));
-      if (n == 0) {
-        newKey = true;
-      }
-    }
+    bool isNew = faccessat(storageDir, "roots/root", F_OK, 0) < 0;
 
     int pair[2];
     socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0, pair);
@@ -111,20 +90,28 @@ private:
     kj::Thread serverThread([&]() {
       KJ_IF_MAYBE(exception, kj::runCatchingExceptions([&]() {
         auto io = kj::setupAsyncIo();
-        FilesystemStorage storage(mainFd, stagingFd, deathRowFd, journalFd, io.unixEventPort,
-                                  io.provider->getTimer(), nullptr);
+        StorageRootSet::Client storage = kj::heap<FilesystemStorage>(
+            storageDir, io.unixEventPort,
+            io.provider->getTimer(), nullptr);
 
-        auto factory = storage.getFactory();
+        auto factory = storage.getFactoryRequest().send().getFactory();
         OwnedVolume::Client volume = nullptr;
 
-        if (newKey) {
+        if (isNew) {
           volume = factory.newVolumeRequest().send().getVolume();
           auto req2 = factory.newAssignableRequest<OwnedVolume>();
           req2.setInitialValue(volume);
-          key = storage.setRoot(req2.send().getAssignable()).wait(io.waitScope);
-          KJ_SYSCALL(write(rootKeyFd, &key, sizeof(key)));
+
+          auto req3 = storage.setRequest<Assignable<OwnedVolume>>();
+          req3.setName("root");
+          req3.setObject(req2.send().getAssignable());
+
+          req3.send().wait(io.waitScope);
         } else {
-          volume = storage.getRoot<OwnedVolume>(key).getRequest().send().getValue();
+          auto req = storage.getRequest<Assignable<OwnedVolume>>();
+          req.setName("root");
+          volume = req.send().getObject().castAs<OwnedAssignable<OwnedVolume>>()
+              .getRequest().send().getValue();
         }
 
         kj::UnixEventPort::FdObserver cancelObserver(io.unixEventPort, abortEvent,
@@ -151,7 +138,7 @@ private:
     NbdBinding binding(device, kj::mv(kernelEnd));
     KJ_DEFER(context.warning("unbinding..."));
 
-    if (newKey) {
+    if (isNew) {
       context.warning("formatting...");
       sandstorm::Subprocess({"mkfs.ext4", "-b", "4096", device.getPath(), "256M"})
           .waitForSuccess();

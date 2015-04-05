@@ -80,8 +80,9 @@ interface Machine {
                     hostedRestorers :Collection(Restorer(SturdyRef.Hosted)).Cursor,
                     gatewayRestorers :Collection(Restorer(SturdyRef.Stored)).Cursor)
                 -> (sibling :Storage.StorageSibling,
-                    root :Storage.Assignable(StorageSchema.StorageRoot),
-                    storageRestorer :MasterRestorer(SturdyRef.Stored));
+                    rootSet :Storage.StorageRootSet,
+                    storageRestorer :MasterRestorer(SturdyRef.Stored),
+                    storageFactory :Storage.StorageFactory);
   becomeWorker @1 () -> (worker :Worker.Worker);
   becomeCoordinator @2 (workers :Collection(Worker.Worker).Observer,
                         storageRestorers :Collection(Restorer(SturdyRef.Stored)).Cursor)
@@ -94,6 +95,8 @@ interface Machine {
                     externalRestorer :MasterRestorer(SturdyRef.External));
   becomeFrontend @4 (userStorage :Storage.Assignable(Storage.Collection(StorageSchema.AccountStorage)),
                      storageRestorers :Collection(Restorer(SturdyRef.Stored)).Cursor,
+                     storageRootSet :Storage.StorageRootSet,
+                     storageFactory :Storage.StorageFactory,
                      hostedRestorers :Collection(Restorer(SturdyRef.Hosted)).Cursor,
                      mongo :Collection(Mongo).Observer)
                  -> (frontend :Frontend);

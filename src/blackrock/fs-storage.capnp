@@ -90,9 +90,8 @@ struct StoredObject {
   }
 }
 
-struct StoredZone {
-  root @0 :StoredObjectKey;
-  # The zone's root Assignable.
+struct StoredRoot {
+  # A root object.
 
-  # TODO(someday): Some stuff about quotas?
+  key @0 :StoredObjectKey;
 }

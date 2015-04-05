@@ -18,13 +18,19 @@ namespace kj {
 
 namespace blackrock {
 
-class FilesystemStorage {
+class FilesystemStorage: public StorageRootSet::Server {
 public:
-  FilesystemStorage(int mainDirFd, int stagingDirFd, int deathRowFd, int journalFd,
-                    kj::UnixEventPort& eventPort, kj::Timer& timer,
+  FilesystemStorage(int directoryFd, kj::UnixEventPort& eventPort, kj::Timer& timer,
                     Restorer<SturdyRef>::Client&& restorer);
   ~FilesystemStorage() noexcept(false);
 
+protected:
+  kj::Promise<void> set(SetContext context) override;
+  kj::Promise<void> get(GetContext context) override;
+  kj::Promise<void> remove(RemoveContext context) override;
+  kj::Promise<void> getFactory(GetFactoryContext context) override;
+
+private:
   struct ObjectKey {
     uint64_t key[4];
 
@@ -45,20 +51,6 @@ public:
     }
   };
 
-  OwnedAssignable<>::Client getRoot(ObjectKey key);
-  kj::Promise<ObjectKey> setRoot(OwnedAssignable<>::Client object);
-  StorageFactory::Client getFactory();
-
-  template <typename T>
-  typename OwnedAssignable<T>::Client getRoot(ObjectKey key) {
-    return getRoot(key).castAs<OwnedAssignable<T>>();
-  }
-  template <typename T>
-  kj::Promise<ObjectKey> setRoot(T object) {
-    return setRoot(object.template asGeneric<>());
-  }
-
-private:
   struct ObjectId {
     uint64_t id[2];
     // The object ID. Equals the 16-byte blake2b hash of the key.
@@ -107,9 +99,10 @@ private:
   class Journal;
   class ObjectFactory;
 
-  int mainDirFd;
-  int stagingDirFd;
-  int deathRowFd;
+  kj::AutoCloseFd mainDirFd;
+  kj::AutoCloseFd stagingDirFd;
+  kj::AutoCloseFd deathRowFd;
+  kj::AutoCloseFd rootsFd;
 
   kj::Own<Journal> journal;
   kj::Own<ObjectFactory> factory;
