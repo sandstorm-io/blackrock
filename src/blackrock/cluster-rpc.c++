@@ -81,9 +81,14 @@ private:
 
 // -------------------------------------------------------------------
 
-VatNetwork::SimpleAddress::SimpleAddress(struct sockaddr_in ip4): ip4(ip4) {}
-VatNetwork::SimpleAddress::SimpleAddress(struct sockaddr_in6 ip6): ip6(ip6) {}
-VatNetwork::SimpleAddress::SimpleAddress(Address::Reader reader) {
+SimpleAddress::SimpleAddress(struct sockaddr_in ip4): ip4(ip4) {}
+SimpleAddress::SimpleAddress(struct sockaddr_in6 ip6): ip6(ip6) {}
+SimpleAddress::SimpleAddress(struct sockaddr& addr, socklen_t addrLen) {
+  KJ_REQUIRE(addr.sa_family == AF_INET || addr.sa_family == AF_INET6,
+             "address must be ipv4 or ipv6");
+  memcpy(&this->addr, &addr, addrLen);
+}
+SimpleAddress::SimpleAddress(Address::Reader reader) {
   memset(this, 0, sizeof(*this));
 
   uint64_t lower = reader.getLower64();
@@ -102,8 +107,8 @@ VatNetwork::SimpleAddress::SimpleAddress(Address::Reader reader) {
   }
 }
 
-auto VatNetwork::SimpleAddress::getPeer(kj::AsyncIoStream& socket) -> SimpleAddress {
-  SimpleAddress result;
+auto SimpleAddress::getPeer(kj::AsyncIoStream& socket) -> SimpleAddress {
+  SimpleAddress result = nullptr;
   uint len = sizeof(result);
   socket.getpeername(&result.addr, &len);
   switch (result.addr.sa_family) {
@@ -116,8 +121,8 @@ auto VatNetwork::SimpleAddress::getPeer(kj::AsyncIoStream& socket) -> SimpleAddr
   return result;
 }
 
-auto VatNetwork::SimpleAddress::getLocal(kj::AsyncIoStream& socket) -> SimpleAddress {
-  SimpleAddress result;
+auto SimpleAddress::getLocal(kj::AsyncIoStream& socket) -> SimpleAddress {
+  SimpleAddress result = nullptr;
   uint len = sizeof(result);
   socket.getsockname(&result.addr, &len);
   switch (result.addr.sa_family) {
@@ -130,7 +135,7 @@ auto VatNetwork::SimpleAddress::getLocal(kj::AsyncIoStream& socket) -> SimpleAdd
   return result;
 }
 
-void VatNetwork::SimpleAddress::setPort(uint16_t port) {
+void SimpleAddress::setPort(uint16_t port) {
   switch (addr.sa_family) {
     case AF_INET:
       ip4.sin_port = htons(port);
@@ -143,7 +148,7 @@ void VatNetwork::SimpleAddress::setPort(uint16_t port) {
   }
 }
 
-void VatNetwork::SimpleAddress::copyTo(Address::Builder builder) const {
+void SimpleAddress::copyTo(Address::Builder builder) const {
   switch (addr.sa_family) {
     case AF_INET:
       builder.setLower64(0x0000ffff00000000ull | ntohl(ip4.sin_addr.s_addr));
@@ -160,7 +165,7 @@ void VatNetwork::SimpleAddress::copyTo(Address::Builder builder) const {
   }
 }
 
-void VatNetwork::SimpleAddress::getFlat(byte* target) const {
+void SimpleAddress::getFlat(byte* target) const {
   memset(target, 0, FLAT_SIZE);
   switch (addr.sa_family) {
     case AF_INET:
@@ -178,11 +183,11 @@ void VatNetwork::SimpleAddress::getFlat(byte* target) const {
   }
 }
 
-kj::Own<kj::NetworkAddress> VatNetwork::SimpleAddress::onNetwork(kj::Network& network) {
+kj::Own<kj::NetworkAddress> SimpleAddress::onNetwork(kj::Network& network) {
   return network.getSockaddr(&addr, addr.sa_family == AF_INET ? sizeof(ip4) : sizeof(ip6));
 }
 
-bool VatNetwork::SimpleAddress::operator==(const SimpleAddress& other) const {
+bool SimpleAddress::operator==(const SimpleAddress& other) const {
   switch (addr.sa_family) {
     case AF_INET:
       return other.addr.sa_family == AF_INET &&
@@ -365,11 +370,6 @@ struct VatNetwork::ConnectionMap {
 };
 
 // =======================================================================================
-
-VatNetwork::VatNetwork(kj::Network& network, kj::Timer& timer, struct sockaddr_in6 addr)
-    : VatNetwork(network, timer, SimpleAddress(addr)) {}
-VatNetwork::VatNetwork(kj::Network& network, kj::Timer& timer, struct sockaddr_in addr)
-    : VatNetwork(network, timer, SimpleAddress(addr)) {}
 
 VatNetwork::VatNetwork(kj::Network& network, kj::Timer& timer, SimpleAddress address)
     : network(network),

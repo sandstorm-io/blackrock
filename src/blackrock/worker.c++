@@ -37,9 +37,14 @@ auto PackageMountSet::getPackage(PackageInfo::Reader package)
         kj::LowLevelAsyncIoProvider::ALREADY_CLOEXEC |
         kj::LowLevelAsyncIoProvider::ALREADY_NONBLOCK);
 
+    // Include some randomness in the directory name to make it harder for an attacker with the
+    // ability to execute a named executable to find a useful one.
+    uint64_t random;
+    randombytes_buf(&random, sizeof(random));
+
     packageMount = kj::heap<PackageMount>(*this, id,
-        kj::str("/var/blackrock/packages/", counter++), package.getVolume(),
-        kj::mv(nbdUserEnd), kj::mv(nbdKernelEnd));
+        kj::str("/var/blackrock/packages/", counter++, '-', kj::hex(random)),
+        package.getVolume(), kj::mv(nbdUserEnd), kj::mv(nbdKernelEnd));
     slot = packageMount.get();
   } else {
     packageMount = kj::addRef(*slot);

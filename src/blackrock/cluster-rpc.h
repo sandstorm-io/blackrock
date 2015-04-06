@@ -16,11 +16,45 @@
 
 namespace blackrock {
 
+class SimpleAddress {
+public:
+  SimpleAddress(decltype(nullptr)) {}
+  SimpleAddress(struct sockaddr_in ip4);
+  SimpleAddress(struct sockaddr_in6 ip6);
+  SimpleAddress(struct sockaddr& addr, socklen_t addrLen);
+  SimpleAddress(Address::Reader reader);
+
+  static SimpleAddress getPeer(kj::AsyncIoStream& socket);
+  static SimpleAddress getLocal(kj::AsyncIoStream& socket);
+  static SimpleAddress getWildcard();
+  static SimpleAddress getLocalhost();
+
+  inline sa_family_t family() const { return addr.sa_family; }
+
+  void setPort(uint16_t port);
+
+  void copyTo(Address::Builder builder) const;
+
+  static constexpr size_t FLAT_SIZE = 18;
+  void getFlat(byte* target) const;
+
+  kj::Own<kj::NetworkAddress> onNetwork(kj::Network& network);
+
+  bool operator==(const SimpleAddress& other) const;
+  inline bool operator!=(const SimpleAddress& other) const { return !operator==(other); }
+
+private:
+  union {
+    struct sockaddr addr;
+    struct sockaddr_in ip4;
+    struct sockaddr_in6 ip6;
+  };
+};
+
 class VatNetwork final: public capnp::VatNetwork<VatPath, ProvisionId, RecipientId,
                                                  ThirdPartyCapId, JoinResult> {
 public:
-  VatNetwork(kj::Network& network, kj::Timer& timer, struct sockaddr_in addr);
-  VatNetwork(kj::Network& network, kj::Timer& timer, struct sockaddr_in6 addr);
+  VatNetwork(kj::Network& network, kj::Timer& timer, SimpleAddress address);
   // Create a new VatNetwork exported on the given local address. If the port is zero, an arbitrary
   // unused port will be chosen.
 
@@ -38,40 +72,6 @@ private:
   class PrivateKey;
   class PublicKey;
   class Header;
-  class SimpleAddress;
-
-  class SimpleAddress {
-  public:
-    SimpleAddress(struct sockaddr_in ip4);
-    SimpleAddress(struct sockaddr_in6 ip6);
-    SimpleAddress(Address::Reader reader);
-
-    static SimpleAddress getPeer(kj::AsyncIoStream& socket);
-    static SimpleAddress getLocal(kj::AsyncIoStream& socket);
-
-    inline sa_family_t family() const { return addr.sa_family; }
-
-    void setPort(uint16_t port);
-
-    void copyTo(Address::Builder builder) const;
-
-    static constexpr size_t FLAT_SIZE = 18;
-    void getFlat(byte* target) const;
-
-    kj::Own<kj::NetworkAddress> onNetwork(kj::Network& network);
-
-    bool operator==(const SimpleAddress& other) const;
-    inline bool operator!=(const SimpleAddress& other) const { return !operator==(other); }
-
-  private:
-    union {
-      struct sockaddr addr;
-      struct sockaddr_in ip4;
-      struct sockaddr_in6 ip6;
-    };
-
-    SimpleAddress() = default;
-  };
 
   class PublicKey {
   public:
@@ -137,8 +137,6 @@ private:
   capnp::MallocMessageBuilder self;
   kj::Own<kj::ConnectionReceiver> connectionReceiver;
   kj::Own<ConnectionMap> connectionMap;
-
-  VatNetwork(kj::Network& network, kj::Timer& timer, SimpleAddress address);
 };
 
 }  // namespace blackrock

@@ -5,6 +5,7 @@
 @0xf49ffd606012a28b;
 
 $import "/capnp/c++.capnp".namespace("blackrock");
+using GenericPersistent = import "/capnp/persistent.capnp".Persistent;
 
 struct VatId {
   # Identifies a machine in the cluster.
@@ -138,7 +139,7 @@ struct SturdyRef {
   }
 }
 
-using Persistent = import "/capnp/persistent.capnp".Persistent(SturdyRef, SturdyRef.Owner);
+interface Persistent extends(GenericPersistent(SturdyRef, SturdyRef.Owner)) {}
 
 interface Restorer(Ref) {
   restore @0 (sturdyRef :Ref) -> (cap :Capability);
@@ -151,19 +152,16 @@ struct ProvisionId {
 
   nonce0 @1 :UInt64;
   nonce1 @2 :UInt64;
-  # 128-bit nonce chosen by the provider. Must be unique among all nonces produced by the same
-  # provider, and should be uniformly-distributed and random-appearing from the point of view of
-  # other vats. The recommended way to generate this nonce is to encrypt a counter with an internal
-  # secret key.
+  # 128-bit nonce randomly chosen by the introducer.
 }
 
 struct RecipientId {
-  recipient @0 :VatId;
+  recipient @0 :VatPath;
   # ID of the vat receiving the capability.
 
   nonce0 @1 :UInt64;
   nonce1 @2 :UInt64;
-  # The same nonce as in ProvisionId.
+  # 128-bit nonce randomly chosen by the introducer.
 }
 
 struct ThirdPartyCapId {
@@ -172,7 +170,7 @@ struct ThirdPartyCapId {
 
   nonce0 @1 :UInt64;
   nonce1 @2 :UInt64;
-  # The same nonce as in ProvisionId.
+  # 128-bit nonce randomly chosen by the introducer.
 }
 
 struct JoinKeyPart {

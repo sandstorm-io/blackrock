@@ -6,13 +6,13 @@
 #include <kj/async-io.h>
 #include <capnp/rpc.h>
 #include <capnp/rpc-twoparty.h>
-#include <capnp/serialize-packed.h>
 #include <sandstorm/version.h>
 #include <sandstorm/util.h>
 #include <blackrock/machine.capnp.h>
 #include "cluster-rpc.h"
 #include "worker.h"
 #include "fs-storage.h"
+#include <netdb.h>
 
 namespace blackrock {
 
@@ -58,16 +58,6 @@ private:
   kj::AsyncIoContext& ioContext;
 };
 
-class MasterImpl: public Master::Server {
-public:
-  kj::Promise<void> addMachine(AddMachineContext context) override {
-    KJ_DBG("slave connected");
-    return kj::READY_NOW;
-  }
-
-private:
-};
-
 class Main {
 public:
   Main(kj::ProcessContext& context): context(context) {}
@@ -77,13 +67,15 @@ public:
                            "Starts Blackrock.")
         .addSubCommand("master", KJ_BIND_METHOD(*this, getMasterMain), "run as master node")
         .addSubCommand("slave", KJ_BIND_METHOD(*this, getSlaveMain), "run as slave node")
-        .addSubCommand("grain", KJ_BIND_METHOD(*this, getSupervisorMain), "run a supervised grain")
+        .addSubCommand("grain", KJ_BIND_METHOD(*this, getSupervisorMain),
+            "(internal) run a supervised grain")
         .build();
   }
 
   kj::MainFunc getMasterMain() {
     return kj::MainBuilder(context, "Sandstorm Blackrock version " SANDSTORM_VERSION,
                            "Starts Blackrock master.")
+        .expectArg("<bind-ip>", KJ_BIND_METHOD(*this, setBindIp))
         .callAfterParsing(KJ_BIND_METHOD(*this, runMaster))
         .build();
   }
@@ -92,7 +84,8 @@ public:
     return kj::MainBuilder(context, "Sandstorm Blackrock version " SANDSTORM_VERSION,
                            "Starts Blackrock slave, taking commands from the given master. "
                            "<master-path> is the base64-encoded serialized VatPath of the master.")
-        .expectArg("<master-path>", KJ_BIND_METHOD(*this, runSlave))
+        .expectArg("<bind-ip>", KJ_BIND_METHOD(*this, setBindIp))
+        .callAfterParsing(KJ_BIND_METHOD(*this, runSlave))
         .build();
   }
 
@@ -104,51 +97,46 @@ public:
 private:
   kj::ProcessContext& context;
   kj::Own<sandstorm::AbstractMain> alternateMain;
+  SimpleAddress bindAddress = nullptr;
+
+  kj::MainBuilder::Validity setBindIp(kj::StringPtr bindIp) {
+    struct addrinfo* results;
+    int error = getaddrinfo(bindIp.cStr(), nullptr, nullptr, &results);
+    if (error != 0) {
+      if (error == EAI_SYSTEM) {
+        return strerror(errno);
+      } else {
+        return gai_strerror(error);
+      }
+    }
+
+    KJ_DEFER(freeaddrinfo(results));
+
+    bindAddress = SimpleAddress(*results->ai_addr, results->ai_addrlen);
+
+    return true;
+  }
 
   bool runMaster() {
     auto ioContext = kj::setupAsyncIo();
 
-    VatNetwork network(ioContext.provider->getNetwork(),
-        ioContext.provider->getTimer(), ip4Wildcard());
-    auto rpcSystem = capnp::makeRpcServer(network, kj::heap<MasterImpl>());
-
-    // Print the master path.
-    {
-      capnp::MallocMessageBuilder message;
-      message.setRoot(network.getSelf());
-
-      byte bytes[256];
-      kj::ArrayOutputStream stream(bytes);
-      capnp::writePackedMessage(stream, message);
-
-      auto text = sandstorm::base64Encode(stream.getArray(), false);
-      context.warning(kj::str("master path: ", text));
-    }
+    VatNetwork network(ioContext.provider->getNetwork(), ioContext.provider->getTimer(),
+                       bindAddress);
+    auto rpcSystem = capnp::makeRpcClient(network);
 
     // Loop forever handling messages.
     kj::NEVER_DONE.wait(ioContext.waitScope);
     KJ_UNREACHABLE;
   }
 
-  bool runSlave(kj::StringPtr masterAddr) {
+  bool runSlave() {
     auto ioContext = kj::setupAsyncIo();
 
     VatNetwork network(ioContext.provider->getNetwork(),
         ioContext.provider->getTimer(), ip4Wildcard());
-    auto rpcSystem = capnp::makeRpcClient(network);
 
-    // Decode the master path and connect to the master.
-    {
-      auto bytes = sandstorm::base64Decode(masterAddr);
-      kj::ArrayInputStream stream(bytes);
-      capnp::PackedMessageReader masterAddrReader(stream);
-      auto masterPath = masterAddrReader.getRoot<VatPath>();
-
-      auto master = rpcSystem.bootstrap(masterPath).castAs<Master>();
-      auto request = master.addMachineRequest();
-      request.setMachine(kj::heap<MachineImpl>(ioContext));
-      request.send().wait(ioContext.waitScope);
-    }
+    // TODO(security): Only let the master bootstrap the MachineImpl.
+    auto rpcSystem = capnp::makeRpcServer(network, kj::heap<MachineImpl>(ioContext));
 
     // Loop forever handling messages.
     kj::NEVER_DONE.wait(ioContext.waitScope);
