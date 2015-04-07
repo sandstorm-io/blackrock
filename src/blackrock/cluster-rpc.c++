@@ -135,6 +135,31 @@ auto SimpleAddress::getLocal(kj::AsyncIoStream& socket) -> SimpleAddress {
   return result;
 }
 
+SimpleAddress SimpleAddress::getWildcard(sa_family_t family) {
+  SimpleAddress result = nullptr;
+  memset(&result, 0, sizeof(result));
+  result.addr.sa_family = family;
+  return result;
+}
+
+SimpleAddress SimpleAddress::getLocalhost(sa_family_t family) {
+  SimpleAddress result = nullptr;
+  memset(&result, 0, sizeof(result));
+  result.addr.sa_family = family;
+
+  switch (family){
+    case AF_INET:
+      result.ip4.sin_addr.s_addr = htonl(0x7F000001u);
+      break;
+    case AF_INET6:
+      result.ip6.sin6_addr.s6_addr[15] = 1;
+      break;
+    default:
+      KJ_FAIL_REQUIRE("Not an IP address!");
+  }
+  return result;
+}
+
 void SimpleAddress::setPort(uint16_t port) {
   switch (addr.sa_family) {
     case AF_INET:

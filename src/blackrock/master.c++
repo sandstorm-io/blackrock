@@ -25,20 +25,10 @@ public:
   }
 };
 
-capnp::Capability::Client connect(capnp::RpcSystem<VatPath>& rpcSystem, SimpleAddress address) {
-  capnp::MallocMessageBuilder message(32);
-  auto path = message.getRoot<VatPath>();
-
-#error "TODO: get key"
-
-  address.copyTo(path.initAddress());
-
-  return rpcSystem.bootstrap(path);
-}
-
 }  // namespace
 
-void runMaster(kj::AsyncIoContext& ioContext, ComputeDriver& driver, MasterConfig::Reader config) {
+void runMaster(kj::AsyncIoContext& ioContext, ComputeDriver& driver, MasterConfig::Reader config,
+               sa_family_t ipVersion) {
   KJ_REQUIRE(config.getWorkerCount() > 0, "need at least one worker");
 
   kj::Vector<kj::Promise<void>> startupTasks;
@@ -71,12 +61,12 @@ void runMaster(kj::AsyncIoContext& ioContext, ComputeDriver& driver, MasterConfi
     KJ_REQUIRE(storage.count == 1, "currently we don't support multiple storage nodes");
     KJ_REQUIRE(storage.maxIndex == 0, "storage node had non-zero index");
 
-    if (storageStatus.address == nullptr) {
+    if (storageStatus.path == nullptr) {
       KJ_LOG(INFO, "BOOTING: storage");
       startupTasks.add(driver.boot(storageStatus.id)
-          .then([&storageStatus](auto addr) {
+          .then([&storageStatus](auto path) {
         KJ_LOG(INFO, "BOOTED: storage");
-        storageStatus.address = addr;
+        storageStatus.path = path;
       }));
     }
   }
@@ -119,14 +109,14 @@ void runMaster(kj::AsyncIoContext& ioContext, ComputeDriver& driver, MasterConfi
   // =====================================================================================
 
   VatNetwork network(ioContext.provider->getNetwork(), ioContext.provider->getTimer(),
-                     SimpleAddress::getWildcard());
+                     SimpleAddress::getWildcard(ipVersion));
   auto rpcSystem = capnp::makeRpcClient(network);
 
   ErrorLogger logger;
   kj::TaskSet tasks(logger);
 
   // Start storage.
-  auto storage = connect(rpcSystem, KJ_ASSERT_NONNULL(storageStatus.address)).castAs<Machine>()
+  auto storage = rpcSystem.bootstrap(KJ_ASSERT_NONNULL(storageStatus.path)).castAs<Machine>()
       .becomeStorageRequest().send();
 
   // For now, tell the storage that it has no back-ends.
@@ -137,7 +127,7 @@ void runMaster(kj::AsyncIoContext& ioContext, ComputeDriver& driver, MasterConfi
   // Start workers (the ones that are booted, anyway).
   kj::Vector<Worker::Client> workers;
   for (auto& ws: workerStatus) {
-    workers.add(connect(rpcSystem, KJ_ASSERT_NONNULL(ws.second.address)).castAs<Machine>()
+    workers.add(rpcSystem.bootstrap(KJ_ASSERT_NONNULL(ws.second.path)).castAs<Machine>()
         .becomeWorkerRequest().send().getWorker());
   }
 

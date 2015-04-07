@@ -16,13 +16,6 @@
 
 namespace blackrock {
 
-static struct sockaddr_in ip4Wildcard() {
-  struct sockaddr_in addr;
-  memset(&addr, 0, sizeof(addr));
-  addr.sin_family = AF_INET;
-  return addr;
-}
-
 class MachineImpl: public Machine::Server {
   // TODO(security): For most become*() methods, we should probably actually spawn a child process.
   //   (But before we do that we probably need to implement Cap'n Proto Level 3.)
@@ -133,7 +126,7 @@ private:
     auto ioContext = kj::setupAsyncIo();
 
     VatNetwork network(ioContext.provider->getNetwork(),
-        ioContext.provider->getTimer(), ip4Wildcard());
+        ioContext.provider->getTimer(), SimpleAddress::getWildcard(AF_INET));
 
     // TODO(security): Only let the master bootstrap the MachineImpl.
     auto rpcSystem = capnp::makeRpcServer(network, kj::heap<MachineImpl>(ioContext));

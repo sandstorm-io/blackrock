@@ -29,18 +29,20 @@ public:
 
   struct MachineStatus {
     MachineId id;
-    kj::Maybe<SimpleAddress> address;
-    // Current address, or null if not powered up.
+    kj::Maybe<VatPath::Reader> path;
+    // Current path, or null if not powered up. Path remains valid until halt() or destroy() is
+    // called on the machine.
   };
 
   virtual kj::Promise<kj::Array<MachineStatus>> listMachines();
   virtual kj::Promise<void> create(MachineId id) = 0;
   virtual kj::Promise<void> destroy(MachineId id) = 0;
-  virtual kj::Promise<SimpleAddress> boot(MachineId id) = 0;
+  virtual kj::Promise<VatPath::Reader> boot(MachineId id) = 0;
   virtual kj::Promise<void> halt(MachineId id) = 0;
 };
 
-void runMaster(kj::AsyncIoContext& ioContext, ComputeDriver& driver, MasterConfig::Reader config);
+void runMaster(kj::AsyncIoContext& ioContext, ComputeDriver& driver, MasterConfig::Reader config,
+               sa_family_t ipVersion);
 
 } // namespace blackrock
 
