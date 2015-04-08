@@ -25,4 +25,33 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
 
   # Don't check for image updates on every run; could be slow.
   config.vm.box_check_update = false
+
+  config.vm.provider "virtualbox" do |v|
+    v.memory = 1024
+    v.cpus = 1
+  end
+
+  # Note: If you get an error about "DHCP server already exists", run the
+  # following command once (on the host):
+  #     VBoxManage dhcpserver remove --netname HostInterfaceNetworking-vboxnet0
+  # See:
+  #     https://github.com/mitchellh/vagrant/issues/3083
+  config.vm.network "private_network", type: "dhcp"
+
+  config.vm.define "storage0" do |storage0|
+  end
+  config.vm.define "worker0" do |worker0|
+  end
+  config.vm.define "worker1" do |worker1|
+  end
+  config.vm.define "worker2" do |worker2|
+  end
+  config.vm.define "worker3" do |worker3|
+  end
+  config.vm.define "coordinator0" do |coordinator0|
+  end
+  config.vm.define "frontend0" do |frontend0|
+  end
+  config.vm.define "frontend1" do |frontend1|
+  end
 end

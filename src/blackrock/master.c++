@@ -8,6 +8,9 @@
 #include <kj/debug.h>
 #include <kj/vector.h>
 #include <blackrock/machine.capnp.h>
+#include <signal.h>
+#include <sandstorm/util.h>
+#include <capnp/serialize-async.h>
 
 namespace blackrock {
 
@@ -25,98 +28,77 @@ public:
   }
 };
 
+kj::Promise<kj::String> readAllAsync(kj::AsyncInputStream& input,
+                                     kj::Vector<char> buffer = kj::Vector<char>()) {
+  buffer.resize(buffer.size() + 4096);
+  auto promise = input.tryRead(buffer.end() - 4096, 4096, 4096);
+  return promise.then([KJ_MVCAP(buffer),&input](size_t n) mutable -> kj::Promise<kj::String> {
+    if (n < 4096) {
+      buffer.resize(buffer.size() - 4096 + n);
+      buffer.add('\0');
+      return kj::String(buffer.releaseAsArray());
+    } else {
+      return readAllAsync(input, kj::mv(buffer));
+    }
+  });
+}
+
 }  // namespace
 
-void runMaster(kj::AsyncIoContext& ioContext, ComputeDriver& driver, MasterConfig::Reader config,
-               sa_family_t ipVersion) {
+void runMaster(kj::AsyncIoContext& ioContext, ComputeDriver& driver, MasterConfig::Reader config) {
   KJ_REQUIRE(config.getWorkerCount() > 0, "need at least one worker");
 
   kj::Vector<kj::Promise<void>> startupTasks;
 
-  auto list = driver.listMachines().wait(ioContext.waitScope);
+  uint workerCount = config.getWorkerCount();
 
-  std::map<ComputeDriver::MachineType, TypeCounts> countsMap;
-  ComputeDriver::MachineStatus storageStatus;
-  std::map<uint, ComputeDriver::MachineStatus> workerStatus;
+  std::map<ComputeDriver::MachineType, uint> expectedCounts;
+  expectedCounts[ComputeDriver::MachineType::STORAGE] = 1;
+  expectedCounts[ComputeDriver::MachineType::WORKER] = workerCount;
 
-  for (auto& machine: list) {
-    auto& counts = countsMap[machine.id.type];
-    ++counts.count;
-    counts.maxIndex = kj::max(counts.maxIndex, machine.id.index);
-    switch (machine.id.type) {
-      case ComputeDriver::MachineType::STORAGE:
-        storageStatus = machine;
-        break;
-      case ComputeDriver::MachineType::WORKER:
-        workerStatus[machine.id.index] = machine;
-        break;
-      default:
-        break;
+  VatPath::Reader storagePath;
+  auto workerPaths = kj::heapArray<VatPath::Reader>(config.getWorkerCount());
+
+  KJ_LOG(INFO, "examining currently-running machines...");
+
+  // Shut down any machines that we don't need anymore.
+  for (auto& machine: driver.listMachines().wait(ioContext.waitScope)) {
+    if (machine.index >= expectedCounts[machine.type]) {
+      KJ_LOG(INFO, "STOPPING", machine);
+      driver.stop(machine);
     }
   }
 
-  {
-    auto& storage = countsMap[ComputeDriver::MachineType::STORAGE];
-    KJ_REQUIRE(storage.count > 0, "no storage node found; currently you must create manually");
-    KJ_REQUIRE(storage.count == 1, "currently we don't support multiple storage nodes");
-    KJ_REQUIRE(storage.maxIndex == 0, "storage node had non-zero index");
+  auto start = [&startupTasks,&driver](ComputeDriver::MachineId id, VatPath::Reader& pathSlot) {
+    KJ_LOG(INFO, "STARTING", id);
+    startupTasks.add(driver.start(id).then([id,&pathSlot](auto path) {
+      KJ_LOG(INFO, "READY", id);
+      pathSlot = path;
+    }));
+  };
 
-    if (storageStatus.path == nullptr) {
-      KJ_LOG(INFO, "BOOTING: storage");
-      startupTasks.add(driver.boot(storageStatus.id)
-          .then([&storageStatus](auto path) {
-        KJ_LOG(INFO, "BOOTED: storage");
-        storageStatus.path = path;
-      }));
-    }
-  }
+  start({ ComputeDriver::MachineType::STORAGE, 0 }, storagePath);
 
   {
-    uint i = 0;
-    uint workerCount = config.getWorkerCount();
-    kj::Vector<uint> missingWorkers;
-
-    for (auto& worker: workerStatus) {
-      while (i < kj::min(worker.first, workerCount)) {
-        // Missing a worker.
-        missingWorkers.add(i++);
-      }
-      if (worker.first >= workerCount) {
-        ComputeDriver::MachineId id = worker.second.id;
-        KJ_LOG(INFO, "destroying no-longer-wanted worker machine", id.index);
-        driver.halt(id);
-      }
-      i = worker.first + 1;
-    }
-    while (i < workerCount) {
-      missingWorkers.add(i++);
-    }
-
-    for (auto index: missingWorkers) {
-      ComputeDriver::MachineId id = { ComputeDriver::MachineType::WORKER, index };
-      KJ_LOG(INFO, "CREATING: worker", id.index);
-      startupTasks.add(driver.create(id)
-          .then([&workerStatus,id]() {
-        KJ_LOG(INFO, "CREATED: worker", id.index);
-        workerStatus[id.index] = ComputeDriver::MachineStatus { id, nullptr };
-      }));
+    for (uint i = 0; i < workerCount; i++) {
+      start({ ComputeDriver::MachineType::WORKER, i }, workerPaths[i]);
     }
   }
 
   KJ_LOG(INFO, "waiting for startup tasks...");
   kj::joinPromises(startupTasks.releaseAsArray()).wait(ioContext.waitScope);
 
-  // =====================================================================================
+  // -------------------------------------------------------------------------------------
 
   VatNetwork network(ioContext.provider->getNetwork(), ioContext.provider->getTimer(),
-                     SimpleAddress::getWildcard(ipVersion));
+                     driver.getMasterBindAddress());
   auto rpcSystem = capnp::makeRpcClient(network);
 
   ErrorLogger logger;
   kj::TaskSet tasks(logger);
 
   // Start storage.
-  auto storage = rpcSystem.bootstrap(KJ_ASSERT_NONNULL(storageStatus.path)).castAs<Machine>()
+  auto storage = rpcSystem.bootstrap(storagePath).castAs<Machine>()
       .becomeStorageRequest().send();
 
   // For now, tell the storage that it has no back-ends.
@@ -126,8 +108,8 @@ void runMaster(kj::AsyncIoContext& ioContext, ComputeDriver& driver, MasterConfi
 
   // Start workers (the ones that are booted, anyway).
   kj::Vector<Worker::Client> workers;
-  for (auto& ws: workerStatus) {
-    workers.add(rpcSystem.bootstrap(KJ_ASSERT_NONNULL(ws.second.path)).castAs<Machine>()
+  for (auto& workerPath: workerPaths) {
+    workers.add(rpcSystem.bootstrap(workerPath).castAs<Machine>()
         .becomeWorkerRequest().send().getWorker());
   }
 
@@ -136,5 +118,129 @@ void runMaster(kj::AsyncIoContext& ioContext, ComputeDriver& driver, MasterConfi
   KJ_UNREACHABLE;
 }
 
-} // namespace blackrock
+// =======================================================================================
 
+ComputeDriver::MachineId::MachineId(kj::StringPtr name) {
+  kj::StringPtr indexStr;
+
+#define HANDLE_CASE(TYPE, NAME) \
+  if (name.startsWith(NAME)) { \
+    type = MachineType::TYPE; \
+    indexStr = name.slice(strlen(NAME)); \
+  }
+
+  HANDLE_CASE(STORAGE, "storage")
+  else HANDLE_CASE(WORKER, "worker")
+  else HANDLE_CASE(COORDINATOR, "coordinator")
+  else HANDLE_CASE(FRONTEND, "frontend")
+  else KJ_FAIL_ASSERT("couldn't parse machine ID", name);
+#undef HANDLE_CASE
+
+  char* end;
+  index = strtoul(indexStr.cStr(), &end, 10);
+  KJ_ASSERT(*end == '\0' && indexStr.size() > 0 &&
+            (indexStr[0] != '0' || indexStr.size() == 1),
+            "could not parse machine ID", name);
+}
+
+kj::String ComputeDriver::MachineId::toString() const {
+  kj::StringPtr typeName;
+  switch (type) {
+    case MachineType::STORAGE    : typeName = "storage"    ; break;
+    case MachineType::WORKER     : typeName = "worker"     ; break;
+    case MachineType::COORDINATOR: typeName = "coordinator"; break;
+    case MachineType::FRONTEND   : typeName = "frontend"   ; break;
+  }
+
+  return kj::str(typeName, index);
+}
+
+// =======================================================================================
+
+VagrantDriver::VagrantDriver(sandstorm::SubprocessSet& subprocessSet,
+                             kj::LowLevelAsyncIoProvider& ioProvider)
+    : subprocessSet(subprocessSet), ioProvider(ioProvider) {}
+
+VagrantDriver::~VagrantDriver() noexcept(false) {}
+
+SimpleAddress VagrantDriver::getMasterBindAddress() {
+  return SimpleAddress::getInterfaceAddress(AF_INET, "vboxnet0");
+}
+
+auto VagrantDriver::listMachines() -> kj::Promise<kj::Array<MachineId>> {
+  char* cwd = get_current_dir_name();
+  KJ_DEFER(free(cwd));
+
+  int fds[2];
+  KJ_SYSCALL(pipe2(fds, O_CLOEXEC));
+  kj::AutoCloseFd writeEnd(fds[1]);
+  auto input = ioProvider.wrapInputFd(fds[0],
+      kj::LowLevelAsyncIoProvider::Flags::TAKE_OWNERSHIP |
+      kj::LowLevelAsyncIoProvider::Flags::ALREADY_CLOEXEC);
+
+  sandstorm::Subprocess::Options options({"vagrant", "global-status"});
+  options.stdout = writeEnd;
+  auto exitPromise = subprocessSet.waitForSuccess(kj::mv(options));
+
+  // Unfortunately, `vagrant global-status` does not appear to support `--machine-readable`; the
+  // output is simply empty. So... we parse.
+  auto outputPromise = readAllAsync(*input);
+  return outputPromise.attach(kj::mv(input))
+      .then([KJ_MVCAP(exitPromise)](kj::String allText) mutable {
+    kj::Vector<MachineId> result;
+
+    kj::StringPtr text = allText;
+
+    text = text.slice(KJ_ASSERT_NONNULL(text.findFirst('\n')) + 1);
+    KJ_ASSERT(text.startsWith("----------------"));
+    text = text.slice(KJ_ASSERT_NONNULL(text.findFirst('\n')) + 1);
+
+    if (!text.startsWith("There are no active")) {
+      while (!text.startsWith("\n") && !text.startsWith("\r\n")) {
+        text = text.slice(KJ_ASSERT_NONNULL(text.findFirst(' ')));
+        while (text.startsWith(" ")) text = text.slice(1);
+
+        auto name = kj::str(text.slice(0, KJ_ASSERT_NONNULL(text.findFirst(' '))));
+        result.add(MachineId(name));
+
+        text = text.slice(KJ_ASSERT_NONNULL(text.findFirst('\n')) + 1);
+        while (text.startsWith(" ")) text = text.slice(1);
+      }
+    }
+
+    return exitPromise.then([KJ_MVCAP(result)]() mutable { return result.releaseAsArray(); });
+  });
+}
+
+kj::Promise<VatPath::Reader> VagrantDriver::start(MachineId id) {
+  return subprocessSet.waitForSuccess({"vagrant", "up", kj::str(id)})
+      .then([this,id]() {
+    kj::String name = kj::str(id);
+
+    int fds[2];
+    KJ_SYSCALL(pipe2(fds, O_CLOEXEC));
+    kj::AutoCloseFd writeEnd(fds[1]);
+    auto input = ioProvider.wrapInputFd(fds[0],
+        kj::LowLevelAsyncIoProvider::Flags::TAKE_OWNERSHIP |
+        kj::LowLevelAsyncIoProvider::Flags::ALREADY_CLOEXEC);
+
+    sandstorm::Subprocess::Options options({
+        "vagrant", "ssh", name, "--", "sudo", "/vagrant/bin/blackrock", "slave", "if4:eth1"});
+    options.stdout = writeEnd;
+    auto exitPromise = subprocessSet.waitForSuccess(kj::mv(options));
+
+    auto outputPromise = capnp::readMessage(*input);
+    return outputPromise.then([this,id,KJ_MVCAP(exitPromise),KJ_MVCAP(input)](
+                               kj::Own<capnp::MessageReader> reader) mutable {
+      auto path = reader->getRoot<VatPath>();
+      vatPaths[id] = kj::mv(reader);
+      return exitPromise.then([path]() { return path; });
+    });
+  });
+}
+
+kj::Promise<void> VagrantDriver::stop(MachineId id) {
+  return subprocessSet.waitForSuccess({"vagrant", "destroy", "-f", kj::str(id)});
+}
+
+} // namespace blackrock

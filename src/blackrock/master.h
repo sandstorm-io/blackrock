@@ -9,6 +9,11 @@
 #include "cluster-rpc.h"
 #include <kj/async-io.h>
 #include <blackrock/master.capnp.h>
+#include <map>
+
+namespace sandstorm {
+  class SubprocessSet;
+}
 
 namespace blackrock {
 
@@ -18,13 +23,29 @@ public:
     STORAGE,
     WORKER,
     COORDINATOR,
-    FRONTEND,
-    MONGO
+    FRONTEND
   };
 
   struct MachineId {
     MachineType type;
     uint index;
+
+    inline bool operator==(const MachineId& other) const {
+      return type == other.type && index == other.index;
+    }
+    inline bool operator<(const MachineId& other) const {
+      return type < other.type ? true :
+             type > other.type ? false :
+             index < other.index;
+    }
+
+    kj::String toString() const;
+    // Makes reasonable hostnames. E.g. { STORAGE, 123 } becomes "storage123".
+
+    MachineId() = default;
+    inline MachineId(MachineType type, uint index): type(type), index(index) {}
+    MachineId(kj::StringPtr name);
+    // Parses results of toString().
   };
 
   struct MachineStatus {
@@ -34,15 +55,29 @@ public:
     // called on the machine.
   };
 
-  virtual kj::Promise<kj::Array<MachineStatus>> listMachines();
-  virtual kj::Promise<void> create(MachineId id) = 0;
-  virtual kj::Promise<void> destroy(MachineId id) = 0;
-  virtual kj::Promise<VatPath::Reader> boot(MachineId id) = 0;
-  virtual kj::Promise<void> halt(MachineId id) = 0;
+  virtual SimpleAddress getMasterBindAddress() = 0;
+  virtual kj::Promise<kj::Array<MachineId>> listMachines() = 0;
+  virtual kj::Promise<VatPath::Reader> start(MachineId id) = 0;
+  virtual kj::Promise<void> stop(MachineId id) = 0;
 };
 
-void runMaster(kj::AsyncIoContext& ioContext, ComputeDriver& driver, MasterConfig::Reader config,
-               sa_family_t ipVersion);
+void runMaster(kj::AsyncIoContext& ioContext, ComputeDriver& driver, MasterConfig::Reader config);
+
+class VagrantDriver: public ComputeDriver {
+public:
+  VagrantDriver(sandstorm::SubprocessSet& subprocessSet, kj::LowLevelAsyncIoProvider& ioProvider);
+  ~VagrantDriver() noexcept(false);
+
+  SimpleAddress getMasterBindAddress() override;
+  kj::Promise<kj::Array<MachineId>> listMachines() override;
+  kj::Promise<VatPath::Reader> start(MachineId id) override;
+  kj::Promise<void> stop(MachineId id) override;
+
+private:
+  sandstorm::SubprocessSet& subprocessSet;
+  kj::LowLevelAsyncIoProvider& ioProvider;
+  std::map<ComputeDriver::MachineId, kj::Own<capnp::MessageReader>> vatPaths;
+};
 
 } // namespace blackrock
 

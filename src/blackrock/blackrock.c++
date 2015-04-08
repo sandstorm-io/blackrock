@@ -6,13 +6,18 @@
 #include <kj/async-io.h>
 #include <capnp/rpc.h>
 #include <capnp/rpc-twoparty.h>
+#include <capnp/serialize.h>
 #include <sandstorm/version.h>
 #include <sandstorm/util.h>
 #include <blackrock/machine.capnp.h>
 #include "cluster-rpc.h"
 #include "worker.h"
 #include "fs-storage.h"
+#include "master.h"
 #include <netdb.h>
+#include <sys/file.h>
+#include <sys/sendfile.h>
+#include <ifaddrs.h>
 
 namespace blackrock {
 
@@ -68,15 +73,13 @@ public:
   kj::MainFunc getMasterMain() {
     return kj::MainBuilder(context, "Sandstorm Blackrock version " SANDSTORM_VERSION,
                            "Starts Blackrock master.")
-        .expectArg("<bind-ip>", KJ_BIND_METHOD(*this, setBindIp))
-        .callAfterParsing(KJ_BIND_METHOD(*this, runMaster))
+        .expectArg("<master-config>", KJ_BIND_METHOD(*this, runMaster))
         .build();
   }
 
   kj::MainFunc getSlaveMain() {
     return kj::MainBuilder(context, "Sandstorm Blackrock version " SANDSTORM_VERSION,
-                           "Starts Blackrock slave, taking commands from the given master. "
-                           "<master-path> is the base64-encoded serialized VatPath of the master.")
+                           "Starts Blackrock slave.")
         .expectArg("<bind-ip>", KJ_BIND_METHOD(*this, setBindIp))
         .callAfterParsing(KJ_BIND_METHOD(*this, runSlave))
         .build();
@@ -93,47 +96,115 @@ private:
   SimpleAddress bindAddress = nullptr;
 
   kj::MainBuilder::Validity setBindIp(kj::StringPtr bindIp) {
-    struct addrinfo* results;
-    int error = getaddrinfo(bindIp.cStr(), nullptr, nullptr, &results);
-    if (error != 0) {
-      if (error == EAI_SYSTEM) {
-        return strerror(errno);
-      } else {
-        return gai_strerror(error);
+    if (bindIp.startsWith("if4:")) {
+      bindAddress = SimpleAddress::getInterfaceAddress(AF_INET, bindIp.slice(strlen("if4:")));
+      return true;
+    } else if (bindIp.startsWith("if6:")) {
+      bindAddress = SimpleAddress::getInterfaceAddress(AF_INET6, bindIp.slice(strlen("if6:")));
+      return true;
+    } else {
+      kj::String scratch;
+      uint port = 0;
+      KJ_IF_MAYBE(colonPos, bindIp.findFirst(':')) {
+        scratch = kj::heapString(bindIp.slice(0, *colonPos));
+        kj::StringPtr portStr = bindIp.slice(*colonPos + 1);
+        bindIp = scratch;
+
+        char* end;
+        port = strtoul(portStr.cStr(), &end, 10);
+        if (*end != '\0' || portStr.size() == 0) {
+          return "invalid port";
+        }
       }
+
+      struct addrinfo* results;
+      int error = getaddrinfo(bindIp.cStr(), nullptr, nullptr, &results);
+      if (error != 0) {
+        if (error == EAI_SYSTEM) {
+          return strerror(errno);
+        } else {
+          return gai_strerror(error);
+        }
+      }
+
+      KJ_DEFER(freeaddrinfo(results));
+
+      bindAddress = SimpleAddress(*results->ai_addr, results->ai_addrlen);
+
+      return true;
     }
-
-    KJ_DEFER(freeaddrinfo(results));
-
-    bindAddress = SimpleAddress(*results->ai_addr, results->ai_addrlen);
-
-    return true;
   }
 
-  bool runMaster() {
+  bool runMaster(kj::StringPtr configFile) {
+    capnp::StreamFdMessageReader configReader(
+        sandstorm::raiiOpen(configFile, O_RDONLY | O_CLOEXEC));
+
     auto ioContext = kj::setupAsyncIo();
-
-    VatNetwork network(ioContext.provider->getNetwork(), ioContext.provider->getTimer(),
-                       bindAddress);
-    auto rpcSystem = capnp::makeRpcClient(network);
-
-    // Loop forever handling messages.
-    kj::NEVER_DONE.wait(ioContext.waitScope);
+    sandstorm::SubprocessSet subprocessSet(ioContext.unixEventPort);
+    VagrantDriver driver(subprocessSet, *ioContext.lowLevelProvider);
+    blackrock::runMaster(ioContext, driver, configReader.getRoot<MasterConfig>());
     KJ_UNREACHABLE;
   }
 
   bool runSlave() {
+    auto pidfile = sandstorm::raiiOpen("/var/run/blackrock-slave",
+        O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+    int l;
+    KJ_NONBLOCKING_SYSCALL(l = flock(pidfile, LOCK_EX | LOCK_NB));
+
+    if (l < 0) {
+      // pidfile locked; slave already running
+      dumpFile(pidfile, STDOUT_FILENO);
+      context.exit();
+    }
+
+    // We're the only slave running. Go!
+    KJ_SYSCALL(ftruncate(pidfile, 0));
+
     auto ioContext = kj::setupAsyncIo();
+    VatNetwork network(ioContext.provider->getNetwork(), ioContext.provider->getTimer(),
+                       bindAddress);
 
-    VatNetwork network(ioContext.provider->getNetwork(),
-        ioContext.provider->getTimer(), SimpleAddress::getWildcard(AF_INET));
+    // Write VatPath to pidfile.
+    {
+      capnp::MallocMessageBuilder vatPath(16);
+      vatPath.setRoot(network.getSelf());
+      capnp::writeMessageToFd(pidfile, vatPath);
+    }
 
-    // TODO(security): Only let the master bootstrap the MachineImpl.
-    auto rpcSystem = capnp::makeRpcServer(network, kj::heap<MachineImpl>(ioContext));
+    auto logfile = sandstorm::raiiOpen("/var/log/blackrock-slave.log",
+        O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC, 0600);
 
-    // Loop forever handling messages.
-    kj::NEVER_DONE.wait(ioContext.waitScope);
-    KJ_UNREACHABLE;
+    sandstorm::Subprocess daemon([&]() -> int {
+      // Redirect stdio.
+      // TODO(soon): Send to logging service!
+      dup2(logfile, STDOUT_FILENO);
+      dup2(logfile, STDERR_FILENO);
+      dup2(sandstorm::raiiOpen("/dev/null", O_RDONLY | O_CLOEXEC), STDIN_FILENO);
+
+      // Detach from controlling terminal and make ourselves session leader.
+      KJ_SYSCALL(setsid());
+
+      // Set up RPC.
+      // TODO(security): Only let the master bootstrap the MachineImpl.
+      auto rpcSystem = capnp::makeRpcServer(network, kj::heap<MachineImpl>(ioContext));
+
+      // Loop forever handling messages.
+      kj::NEVER_DONE.wait(ioContext.waitScope);
+      KJ_UNREACHABLE;
+    });
+
+    // The pidfile contains the VatPath. Write it to stdout, then exit;
+    dumpFile(pidfile, STDOUT_FILENO);
+    context.exit();
+  }
+
+  void dumpFile(int inFd, int outFd) {
+    ssize_t n;
+    off_t offset = 0;
+    do {
+      KJ_SYSCALL(n = sendfile(outFd, inFd, &offset, 4096));
+    } while (n > 0);
   }
 };
 

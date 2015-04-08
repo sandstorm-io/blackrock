@@ -160,6 +160,22 @@ SimpleAddress SimpleAddress::getLocalhost(sa_family_t family) {
   return result;
 }
 
+SimpleAddress SimpleAddress::getInterfaceAddress(sa_family_t family, kj::StringPtr ifname) {
+  struct ifaddrs* addrs;
+  KJ_SYSCALL(getifaddrs(&addrs));
+  KJ_DEFER(freeifaddrs(addrs));
+
+  for (struct ifaddrs* iter = addrs; iter != nullptr; iter = iter->ifa_next) {
+    if (kj::StringPtr(iter->ifa_name) == ifname && iter->ifa_addr != nullptr &&
+        iter->ifa_addr->sa_family == family) {
+      return SimpleAddress(*iter->ifa_addr,
+          family == AF_INET ? sizeof(struct sockaddr_in) : sizeof(struct sockaddr_in6));
+    }
+  }
+
+  KJ_FAIL_REQUIRE("no address found for interface", ifname);
+}
+
 void SimpleAddress::setPort(uint16_t port) {
   switch (addr.sa_family) {
     case AF_INET:

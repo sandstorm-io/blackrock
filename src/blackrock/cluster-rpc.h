@@ -28,6 +28,7 @@ public:
   static SimpleAddress getLocal(kj::AsyncIoStream& socket);
   static SimpleAddress getWildcard(sa_family_t family);
   static SimpleAddress getLocalhost(sa_family_t family);
+  static SimpleAddress getInterfaceAddress(sa_family_t family, kj::StringPtr ifname);
 
   inline sa_family_t family() const { return addr.sa_family; }
 
