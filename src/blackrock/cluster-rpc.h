@@ -26,9 +26,11 @@ public:
 
   static SimpleAddress getPeer(kj::AsyncIoStream& socket);
   static SimpleAddress getLocal(kj::AsyncIoStream& socket);
+  static SimpleAddress getLocal(int fd);
   static SimpleAddress getWildcard(sa_family_t family);
   static SimpleAddress getLocalhost(sa_family_t family);
   static SimpleAddress getInterfaceAddress(sa_family_t family, kj::StringPtr ifname);
+  static SimpleAddress lookup(kj::StringPtr address);
 
   inline sa_family_t family() const { return addr.sa_family; }
 
@@ -41,6 +43,11 @@ public:
 
   kj::Own<kj::NetworkAddress> onNetwork(kj::Network& network);
 
+  inline const struct sockaddr* asSockaddr() const { return &addr; }
+  inline size_t getSockaddrSize() const {
+    return addr.sa_family == AF_INET ? sizeof(ip4) : sizeof(ip6);
+  }
+
   bool operator==(const SimpleAddress& other) const;
   inline bool operator!=(const SimpleAddress& other) const { return !operator==(other); }
 
@@ -50,7 +57,11 @@ private:
     struct sockaddr_in ip4;
     struct sockaddr_in6 ip6;
   };
+
+  friend kj::String KJ_STRINGIFY(const SimpleAddress& addr);
 };
+
+kj::String KJ_STRINGIFY(const SimpleAddress& addr);
 
 class VatNetwork final: public capnp::VatNetwork<VatPath, ProvisionId, RecipientId,
                                                  ThirdPartyCapId, JoinResult> {

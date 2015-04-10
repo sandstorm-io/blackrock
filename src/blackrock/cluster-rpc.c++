@@ -17,6 +17,8 @@
 #include <capnp/serialize-async.h>
 #include <sandstorm/util.h>
 #include <unordered_map>
+#include <netdb.h>
+#include <arpa/inet.h>
 
 namespace blackrock {
 
@@ -135,6 +137,20 @@ auto SimpleAddress::getLocal(kj::AsyncIoStream& socket) -> SimpleAddress {
   return result;
 }
 
+auto SimpleAddress::getLocal(int fd) -> SimpleAddress {
+  SimpleAddress result = nullptr;
+  uint len = sizeof(result);
+  KJ_SYSCALL(getsockname(fd, &result.addr, &len));
+  switch (result.addr.sa_family) {
+    case AF_INET:
+    case AF_INET6:
+      break;
+    default:
+      KJ_FAIL_REQUIRE("Not an IP address!");
+  }
+  return result;
+}
+
 SimpleAddress SimpleAddress::getWildcard(sa_family_t family) {
   SimpleAddress result = nullptr;
   memset(&result, 0, sizeof(result));
@@ -174,6 +190,38 @@ SimpleAddress SimpleAddress::getInterfaceAddress(sa_family_t family, kj::StringP
   }
 
   KJ_FAIL_REQUIRE("no address found for interface", ifname);
+}
+
+SimpleAddress SimpleAddress::lookup(kj::StringPtr address) {
+  kj::String scratch;
+  uint port = 0;
+  KJ_IF_MAYBE(colonPos, address.findFirst(':')) {
+    scratch = kj::heapString(address.slice(0, *colonPos));
+    kj::StringPtr portStr = address.slice(*colonPos + 1);
+    address = scratch;
+
+    char* end;
+    port = strtoul(portStr.cStr(), &end, 10);
+    if (*end != '\0' || portStr.size() == 0) {
+      KJ_FAIL_REQUIRE("invalid port", address, portStr);
+    }
+  }
+
+  struct addrinfo* results;
+  int error = getaddrinfo(address.cStr(), nullptr, nullptr, &results);
+  if (error != 0) {
+    if (error == EAI_SYSTEM) {
+      KJ_FAIL_SYSCALL("getaddrinfo", errno, address);
+    } else {
+      KJ_FAIL_ASSERT("getaddrinfo failed", gai_strerror(error), address);
+    }
+  }
+
+  KJ_DEFER(freeaddrinfo(results));
+
+  SimpleAddress result(*results->ai_addr, results->ai_addrlen);
+  result.setPort(port);
+  return result;
 }
 
 void SimpleAddress::setPort(uint16_t port) {
@@ -238,6 +286,21 @@ bool SimpleAddress::operator==(const SimpleAddress& other) const {
       return other.addr.sa_family == AF_INET6 &&
           memcmp(ip6.sin6_addr.s6_addr, other.ip6.sin6_addr.s6_addr, 16) == 0 &&
           ip6.sin6_port == other.ip6.sin6_port;
+    default:
+      KJ_UNREACHABLE;
+  }
+}
+
+kj::String KJ_STRINGIFY(const SimpleAddress& addr) {
+  char buffer[128];
+
+  switch (addr.addr.sa_family) {
+    case AF_INET:
+      return kj::str(inet_ntop(AF_INET, &addr.ip4.sin_addr, buffer, sizeof(buffer)),
+                     ":", ntohs(addr.ip4.sin_port));
+    case AF_INET6:
+      return kj::str(inet_ntop(AF_INET6, &addr.ip6.sin6_addr, buffer, sizeof(buffer)),
+                     ":", ntohs(addr.ip6.sin6_port));
     default:
       KJ_UNREACHABLE;
   }

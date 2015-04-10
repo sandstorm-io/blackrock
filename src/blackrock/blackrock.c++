@@ -14,6 +14,7 @@
 #include "worker.h"
 #include "fs-storage.h"
 #include "master.h"
+#include "logs.h"
 #include <netdb.h>
 #include <sys/file.h>
 #include <sys/sendfile.h>
@@ -80,6 +81,8 @@ public:
   kj::MainFunc getSlaveMain() {
     return kj::MainBuilder(context, "Sandstorm Blackrock version " SANDSTORM_VERSION,
                            "Starts Blackrock slave.")
+        .addOptionWithArg({'l', "log"}, KJ_BIND_METHOD(*this, setLogSink), "<addr>/<name>",
+            "Redirect console logs to the log sink server at <addr>, self-identifying as <name>.")
         .expectArg("<bind-ip>", KJ_BIND_METHOD(*this, setBindIp))
         .callAfterParsing(KJ_BIND_METHOD(*this, runSlave))
         .build();
@@ -95,6 +98,40 @@ private:
   kj::Own<sandstorm::AbstractMain> alternateMain;
   SimpleAddress bindAddress = nullptr;
 
+  struct LogSinkInfo {
+    SimpleAddress address;
+    kj::StringPtr name;
+  };
+  kj::Maybe<LogSinkInfo> logSinkInfo;
+
+  kj::MainBuilder::Validity setLogSink(kj::StringPtr arg) {
+
+    kj::StringPtr addrStr, name;
+    kj::String scratch;
+
+    KJ_IF_MAYBE(slashPos, arg.findFirst('/')) {
+      scratch = kj::str(arg.slice(0, *slashPos));
+      name = arg.slice(*slashPos + 1);
+      addrStr = scratch;
+    } else {
+      addrStr = arg;
+      name = nullptr;
+    }
+
+    auto address = SimpleAddress::lookup(addrStr);
+
+    // Verify that we can connect at all.
+    {
+      int sock_;
+      KJ_SYSCALL(sock_ = socket(address.family(), SOCK_STREAM, 0));
+      kj::AutoCloseFd sock(sock_);
+      KJ_SYSCALL(connect(sock, address.asSockaddr(), address.getSockaddrSize()));
+    }
+
+    logSinkInfo = LogSinkInfo { address, name };
+    return true;
+  }
+
   kj::MainBuilder::Validity setBindIp(kj::StringPtr bindIp) {
     if (bindIp.startsWith("if4:")) {
       bindAddress = SimpleAddress::getInterfaceAddress(AF_INET, bindIp.slice(strlen("if4:")));
@@ -103,34 +140,7 @@ private:
       bindAddress = SimpleAddress::getInterfaceAddress(AF_INET6, bindIp.slice(strlen("if6:")));
       return true;
     } else {
-      kj::String scratch;
-      uint port = 0;
-      KJ_IF_MAYBE(colonPos, bindIp.findFirst(':')) {
-        scratch = kj::heapString(bindIp.slice(0, *colonPos));
-        kj::StringPtr portStr = bindIp.slice(*colonPos + 1);
-        bindIp = scratch;
-
-        char* end;
-        port = strtoul(portStr.cStr(), &end, 10);
-        if (*end != '\0' || portStr.size() == 0) {
-          return "invalid port";
-        }
-      }
-
-      struct addrinfo* results;
-      int error = getaddrinfo(bindIp.cStr(), nullptr, nullptr, &results);
-      if (error != 0) {
-        if (error == EAI_SYSTEM) {
-          return strerror(errno);
-        } else {
-          return gai_strerror(error);
-        }
-      }
-
-      KJ_DEFER(freeaddrinfo(results));
-
-      bindAddress = SimpleAddress(*results->ai_addr, results->ai_addrlen);
-
+      bindAddress = SimpleAddress::lookup(bindIp);
       return true;
     }
   }
@@ -172,18 +182,23 @@ private:
       capnp::writeMessageToFd(pidfile, vatPath);
     }
 
-    auto logfile = sandstorm::raiiOpen("/var/log/blackrock-slave.log",
-        O_WRONLY | O_APPEND | O_CREAT | O_CLOEXEC, 0600);
-
     sandstorm::Subprocess daemon([&]() -> int {
-      // Redirect stdio.
-      // TODO(soon): Send to logging service!
-      dup2(logfile, STDOUT_FILENO);
-      dup2(logfile, STDERR_FILENO);
-      dup2(sandstorm::raiiOpen("/dev/null", O_RDONLY | O_CLOEXEC), STDIN_FILENO);
-
       // Detach from controlling terminal and make ourselves session leader.
       KJ_SYSCALL(setsid());
+
+      // Write logs to log process.
+      kj::Own<sandstorm::Subprocess> logProc;
+      KJ_IF_MAYBE(l, logSinkInfo) {
+        sendStderrToLogSink(l->name, l->address, "/var/log");
+      }
+
+      // Redirect stdout to stderr (i.e. the log sink).
+      KJ_SYSCALL(dup2(STDERR_FILENO, STDOUT_FILENO));
+
+      // Make standard input /dev/null.
+      dup2(sandstorm::raiiOpen("/dev/null", O_RDONLY | O_CLOEXEC), STDIN_FILENO);
+
+      KJ_DBG("in slave daemon...");
 
       // Set up RPC.
       // TODO(security): Only let the master bootstrap the MachineImpl.

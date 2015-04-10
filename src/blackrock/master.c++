@@ -65,7 +65,7 @@ void runMaster(kj::AsyncIoContext& ioContext, ComputeDriver& driver, MasterConfi
   for (auto& machine: driver.listMachines().wait(ioContext.waitScope)) {
     if (machine.index >= expectedCounts[machine.type]) {
       KJ_LOG(INFO, "STOPPING", machine);
-      driver.stop(machine);
+      startupTasks.add(driver.stop(machine));
     }
   }
 
@@ -159,12 +159,40 @@ kj::String ComputeDriver::MachineId::toString() const {
 
 VagrantDriver::VagrantDriver(sandstorm::SubprocessSet& subprocessSet,
                              kj::LowLevelAsyncIoProvider& ioProvider)
-    : subprocessSet(subprocessSet), ioProvider(ioProvider) {}
+    : subprocessSet(subprocessSet), ioProvider(ioProvider),
+      masterBindAddress(SimpleAddress::getInterfaceAddress(AF_INET, "vboxnet0")),
+      logSink(nullptr), logTask(nullptr), logSinkAddress(masterBindAddress) {
+  // Create socket for the log sink acceptor.
+  int sock;
+  KJ_SYSCALL(sock = socket(masterBindAddress.family(),
+      SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0));
+  {
+    KJ_ON_SCOPE_FAILURE(close(sock));
+    logSinkAddress.setPort(0);
+    KJ_SYSCALL(bind(sock, logSinkAddress.asSockaddr(), logSinkAddress.getSockaddrSize()));
+    KJ_SYSCALL(listen(sock, SOMAXCONN));
+
+    // Read back the assigned port number.
+    logSinkAddress = SimpleAddress::getLocal(sock);
+    KJ_DBG(logSinkAddress);
+  }
+
+  // Accept log connections.
+  auto listener = ioProvider.wrapListenSocketFd(sock,
+      kj::LowLevelAsyncIoProvider::TAKE_OWNERSHIP |
+      kj::LowLevelAsyncIoProvider::ALREADY_CLOEXEC |
+      kj::LowLevelAsyncIoProvider::ALREADY_NONBLOCK);
+
+  logTask = logSink.acceptLoop(kj::mv(listener))
+      .eagerlyEvaluate([](kj::Exception&& exception) {
+    KJ_LOG(ERROR, "LogSink accept loop failed", exception);
+  });
+}
 
 VagrantDriver::~VagrantDriver() noexcept(false) {}
 
 SimpleAddress VagrantDriver::getMasterBindAddress() {
-  return SimpleAddress::getInterfaceAddress(AF_INET, "vboxnet0");
+  return masterBindAddress;
 }
 
 auto VagrantDriver::listMachines() -> kj::Promise<kj::Array<MachineId>> {
@@ -224,8 +252,10 @@ kj::Promise<VatPath::Reader> VagrantDriver::start(MachineId id) {
         kj::LowLevelAsyncIoProvider::Flags::TAKE_OWNERSHIP |
         kj::LowLevelAsyncIoProvider::Flags::ALREADY_CLOEXEC);
 
+    auto addr = kj::str(logSinkAddress, '/', name);
     sandstorm::Subprocess::Options options({
-        "vagrant", "ssh", name, "--", "sudo", "/vagrant/bin/blackrock", "slave", "if4:eth1"});
+        "vagrant", "ssh", name, "--", "sudo", "/vagrant/bin/blackrock",
+        "slave", "--log", addr, "if4:eth1"});
     options.stdout = writeEnd;
     auto exitPromise = subprocessSet.waitForSuccess(kj::mv(options));
 

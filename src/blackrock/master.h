@@ -10,6 +10,7 @@
 #include <kj/async-io.h>
 #include <blackrock/master.capnp.h>
 #include <map>
+#include "logs.h"
 
 namespace sandstorm {
   class SubprocessSet;
@@ -56,9 +57,9 @@ public:
   };
 
   virtual SimpleAddress getMasterBindAddress() = 0;
-  virtual kj::Promise<kj::Array<MachineId>> listMachines() = 0;
-  virtual kj::Promise<VatPath::Reader> start(MachineId id) = 0;
-  virtual kj::Promise<void> stop(MachineId id) = 0;
+  virtual kj::Promise<kj::Array<MachineId>> listMachines() KJ_WARN_UNUSED_RESULT = 0;
+  virtual kj::Promise<VatPath::Reader> start(MachineId id) KJ_WARN_UNUSED_RESULT = 0;
+  virtual kj::Promise<void> stop(MachineId id) KJ_WARN_UNUSED_RESULT = 0;
 };
 
 void runMaster(kj::AsyncIoContext& ioContext, ComputeDriver& driver, MasterConfig::Reader config);
@@ -77,6 +78,11 @@ private:
   sandstorm::SubprocessSet& subprocessSet;
   kj::LowLevelAsyncIoProvider& ioProvider;
   std::map<ComputeDriver::MachineId, kj::Own<capnp::MessageReader>> vatPaths;
+  SimpleAddress masterBindAddress;
+
+  LogSink logSink;
+  kj::Promise<void> logTask;
+  SimpleAddress logSinkAddress;
 };
 
 } // namespace blackrock
