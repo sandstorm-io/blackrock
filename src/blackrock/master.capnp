@@ -12,4 +12,4 @@ struct MasterConfig {
   # For now, we expect exactly one of each of the other machine types.
 }
 
-const testConfig :MasterConfig = (workerCount = 2);
+const testConfig :MasterConfig = (workerCount = 1);

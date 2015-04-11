@@ -25,27 +25,28 @@ public:
 
   kj::MainFunc getServerMain() {
     return kj::MainBuilder(context, "Blackrock logs tester",
-                           "Runs a log server on the given local address. Prints all logs to "
-                           "stdout unless a log directory is provided.")
+                           "Runs a log server locally and arranges for clients to be able "
+                           "to connect to it. Prints all logs to stdout unless a log directory "
+                           "is provided.")
         .addOptionWithArg({'d', "dir"}, KJ_BIND_METHOD(*this, setLogDir), "<path>",
                           "save logs to a directory")
-        .expectArg("<address>", KJ_BIND_METHOD(*this, runServer))
+        .callAfterParsing(KJ_BIND_METHOD(*this, runServer))
         .build();
   }
 
   kj::MainFunc getClientMain() {
     return kj::MainBuilder(context, "Blackrock logs tester",
-                           "Runs a client with the given name connecting to the server at the "
-                           "given address. Whatever you enter on stdin will be logged.")
+                           "Runs a client with the given name connecting to the local server. "
+                           "Whatever you enter on stdin will be logged.")
         .expectArg("<name>", KJ_BIND_METHOD(*this, setName))
-        .expectArg("<address>", KJ_BIND_METHOD(*this, runClient))
+        .callAfterParsing(KJ_BIND_METHOD(*this, runClient))
         .build();
   }
 
   kj::MainFunc getFakeMain() {
     return kj::MainBuilder(context, "Blackrock logs tester",
                            "Runs a fake server that closes connections immediately upon receipt.")
-        .expectArg("<address>", KJ_BIND_METHOD(*this, runFake))
+        .callAfterParsing(KJ_BIND_METHOD(*this, runFake))
         .build();
   }
 
@@ -53,6 +54,7 @@ private:
   kj::ProcessContext& context;
   kj::Maybe<kj::AutoCloseFd> logDir;
   kj::StringPtr name;
+  kj::StringPtr addrFile = "/tmp/blackrock-logs-tester-addr";
 
   bool setLogDir(kj::StringPtr arg) {
     logDir = sandstorm::raiiOpen(arg, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
@@ -64,28 +66,36 @@ private:
     return true;
   }
 
-  bool runServer(kj::StringPtr arg) {
+  bool runServer() {
     auto io = kj::setupAsyncIo();
     LogSink sink(logDir.map([](auto& fd) { return fd.get(); }));
-    sink.acceptLoop(io.provider->getNetwork().parseAddress(arg).wait(io.waitScope)->listen())
-        .wait(io.waitScope);
+    sink.acceptLoop(listen(io.provider->getNetwork())).wait(io.waitScope);
     return true;
   }
 
-  bool runClient(kj::StringPtr arg) {
-    sendStderrToLogSink(name, SimpleAddress::lookup(arg), ".");
+  bool runClient() {
+    sendStderrToLogSink(name, addrFile, "/tmp");
     KJ_SYSCALL(dup2(STDERR_FILENO, STDOUT_FILENO));
     sandstorm::Subprocess({"cat"}).waitForSuccess();
     return true;
   }
 
-  bool runFake(kj::StringPtr arg) {
+  bool runFake() {
     auto io = kj::setupAsyncIo();
-    auto listener = io.provider->getNetwork().parseAddress(arg).wait(io.waitScope)->listen();
+    auto listener = listen(io.provider->getNetwork());
     for (;;) {
       // Accept connections and just close them right away.
       listener->accept().wait(io.waitScope);
     }
+  }
+
+  kj::Own<kj::ConnectionReceiver> listen(kj::Network& network) {
+    auto addr = SimpleAddress::getLocalhost(AF_INET);
+    auto listener = addr.onNetwork(network)->listen();
+    addr.setPort(listener->getPort());
+    kj::FdOutputStream(sandstorm::raiiOpen(addrFile, O_WRONLY | O_CREAT | O_TRUNC))
+        .write(&addr, sizeof(addr));
+    return listener;
   }
 };
 

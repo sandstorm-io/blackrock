@@ -174,7 +174,6 @@ VagrantDriver::VagrantDriver(sandstorm::SubprocessSet& subprocessSet,
 
     // Read back the assigned port number.
     logSinkAddress = SimpleAddress::getLocal(sock);
-    KJ_DBG(logSinkAddress);
   }
 
   // Accept log connections.

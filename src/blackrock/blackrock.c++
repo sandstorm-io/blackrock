@@ -19,6 +19,7 @@
 #include <sys/file.h>
 #include <sys/sendfile.h>
 #include <ifaddrs.h>
+#include <stdio.h>
 
 namespace blackrock {
 
@@ -33,6 +34,8 @@ public:
   }
 
   kj::Promise<void> becomeStorage(BecomeStorageContext context) override {
+    KJ_DBG("become storage...");
+
     mkdir("/var", 0777);
     mkdir("/var/blackrock", 0777);
     mkdir("/var/blackrock/storage", 0777);
@@ -49,6 +52,8 @@ public:
   }
 
   kj::Promise<void> becomeWorker(BecomeWorkerContext context) override {
+    KJ_DBG("become worker...");
+
     context.getResults().setWorker(kj::heap<WorkerImpl>(ioContext));
     return kj::READY_NOW;
   }
@@ -56,6 +61,8 @@ public:
 private:
   kj::AsyncIoContext& ioContext;
 };
+
+static constexpr const char LOG_ADDRESS_FILE[] = "/var/run/blackrock-logsink-address";
 
 class Main {
 public:
@@ -98,14 +105,9 @@ private:
   kj::Own<sandstorm::AbstractMain> alternateMain;
   SimpleAddress bindAddress = nullptr;
 
-  struct LogSinkInfo {
-    SimpleAddress address;
-    kj::StringPtr name;
-  };
-  kj::Maybe<LogSinkInfo> logSinkInfo;
+  kj::Maybe<kj::StringPtr> loggingName;
 
   kj::MainBuilder::Validity setLogSink(kj::StringPtr arg) {
-
     kj::StringPtr addrStr, name;
     kj::String scratch;
 
@@ -128,7 +130,12 @@ private:
       KJ_SYSCALL(connect(sock, address.asSockaddr(), address.getSockaddrSize()));
     }
 
-    logSinkInfo = LogSinkInfo { address, name };
+    kj::String tempname = kj::str(LOG_ADDRESS_FILE, '~');
+    kj::FdOutputStream(sandstorm::raiiOpen(tempname, O_WRONLY | O_CREAT | O_EXCL, 0600))
+        .write(&address, sizeof(address));
+    KJ_SYSCALL(rename(tempname.cStr(), LOG_ADDRESS_FILE));
+
+    loggingName = name;
     return true;
   }
 
@@ -171,6 +178,13 @@ private:
     // We're the only slave running. Go!
     KJ_SYSCALL(ftruncate(pidfile, 0));
 
+    // Write logs to log process.
+    kj::Own<sandstorm::Subprocess> logProc;
+    KJ_IF_MAYBE(n, loggingName) {
+      sendStderrToLogSink(*n, LOG_ADDRESS_FILE, "/var/log");
+    }
+
+    // Set up the VatNetwork before we fork, so that we know it's ready to receive connections.
     auto ioContext = kj::setupAsyncIo();
     VatNetwork network(ioContext.provider->getNetwork(), ioContext.provider->getTimer(),
                        bindAddress);
@@ -186,19 +200,13 @@ private:
       // Detach from controlling terminal and make ourselves session leader.
       KJ_SYSCALL(setsid());
 
-      // Write logs to log process.
-      kj::Own<sandstorm::Subprocess> logProc;
-      KJ_IF_MAYBE(l, logSinkInfo) {
-        sendStderrToLogSink(l->name, l->address, "/var/log");
-      }
-
       // Redirect stdout to stderr (i.e. the log sink).
       KJ_SYSCALL(dup2(STDERR_FILENO, STDOUT_FILENO));
 
       // Make standard input /dev/null.
       dup2(sandstorm::raiiOpen("/dev/null", O_RDONLY | O_CLOEXEC), STDIN_FILENO);
 
-      KJ_DBG("in slave daemon...");
+      KJ_DBG("starting slave...");
 
       // Set up RPC.
       // TODO(security): Only let the master bootstrap the MachineImpl.

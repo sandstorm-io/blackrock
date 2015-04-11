@@ -182,12 +182,13 @@ void LogSink::taskFailed(kj::Exception&& exception) {
 
 class LogClient {
 public:
-  LogClient(kj::Timer& timer, kj::StringPtr name, kj::StringPtr backlogDir,
-            kj::Own<kj::NetworkAddress> address,
+  LogClient(kj::Network& network, kj::Timer& timer, kj::StringPtr name,
+            kj::StringPtr backlogDir, kj::StringPtr logAddressFile,
             kj::Own<kj::AsyncInputStream> input)
-      : timer(timer),
+      : network(network),
+        timer(timer),
         nameLine(kj::str(name, '\n')),
-        address(kj::mv(address)),
+        logAddressFile(logAddressFile),
         input(kj::mv(input)),
         backlogName(kj::str(backlogDir, "/blackrock-backlog.", time(nullptr), '.', getpid())),
         backlog(sandstorm::raiiOpen(backlogName, O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0600)),
@@ -214,16 +215,30 @@ public:
         kj::ArrayPtr<const byte> dataPtr = data;
         writeQueue = writeQueue.then([this,size,dataPtr]() -> kj::Promise<void> {
           KJ_IF_MAYBE(c, connection) {
-            return kj::evalNow([&]() {
-              return c->get()->write(dataPtr.begin(), dataPtr.size());
-            }).catch_([this,dataPtr](kj::Exception&& exception) {
+            if (receivedEof) {
+              // It appears that we've received an EOF from the other end, therefore anything we
+              // write() now may be silently lost.
               connection = nullptr;
-              if (expectDisconnected(exception)) {
-                KJ_LOG(ERROR, "log sink disconnected; trying to reconnect");
-              }
               writeBacklog(dataPtr);
               reconnectTask = reconnect();
-            });
+              return kj::READY_NOW;
+            } else {
+              return kj::evalNow([&]() {
+                return c->get()->write(dataPtr.begin(), dataPtr.size());
+              }).catch_([this,dataPtr](kj::Exception&& exception) {
+                // Cancel existing reconnect task (which may still be looping in awaitEof(), which
+                // uses `connection`, which we're about to destroy).
+                reconnectTask = nullptr;
+
+                // Discard the connection.
+                connection = nullptr;
+                if (expectDisconnected(exception)) {
+                  KJ_LOG(ERROR, "log sink disconnected (write error); trying to reconnect");
+                }
+                writeBacklog(dataPtr);
+                reconnectTask = reconnect();
+              });
+            }
           } else {
             writeBacklog(dataPtr);
             return kj::READY_NOW;
@@ -236,9 +251,10 @@ public:
   }
 
 private:
+  kj::Network& network;
   kj::Timer& timer;
   kj::String nameLine;
-  kj::Own<kj::NetworkAddress> address;
+  kj::StringPtr logAddressFile;
   kj::Own<kj::AsyncInputStream> input;
   kj::String backlogName;
   kj::AutoCloseFd backlog;
@@ -246,6 +262,7 @@ private:
   kj::Maybe<kj::Own<kj::AsyncIoStream>> connection;
   kj::Promise<void> writeQueue = kj::READY_NOW;
   kj::Promise<void> reconnectTask;
+  bool receivedEof = false;
   off_t backlogOffset = 0;
   byte buffer[4096];
   byte backlogBuffer[4096];
@@ -263,7 +280,15 @@ private:
 
   kj::Promise<void> reconnectLoop() {
     return kj::evalNow([&]() {
-      return address->connect();
+      // Read the log address from the file.
+      SimpleAddress address = nullptr;
+      kj::FdInputStream(sandstorm::raiiOpen(logAddressFile, O_RDONLY | O_CLOEXEC))
+          .read(&address, sizeof(address));
+
+      // Connect to it.
+      auto addressObj = address.onNetwork(network);
+      auto promise = addressObj->connect();
+      return promise.attach(kj::mv(addressObj));
     }).then([this](kj::Own<kj::AsyncIoStream>&& newConnection) -> kj::Promise<void> {
       // Connected, start writing the backlog to the new connection.
 
@@ -300,8 +325,10 @@ private:
       backlogOffset = 0;
 
       // Now we can continue on.
+      receivedEof = false;
+      auto promise = awaitEof(*newConnection);
       connection = kj::mv(newConnection);
-      return kj::READY_NOW;
+      return promise;
     } else {
       backlogOffset += n;
 
@@ -328,9 +355,30 @@ private:
       return false;
     }
   }
+
+  kj::Promise<void> awaitEof(kj::AsyncIoStream& connection) {
+    static byte dummy[1024];
+    return connection.tryRead(&dummy, 1, sizeof(dummy))
+        .then([this,&connection](size_t n) -> kj::Promise<void> {
+      if (n > 0) {
+        return awaitEof(connection);
+      } else {
+        KJ_LOG(ERROR, "log sink disconnected (EOF); will reconnect on next log");
+        receivedEof = true;
+        return kj::READY_NOW;
+      }
+    }, [this](kj::Exception&& exception) -> kj::Promise<void> {
+      if (expectDisconnected(exception)) {
+        KJ_LOG(ERROR, "log sink disconnected (read error); will reconnect on next log");
+      }
+      receivedEof = true;
+      return kj::READY_NOW;
+    });
+  }
 };
 
-void sendStderrToLogSink(kj::StringPtr name, SimpleAddress destination, kj::StringPtr backlogDir) {
+void sendStderrToLogSink(kj::StringPtr name, kj::StringPtr logAddressFile,
+                         kj::StringPtr backlogDir) {
   int fds[2];
   KJ_SYSCALL(pipe2(fds, O_CLOEXEC));
   kj::AutoCloseFd readEnd(fds[0]);
@@ -341,8 +389,9 @@ void sendStderrToLogSink(kj::StringPtr name, SimpleAddress destination, kj::Stri
 
     auto ioContext = kj::setupAsyncIo();
 
-    LogClient client(ioContext.lowLevelProvider->getTimer(), name, backlogDir,
-                     destination.onNetwork(ioContext.provider->getNetwork()),
+    LogClient client(ioContext.provider->getNetwork(),
+                     ioContext.lowLevelProvider->getTimer(),
+                     name, backlogDir, logAddressFile,
                      ioContext.lowLevelProvider->wrapInputFd(readEnd,
                          kj::LowLevelAsyncIoProvider::ALREADY_CLOEXEC));
     client.redirectToBacklog(STDOUT_FILENO);
