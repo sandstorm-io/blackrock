@@ -387,6 +387,8 @@ void sendStderrToLogSink(kj::StringPtr name, kj::StringPtr logAddressFile,
   sandstorm::Subprocess([&]() -> int {
     writeEnd = nullptr;
 
+    // Rename the task so that when we kill all blackrock processes we can avoid killing the
+    // logger, which will die naturally as soon as it finishes up.
     KJ_SYSCALL(prctl(PR_SET_NAME, "blackrock-log", 0, 0, 0));
 
     auto ioContext = kj::setupAsyncIo();

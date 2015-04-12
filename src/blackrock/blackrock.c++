@@ -22,6 +22,7 @@
 #include <stdio.h>
 #include <signal.h>
 #include <sys/types.h>
+#include "backend-set.h"
 
 namespace blackrock {
 
@@ -31,44 +32,86 @@ class MachineImpl: public Machine::Server {
 
 public:
   MachineImpl(kj::AsyncIoContext& ioContext): ioContext(ioContext) {}
-  ~MachineImpl() {
-    KJ_LOG(WARNING, "master disconnected");
-  }
 
   kj::Promise<void> becomeStorage(BecomeStorageContext context) override {
-    KJ_DBG("become storage...");
+    StorageInfo* info;
+    KJ_IF_MAYBE(i, storageInfo) {
+      KJ_LOG(INFO, "rebecome storage...");
+      info = *i;
+    } else {
+      KJ_LOG(INFO, "become storage...");
+      mkdir("/var", 0755);
+      mkdir("/var/blackrock", 0755);
+      mkdir("/var/blackrock/storage", 0755);
+      auto ptr = kj::heap<StorageInfo>(ioContext);
+      info = ptr;
+      storageInfo = kj::mv(ptr);
+    }
 
-    mkdir("/var", 0777);
-    mkdir("/var/blackrock", 0777);
-    mkdir("/var/blackrock/storage", 0777);
-
-    StorageRootSet::Client storage = kj::heap<FilesystemStorage>(
-        sandstorm::raiiOpen("/var/blackrock/storage", O_RDONLY | O_DIRECTORY | O_CLOEXEC),
-        ioContext.unixEventPort, ioContext.lowLevelProvider->getTimer(), nullptr);
-    // TODO(someday): restorers, both incoming and outgoing
     auto results = context.getResults();
-    results.setStorageFactory(storage.getFactoryRequest().send().getFactory());
-    results.setRootSet(kj::mv(storage));
+    results.setSibling(info->selfAsSibling);
+    results.setRootSet(info->rootSet);
+    results.setStorageRestorer(info->restorer);
+    results.setStorageFactory(info->factory);
+
+    results.setSiblingSet(kj::addRef(*info->siblingSet));
+    results.setHostedRestorerSet(kj::addRef(*info->hostedRestorerSet));
+    results.setGatewayRestorerSet(kj::addRef(*info->gatewayRestorerSet));
 
     return kj::READY_NOW;
   }
 
   kj::Promise<void> becomeWorker(BecomeWorkerContext context) override {
-    KJ_DBG("become worker...");
+    Worker::Client client = nullptr;
+    KJ_IF_MAYBE(w, worker) {
+      KJ_LOG(INFO, "rebecome worker...");
+      client = *w;
+    } else {
+      KJ_LOG(INFO, "become worker...");
+      client = kj::heap<WorkerImpl>(ioContext);
+      worker = client;
+    }
 
-    context.getResults().setWorker(kj::heap<WorkerImpl>(ioContext));
+    context.getResults().setWorker(kj::mv(client));
     return kj::READY_NOW;
   }
 
 private:
   kj::AsyncIoContext& ioContext;
+
+  struct StorageInfo {
+    StorageSibling::Client selfAsSibling;
+    StorageRootSet::Client rootSet;
+    MasterRestorer<SturdyRef::Stored>::Client restorer;
+    StorageFactory::Client factory;
+
+    kj::Own<BackendSetImpl<StorageSibling>> siblingSet;
+    kj::Own<BackendSetImpl<Restorer<SturdyRef::Hosted>>> hostedRestorerSet;
+    kj::Own<BackendSetImpl<Restorer<SturdyRef::External>>> gatewayRestorerSet;
+
+    StorageInfo(kj::AsyncIoContext& ioContext)
+        : selfAsSibling(nullptr),  // TODO(someday)
+          rootSet(kj::heap<FilesystemStorage>(
+              sandstorm::raiiOpen("/var/blackrock/storage", O_RDONLY | O_DIRECTORY | O_CLOEXEC),
+              ioContext.unixEventPort, ioContext.lowLevelProvider->getTimer(), nullptr)),
+          restorer(nullptr),       // TODO(someday)
+          factory(rootSet.getFactoryRequest().send().getFactory()),
+          siblingSet(kj::refcounted<BackendSetImpl<StorageSibling>>()),
+          hostedRestorerSet(kj::refcounted<BackendSetImpl<Restorer<SturdyRef::Hosted>>>()),
+          gatewayRestorerSet(kj::refcounted<BackendSetImpl<Restorer<SturdyRef::External>>>()) {}
+  };
+  kj::Maybe<kj::Own<StorageInfo>> storageInfo;
+
+  kj::Maybe<Worker::Client> worker;
 };
 
 static constexpr const char LOG_ADDRESS_FILE[] = "/var/run/blackrock-logsink-address";
 
 class Main {
 public:
-  Main(kj::ProcessContext& context): context(context) {}
+  Main(kj::ProcessContext& context): context(context) {
+    kj::_::Debug::setLogLevel(kj::LogSeverity::INFO);
+  }
 
   kj::MainFunc getMain() {
     return kj::MainBuilder(context, "Sandstorm Blackrock version " SANDSTORM_VERSION,
@@ -243,7 +286,7 @@ private:
       // Make standard input /dev/null.
       dup2(sandstorm::raiiOpen("/dev/null", O_RDONLY | O_CLOEXEC), STDIN_FILENO);
 
-      KJ_DBG("starting slave...");
+      KJ_LOG(INFO, "starting slave...");
 
       // Set up RPC.
       // TODO(security): Only let the master bootstrap the MachineImpl.

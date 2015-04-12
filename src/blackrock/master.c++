@@ -116,6 +116,7 @@ void runMaster(kj::AsyncIoContext& ioContext, ComputeDriver& driver, MasterConfi
   }
 
   // Loop forever handling messages.
+  KJ_LOG(INFO, "Blackrock READY");
   kj::NEVER_DONE.wait(ioContext.waitScope);
   KJ_UNREACHABLE;
 }
