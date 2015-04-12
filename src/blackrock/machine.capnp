@@ -90,8 +90,8 @@ interface Machine {
   becomeCoordinator @2 ()
                     -> (coordinator :Worker.Coordinator,
                         hostedRestorer :MasterRestorer(SturdyRef.Hosted),
-                        workerSet: BackendSet(Worker.Worker),
-                        storageRestorerSet: BackendSet(Restorer(SturdyRef.Stored)));
+                        workerSet :BackendSet(Worker.Worker),
+                        storageRestorerSet :BackendSet(Restorer(SturdyRef.Stored)));
   becomeGateway @3 (storage :Storage.Assignable(StorageSchema.GatewayStorage))
                 -> (gateway :Gateway,
                     externalRestorer :MasterRestorer(SturdyRef.External),
