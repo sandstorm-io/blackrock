@@ -387,6 +387,8 @@ void sendStderrToLogSink(kj::StringPtr name, kj::StringPtr logAddressFile,
   sandstorm::Subprocess([&]() -> int {
     writeEnd = nullptr;
 
+    KJ_SYSCALL(prctl(PR_SET_NAME, "blackrock-log", 0, 0, 0));
+
     auto ioContext = kj::setupAsyncIo();
 
     LogClient client(ioContext.provider->getNetwork(),

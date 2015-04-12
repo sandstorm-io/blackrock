@@ -57,12 +57,25 @@ public:
   };
 
   virtual SimpleAddress getMasterBindAddress() = 0;
+  // Get the address at which other machines in the cluster will see the master (i.e. this)
+  // machine.
+
   virtual kj::Promise<kj::Array<MachineId>> listMachines() KJ_WARN_UNUSED_RESULT = 0;
-  virtual kj::Promise<VatPath::Reader> start(MachineId id) KJ_WARN_UNUSED_RESULT = 0;
+  // List all machines currently running in the cluster.
+
+  virtual kj::Promise<VatPath::Reader> start(
+      MachineId id, bool requireRestartProcess) KJ_WARN_UNUSED_RESULT = 0;
+  // Start the given machine if it is not already started. If `requireRestartProcess` is true,
+  // then if the machine is already running, all blackrock processes on it should be immediately
+  // terminated and restarted using the latest version. Note that `requireRestartProcess` is often
+  // much faster than stop() followed by start(), but not as reliable.
+
   virtual kj::Promise<void> stop(MachineId id) KJ_WARN_UNUSED_RESULT = 0;
+  // Shut down the given machine.
 };
 
-void runMaster(kj::AsyncIoContext& ioContext, ComputeDriver& driver, MasterConfig::Reader config);
+void runMaster(kj::AsyncIoContext& ioContext, ComputeDriver& driver, MasterConfig::Reader config,
+               bool shouldRestart);
 
 class VagrantDriver: public ComputeDriver {
 public:
@@ -71,7 +84,7 @@ public:
 
   SimpleAddress getMasterBindAddress() override;
   kj::Promise<kj::Array<MachineId>> listMachines() override;
-  kj::Promise<VatPath::Reader> start(MachineId id) override;
+  kj::Promise<VatPath::Reader> start(MachineId id, bool requireRestartProcess) override;
   kj::Promise<void> stop(MachineId id) override;
 
 private:

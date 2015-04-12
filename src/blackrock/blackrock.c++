@@ -20,6 +20,8 @@
 #include <sys/sendfile.h>
 #include <ifaddrs.h>
 #include <stdio.h>
+#include <signal.h>
+#include <sys/types.h>
 
 namespace blackrock {
 
@@ -81,6 +83,8 @@ public:
   kj::MainFunc getMasterMain() {
     return kj::MainBuilder(context, "Sandstorm Blackrock version " SANDSTORM_VERSION,
                            "Starts Blackrock master.")
+        .addOption({'r', "restart"}, KJ_BIND_METHOD(*this, setRestart),
+            "Restart all slave machines immediately.")
         .expectArg("<master-config>", KJ_BIND_METHOD(*this, runMaster))
         .build();
   }
@@ -90,6 +94,8 @@ public:
                            "Starts Blackrock slave.")
         .addOptionWithArg({'l', "log"}, KJ_BIND_METHOD(*this, setLogSink), "<addr>/<name>",
             "Redirect console logs to the log sink server at <addr>, self-identifying as <name>.")
+        .addOption({'r', "restart"}, KJ_BIND_METHOD(*this, killExisting),
+            "Kill any existing slave running on this machine.")
         .expectArg("<bind-ip>", KJ_BIND_METHOD(*this, setBindIp))
         .callAfterParsing(KJ_BIND_METHOD(*this, runSlave))
         .build();
@@ -104,6 +110,8 @@ private:
   kj::ProcessContext& context;
   kj::Own<sandstorm::AbstractMain> alternateMain;
   SimpleAddress bindAddress = nullptr;
+  bool killedExisting = false;
+  bool shouldRestart = false;
 
   kj::Maybe<kj::StringPtr> loggingName;
 
@@ -152,6 +160,35 @@ private:
     }
   }
 
+  kj::MainBuilder::Validity killExisting() {
+    pid_t me = getpid();
+
+    for (auto& file: sandstorm::listDirectory("/proc")) {
+      KJ_IF_MAYBE(pid, sandstorm::parseUInt(file, 10)) {
+        if (*pid != me) {
+          auto maybeFd = sandstorm::raiiOpenIfExists(kj::str("/proc/", file, "/comm"), O_RDONLY);
+          // No big deal if it doesn't exist. Probably the pid disappeared while we were listing
+          // the directory.
+
+          KJ_IF_MAYBE(fd, maybeFd) {
+            if (sandstorm::trim(sandstorm::readAll(*fd)) == "blackrock") {
+              KJ_SYSCALL(kill(*pid, SIGTERM));
+            }
+          }
+        }
+      }
+    }
+
+    killedExisting = true;
+
+    return true;
+  }
+
+  kj::MainBuilder::Validity setRestart() {
+    shouldRestart = true;
+    return true;
+  }
+
   bool runMaster(kj::StringPtr configFile) {
     capnp::StreamFdMessageReader configReader(
         sandstorm::raiiOpen(configFile, O_RDONLY | O_CLOEXEC));
@@ -159,7 +196,7 @@ private:
     auto ioContext = kj::setupAsyncIo();
     sandstorm::SubprocessSet subprocessSet(ioContext.unixEventPort);
     VagrantDriver driver(subprocessSet, *ioContext.lowLevelProvider);
-    blackrock::runMaster(ioContext, driver, configReader.getRoot<MasterConfig>());
+    blackrock::runMaster(ioContext, driver, configReader.getRoot<MasterConfig>(), shouldRestart);
     KJ_UNREACHABLE;
   }
 
@@ -167,7 +204,7 @@ private:
     auto pidfile = sandstorm::raiiOpen("/var/run/blackrock-slave",
         O_RDWR | O_CREAT | O_CLOEXEC, 0600);
     int l;
-    KJ_NONBLOCKING_SYSCALL(l = flock(pidfile, LOCK_EX | LOCK_NB));
+    KJ_NONBLOCKING_SYSCALL(l = flock(pidfile, LOCK_EX | (killedExisting ? 0 : LOCK_NB)));
 
     if (l < 0) {
       // pidfile locked; slave already running

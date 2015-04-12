@@ -45,7 +45,8 @@ kj::Promise<kj::String> readAllAsync(kj::AsyncInputStream& input,
 
 }  // namespace
 
-void runMaster(kj::AsyncIoContext& ioContext, ComputeDriver& driver, MasterConfig::Reader config) {
+void runMaster(kj::AsyncIoContext& ioContext, ComputeDriver& driver, MasterConfig::Reader config,
+               bool shouldRestart) {
   KJ_REQUIRE(config.getWorkerCount() > 0, "need at least one worker");
 
   kj::Vector<kj::Promise<void>> startupTasks;
@@ -69,9 +70,10 @@ void runMaster(kj::AsyncIoContext& ioContext, ComputeDriver& driver, MasterConfi
     }
   }
 
-  auto start = [&startupTasks,&driver](ComputeDriver::MachineId id, VatPath::Reader& pathSlot) {
+  auto start = [&startupTasks,&driver,shouldRestart](
+      ComputeDriver::MachineId id, VatPath::Reader& pathSlot) {
     KJ_LOG(INFO, "STARTING", id);
-    startupTasks.add(driver.start(id).then([id,&pathSlot](auto path) {
+    startupTasks.add(driver.start(id, shouldRestart).then([id,&pathSlot](auto path) {
       KJ_LOG(INFO, "READY", id);
       pathSlot = path;
     }));
@@ -239,9 +241,9 @@ auto VagrantDriver::listMachines() -> kj::Promise<kj::Array<MachineId>> {
   });
 }
 
-kj::Promise<VatPath::Reader> VagrantDriver::start(MachineId id) {
+kj::Promise<VatPath::Reader> VagrantDriver::start(MachineId id, bool requireRestartProcess) {
   return subprocessSet.waitForSuccess({"vagrant", "up", kj::str(id)})
-      .then([this,id]() {
+      .then([this,id,requireRestartProcess]() {
     kj::String name = kj::str(id);
 
     int fds[2];
@@ -252,9 +254,12 @@ kj::Promise<VatPath::Reader> VagrantDriver::start(MachineId id) {
         kj::LowLevelAsyncIoProvider::Flags::ALREADY_CLOEXEC);
 
     auto addr = kj::str(logSinkAddress, '/', name);
-    sandstorm::Subprocess::Options options({
+    kj::Vector<kj::StringPtr> args;
+    args.addAll(kj::ArrayPtr<const kj::StringPtr>({
         "vagrant", "ssh", name, "--", "sudo", "/vagrant/bin/blackrock",
-        "slave", "--log", addr, "if4:eth1"});
+        "slave", "--log", addr, "if4:eth1"}));
+    if (requireRestartProcess) args.add("-r");
+    sandstorm::Subprocess::Options options(args.asPtr());
     options.stdout = writeEnd;
     auto exitPromise = subprocessSet.waitForSuccess(kj::mv(options));
 
