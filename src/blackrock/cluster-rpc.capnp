@@ -181,6 +181,33 @@ struct JoinResult {
   # TODO(someday)
 }
 
+interface BackendSet(T) {
+  # Callbacks for notifying a machine of changes to its set of back-ends. When the master tells
+  # a machine to take on a role, the machine returns various BackendSets which the master then
+  # populates.
+
+  reset @0 (backends :List(IdBackendPair));
+  # Drop the entire existing backend list and replace it with this new one. Called in particular at
+  # startup, or whenever the master has restarted. After reset(), previously-used ID values may
+  # be reused.
+
+  struct IdBackendPair {
+    id @0 :UInt64;
+    backend @1 :T;
+  }
+
+  add @1 (id :UInt64, backend :T);
+  # Add a new back-end.
+
+  remove @2 (id :UInt64);
+  # Remove an existing back-end. The ID will NOT be reused for this set (unless reset() is first
+  # called).
+  #
+  # Note that we cannot identify the backend as a capability here because it may be down, in which
+  # case the receiver could never possibly figure out which existing backend in the set that it
+  # matched.
+}
+
 # ========================================================================================
 # Transport Protocol
 #

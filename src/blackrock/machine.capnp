@@ -16,6 +16,7 @@ using VatId = ClusterRpc.VatId;
 using Address = ClusterRpc.Address;
 using SturdyRef = ClusterRpc.SturdyRef;
 using Restorer = ClusterRpc.Restorer;
+using BackendSet = ClusterRpc.BackendSet;
 
 interface MasterRestorer(Ref) {
   # Represents a Restorer that can restore capabilities for any owner. This capability should only
@@ -60,31 +61,6 @@ interface MongoSibling {
   # TODO(soon): Information needed to set up replicas.
 }
 
-interface BackendSet(T) {
-  # Callbacks for notifying a machine of changes to its set of back-ends. When the master tells
-  # a machine to take on a role, the machine returns various BackendSets which the master then
-  # populates.
-
-  reset @0 (backends :List(IdBackendPair));
-  # Drop the entire existing backend list and replace it with this new one. Called in particular at
-  # startup, or whenever the master has restarted.
-
-  struct IdBackendPair {
-    id @0 :UInt64;
-    backend @1 :T;
-  }
-
-  add @1 (id :UInt64, backend :T);
-  # Add a new back-end.
-
-  remove @2 (id :UInt64);
-  # Remove an existing back-end.
-  #
-  # Note that we cannot identify the backend as a capability here because it may be down, in which
-  # case the receiver could never possibly figure out which existing backend in the set that it
-  # matched.
-}
-
 interface Machine {
   # A machine, ready to serve.
   #
@@ -109,7 +85,7 @@ interface Machine {
                     storageFactory :Storage.StorageFactory,
                     siblingSet: BackendSet(Storage.StorageSibling),
                     hostedRestorerSet: BackendSet(Restorer(SturdyRef.Hosted)),
-                    gatewayRestorerSet: BackendSet(Restorer(SturdyRef.Stored)));
+                    gatewayRestorerSet: BackendSet(Restorer(SturdyRef.External)));
   becomeWorker @1 () -> (worker :Worker.Worker);
   becomeCoordinator @2 ()
                     -> (coordinator :Worker.Coordinator,
