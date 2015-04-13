@@ -120,6 +120,8 @@ public:
         .addSubCommand("slave", KJ_BIND_METHOD(*this, getSlaveMain), "run as slave node")
         .addSubCommand("grain", KJ_BIND_METHOD(*this, getSupervisorMain),
             "(internal) run a supervised grain")
+        .addSubCommand("unpack", KJ_BIND_METHOD(*this, getUnpackMain),
+            "(internal) unpack an spk into a network volume")
         .build();
   }
 
@@ -146,6 +148,11 @@ public:
 
   kj::MainFunc getSupervisorMain() {
     alternateMain = kj::heap<SupervisorMain>(context);
+    return alternateMain->getMain();
+  }
+
+  kj::MainFunc getUnpackMain() {
+    alternateMain = kj::heap<UnpackMain>(context);
     return alternateMain->getMain();
   }
 

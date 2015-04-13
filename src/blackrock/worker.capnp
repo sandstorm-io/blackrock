@@ -11,6 +11,7 @@ using Grain = import "/sandstorm/grain.capnp";
 using Storage = import "storage.capnp";
 using StorageSchema = import "storage-schema.capnp";
 using Package = import "/sandstorm/package.capnp";
+using Util = import "/sandstorm/util.capnp";
 
 using GrainState = StorageSchema.GrainState;
 
@@ -40,8 +41,20 @@ interface Worker {
   # caller must have already called `disconnectAllClients()` at the same time as it claimed the
   # grain.
 
-  # TODO(now): Enumerate grains.
-  # TODO(now): Resource usage stats.
+  unpackPackage @2 (volume :Storage.Volume) -> (stream :PackageUploadStream);
+  # Initiate upload of a package, unpacking it into the given Volume (which should start out
+  # uninitialized).
+
+  interface PackageUploadStream extends(Util.ByteStream) {
+    getResult @0 () -> (appId :Text, manifest :Package.Manifest);
+    # Waits until `ByteStream.done()` is called, then returns:
+    #
+    # `appId`: The verified application ID string, as produced by the `spk` tool.
+    # `manifest`: The parsed package manifest.
+  }
+
+  # TODO(someday): Enumerate grains.
+  # TODO(someday): Resource usage stats.
 }
 
 interface Coordinator {

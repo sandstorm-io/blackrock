@@ -7,9 +7,12 @@
 #include "nbd-bridge.h"
 #include <sodium/randombytes.h>
 #include <capnp/rpc-twoparty.h>
+#include <capnp/serialize.h>
+#include <capnp/serialize-async.h>
 #include <sandstorm/version.h>
 #include <sys/mount.h>
 #include <grp.h>
+#include <sandstorm/spk.h>
 
 namespace blackrock {
 
@@ -144,37 +147,31 @@ public:
                Volume::Client volume,
                kj::Own<kj::AsyncIoStream> capnpSocket,
                kj::Own<PackageMountSet::PackageMount> packageMount,
-               sandstorm::Subprocess::Options&& subprocessOptions,
-               kj::PromiseFulfillerPair<sandstorm::Supervisor::Client> paf =
-                   kj::newPromiseAndFulfiller<sandstorm::Supervisor::Client>())
+               sandstorm::Subprocess::Options&& subprocessOptions)
       : worker(worker),
         workerCap(kj::mv(workerCap)),
         grainState(kj::mv(grainState)),
         packageMount(kj::mv(packageMount)),
         nbdVolume(kj::mv(nbdSocket), kj::mv(volume)),
-        process(kj::mv(subprocessOptions)),
+        process(worker.subprocessSet.waitForSuccess(kj::mv(subprocessOptions)).fork()),
         capnpSocket(kj::mv(capnpSocket)),
         vatNetwork(*this->capnpSocket, capnp::rpc::twoparty::Side::SERVER),
         rpcSystem(capnp::makeRpcServer(vatNetwork, kj::heap<SandstormCoreImpl>())),
         disconnectTask(vatNetwork.onDisconnect().attach(kj::defer([this]() {
           disconnected = true;
-        })).eagerlyEvaluate(nullptr)),
-        exitedFulfiller(kj::mv(paf.fulfiller)),
-        exitedPromise(paf.promise.fork()) {
+        })).eagerlyEvaluate(nullptr)) {
     randombytes(id, sizeof(id));
-    worker.runningGrainsByPid[process.getPid()] = this;
   }
 
   ~RunningGrain() {
-    if (process.isRunning()) {
-      worker.runningGrainsByPid.erase(process.getPid());
-    }
-    worker.runningGrains.erase(id);
-
     worker.packageMountSet.returnPackage(kj::mv(packageMount));
   }
 
   kj::ArrayPtr<const byte> getId() { return id; }
+
+  kj::Promise<void> onExit() {
+    return process.addBranch().catch_([](auto) {});
+  }
 
   sandstorm::Supervisor::Client getSupervisor() {
     if (disconnected) {
@@ -182,19 +179,15 @@ public:
       // supervisor just yet because we might still be cleaning up (unmounting) and it would be
       // bad if the coordinator decided to revoke our access to the volume. So, we return a promise
       // that will be broken as soon as we receive notification of exit.
-      return exitedPromise.addBranch();
+      return process.addBranch().then([]() -> kj::Promise<sandstorm::Supervisor::Client> {
+        return KJ_EXCEPTION(FAILED, "grain has shut down");
+      });
     } else {
       capnp::MallocMessageBuilder builder(8);
       auto root = builder.getRoot<capnp::rpc::twoparty::VatId>();
       root.setSide(capnp::rpc::twoparty::Side::CLIENT);
       return rpcSystem.bootstrap(root).castAs<sandstorm::Supervisor>();
     }
-  }
-
-  void exited(int status) {
-    // Caller already erased us from worker.runningGrainsByPid.
-    process.notifyExited(status);
-    exitedFulfiller->reject(KJ_EXCEPTION(FAILED, "grain has shut down"));
   }
 
 private:
@@ -205,7 +198,7 @@ private:
 
   kj::Own<PackageMountSet::PackageMount> packageMount;
   NbdVolumeAdapter nbdVolume;
-  sandstorm::Subprocess process;
+  kj::ForkedPromise<void> process;
 
   kj::Own<kj::AsyncIoStream> capnpSocket;
   capnp::TwoPartyVatNetwork vatNetwork;
@@ -216,16 +209,11 @@ private:
   kj::Promise<void> disconnectTask;
   // `disconnected` is set true (by `disconnectTask`) when we receive notification of disconnect
   // from `vatNetwork`, indicating that the supervisor is shutting down.
-
-  kj::Own<kj::PromiseFulfiller<sandstorm::Supervisor::Client>> exitedFulfiller;
-  kj::ForkedPromise<sandstorm::Supervisor::Client> exitedPromise;
-  // `exitedPromise` is rejected (via `exitedFulfiller`) when the process exits. This is used only
-  // as a diversion in the rare case that a Coordinator tries to restart a process immediately
-  // after exit.
 };
 
 WorkerImpl::WorkerImpl(kj::AsyncIoContext& ioContext)
-    : ioProvider(*ioContext.lowLevelProvider), packageMountSet(ioContext) {}
+    : ioProvider(*ioContext.lowLevelProvider), packageMountSet(ioContext),
+      subprocessSet(ioContext.unixEventPort), tasks(*this) {}
 WorkerImpl::~WorkerImpl() noexcept(false) {}
 
 kj::Maybe<sandstorm::Supervisor::Client> WorkerImpl::getRunningGrain(kj::ArrayPtr<const byte> id) {
@@ -234,19 +222,6 @@ kj::Maybe<sandstorm::Supervisor::Client> WorkerImpl::getRunningGrain(kj::ArrayPt
     return nullptr;
   } else {
     return iter->second->getSupervisor();
-  }
-}
-
-bool WorkerImpl::childExited(pid_t pid, int status) {
-  auto iter = runningGrainsByPid.find(pid);
-  if (iter == runningGrainsByPid.end()) {
-    return false;
-  } else {
-    RunningGrain* grain = iter->second;
-    runningGrainsByPid.erase(iter);
-    grain->exited(status);
-    runningGrains.erase(grain->getId());
-    return true;
   }
 }
 
@@ -375,9 +350,124 @@ sandstorm::Supervisor::Client WorkerImpl::bootGrain(PackageInfo::Reader packageI
 
     // Put it in the map so that it doesn't go away and can be restore()ed.
     runningGrains[id] = kj::mv(grain);
+    auto remover = kj::defer([this,id]() { runningGrains.erase(id); });
+    tasks.add(grain->onExit().attach(kj::mv(remover)));
 
     return supervisor;
   });
+}
+
+void WorkerImpl::taskFailed(kj::Exception&& exception) {
+  KJ_LOG(ERROR, exception);
+}
+
+// -----------------------------------------------------------------------------
+
+class WorkerImpl::PackageUploadStreamImpl: public Worker::PackageUploadStream::Server {
+public:
+  PackageUploadStreamImpl(
+      Worker::Client workerCap,
+      Volume::Client volume,
+      kj::Own<kj::AsyncIoStream> nbdUserEnd,
+      kj::Own<kj::AsyncOutputStream> stdinPipe,
+      kj::Own<kj::AsyncInputStream> stdoutPipe,
+      kj::Promise<void> subprocess)
+      : workerCap(kj::mv(workerCap)),
+        nbdVolume(kj::mv(nbdUserEnd), kj::mv(volume)),
+        stdinPipe(kj::mv(stdinPipe)),
+        stdoutPipe(kj::mv(stdoutPipe)),
+        subprocess(kj::mv(subprocess)) {
+  }
+
+protected:
+  kj::Promise<void> write(WriteContext context) override {
+    auto promise = stdinWriteQueue.then([this,context]() mutable {
+      auto data = context.getParams().getData();
+      return KJ_ASSERT_NONNULL(stdinPipe, "can't call write() after done()")
+          ->write(data.begin(), data.size());
+    }).fork();
+    stdinWriteQueue = promise.addBranch();
+    return promise.addBranch();
+  }
+
+  kj::Promise<void> done(DoneContext context) override {
+    auto promise = stdinWriteQueue.then([this,context]() mutable {
+      stdinPipe = nullptr;
+    }).fork();
+    stdinWriteQueue = promise.addBranch();
+    return promise.addBranch();
+  }
+
+  kj::Promise<void> expectSize(ExpectSizeContext context) override {
+    // We don't care.
+    return kj::READY_NOW;
+  }
+
+  kj::Promise<void> getResult(GetResultContext context) override {
+    KJ_REQUIRE(!calledGetResult);
+    calledGetResult = true;
+    context.releaseParams();
+
+    return capnp::readMessage(*stdoutPipe)
+        .then([this,context](kj::Own<capnp::MessageReader> message) mutable {
+      context.setResults(message->getRoot<GetResultResults>());
+      return kj::mv(subprocess);
+    });
+  }
+
+private:
+  Worker::Client workerCap;
+  NbdVolumeAdapter nbdVolume;
+  kj::Maybe<kj::Own<kj::AsyncOutputStream>> stdinPipe;
+  kj::Promise<void> stdinWriteQueue = kj::READY_NOW;
+  kj::Own<kj::AsyncInputStream> stdoutPipe;
+  kj::Promise<void> subprocess;
+  bool calledGetResult = false;
+};
+
+kj::Promise<void> WorkerImpl::unpackPackage(UnpackPackageContext context) {
+  // Create the NBD socketpair. The unpacker will actually mount the NBD device (in its own
+  // mount namespace) but we'll implement it in the Worker.
+  int nbdSocketPair[2];
+  KJ_SYSCALL(socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0, nbdSocketPair));
+  kj::AutoCloseFd nbdKernelEnd(nbdSocketPair[0]);
+  auto nbdUserEnd = ioProvider.wrapSocketFd(nbdSocketPair[1],
+      kj::LowLevelAsyncIoProvider::TAKE_OWNERSHIP |
+      kj::LowLevelAsyncIoProvider::ALREADY_CLOEXEC |
+      kj::LowLevelAsyncIoProvider::ALREADY_NONBLOCK);
+
+  // Create pipes for stdin and stdout.
+  int stdinFds[2];
+  KJ_SYSCALL(pipe2(stdinFds, O_CLOEXEC));
+  kj::AutoCloseFd stdin(stdinFds[0]);
+  auto stdinPipe = ioProvider.wrapOutputFd(stdinFds[1],
+      kj::LowLevelAsyncIoProvider::TAKE_OWNERSHIP |
+      kj::LowLevelAsyncIoProvider::ALREADY_CLOEXEC);
+
+  int stdoutFds[2];
+  KJ_SYSCALL(pipe2(stdoutFds, O_CLOEXEC));
+  kj::AutoCloseFd stdout(stdoutFds[1]);
+  auto stdoutPipe = ioProvider.wrapInputFd(stdoutFds[0],
+      kj::LowLevelAsyncIoProvider::TAKE_OWNERSHIP |
+      kj::LowLevelAsyncIoProvider::ALREADY_CLOEXEC);
+
+  // Create the subprocess.
+  sandstorm::Subprocess::Options options("/proc/self/exe");
+  kj::StringPtr argv[2];
+  argv[0] = "blackrock";
+  argv[1] = "unpack";
+  options.argv = argv;
+  options.stdin = stdin;
+  options.stdout = stdout;
+  int moreFds[1] = { nbdKernelEnd };
+  options.moreFds = moreFds;
+
+  auto promise = subprocessSet.waitForSuccess(kj::mv(options));
+
+  context.getResults().setStream(kj::heap<PackageUploadStreamImpl>(
+      thisCap(), context.getParams().getVolume(), kj::mv(nbdUserEnd),
+      kj::mv(stdinPipe), kj::mv(stdoutPipe), kj::mv(promise)));
+  return kj::READY_NOW;
 }
 
 // =======================================================================================
@@ -488,6 +578,46 @@ kj::MainBuilder::Validity SupervisorMain::run() {
   KJ_SYSCALL(close(3));
 
   child.waitForSuccess();
+  return true;
+}
+
+// =======================================================================================
+
+kj::MainFunc UnpackMain::getMain() {
+  return kj::MainBuilder(context, "Blackrock version " SANDSTORM_VERSION,
+                         "Runs `spk unpack`, reading the SPK file from stdin. Additionally, "
+                         "FD 3 is expected to be an NBD socket, which will be mounted and "
+                         "the package contents unpacked into it.\n"
+                         "\n"
+                         "NOT FOR HUMAN CONSUMPTION: Given the FD requirements, you obviously "
+                         "can't run this directly from the command-line. It is intended to be "
+                         "invoked by the Blackrock worker.")
+      .callAfterParsing(KJ_BIND_METHOD(*this, run))
+      .build();
+}
+
+kj::MainBuilder::Validity UnpackMain::run() {
+  // Enter mount namespace!
+  KJ_SYSCALL(unshare(CLONE_NEWNS));
+
+  // We'll mount our package on /mnt because it's our own mount namespace so why not?
+  NbdDevice device;
+  NbdBinding binding(device, kj::AutoCloseFd(4));
+  Mount mount(device.getPath(), "/mnt", 0, nullptr);
+
+  kj::String appId = sandstorm::unpackSpk(STDIN_FILENO, "/mnt", "/tmp");
+
+  // Read manifest.
+  capnp::StreamFdMessageReader reader(sandstorm::raiiOpen(
+      "/mnt/sandstorm-manifest", O_RDONLY | O_CLOEXEC));
+
+  // Write result to stdout.
+  capnp::MallocMessageBuilder message;
+  auto root = message.getRoot<Worker::PackageUploadStream::GetResultResults>();
+  root.setAppId(appId);
+  root.setManifest(reader.getRoot<sandstorm::spk::Manifest>());
+  capnp::writeMessageToFd(STDOUT_FILENO, message);
+
   return true;
 }
 

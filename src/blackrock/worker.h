@@ -96,31 +96,36 @@ private:
   void taskFailed(kj::Exception&& exception) override;
 };
 
-class WorkerImpl: public Worker::Server {
+class WorkerImpl: public Worker::Server, private kj::TaskSet::ErrorHandler {
 public:
   explicit WorkerImpl(kj::AsyncIoContext& ioContext);
   ~WorkerImpl() noexcept(false);
 
   kj::Maybe<sandstorm::Supervisor::Client> getRunningGrain(kj::ArrayPtr<const byte> id);
-  bool childExited(pid_t pid, int status);
 
+protected:
   kj::Promise<void> newGrain(NewGrainContext context) override;
   kj::Promise<void> restoreGrain(RestoreGrainContext context) override;
+  kj::Promise<void> unpackPackage(UnpackPackageContext context) override;
 
 private:
   class RunningGrain;
+  class PackageUploadStreamImpl;
   class SandstormCoreImpl;
   struct CommandInfo;
 
   kj::LowLevelAsyncIoProvider& ioProvider;
   PackageMountSet packageMountSet;
+  sandstorm::SubprocessSet subprocessSet;
   std::unordered_map<kj::ArrayPtr<const byte>, kj::Own<RunningGrain>,
                      ByteStringHash, ByteStringHash> runningGrains;
-  std::unordered_map<pid_t, RunningGrain*> runningGrainsByPid;
+  kj::TaskSet tasks;
 
   sandstorm::Supervisor::Client bootGrain(PackageInfo::Reader packageInfo,
       Assignable<GrainState>::Client grainState, Volume::Client grainVolume,
       sandstorm::spk::Manifest::Command::Reader command);
+
+  void taskFailed(kj::Exception&& exception) override;
 };
 
 class SupervisorMain: public sandstorm::AbstractMain {
@@ -138,6 +143,20 @@ private:
   sandstorm::SupervisorMain sandstormSupervisor;
 
   class SystemConnectorImpl;
+};
+
+class UnpackMain: public sandstorm::AbstractMain {
+  // Thin wrapper around `spk unpack` for use by Blackrock worker.
+
+public:
+  UnpackMain(kj::ProcessContext& context): context(context) {}
+
+  kj::MainFunc getMain() override;
+
+  kj::MainBuilder::Validity run();
+
+private:
+  kj::ProcessContext& context;
 };
 
 }  // namespace blackrock
