@@ -373,7 +373,8 @@ public:
       kj::Own<kj::AsyncInputStream> stdoutPipe,
       kj::Promise<void> subprocess)
       : workerCap(kj::mv(workerCap)),
-        nbdVolume(kj::mv(nbdUserEnd), kj::mv(volume)),
+        nbdVolume(kj::mv(nbdUserEnd), volume),
+        volume(kj::mv(volume)),
         stdinPipe(kj::mv(stdinPipe)),
         stdoutPipe(kj::mv(stdoutPipe)),
         subprocess(kj::mv(subprocess)) {
@@ -410,7 +411,13 @@ protected:
 
     return capnp::readMessage(*stdoutPipe)
         .then([this,context](kj::Own<capnp::MessageReader> message) mutable {
-      context.setResults(message->getRoot<GetResultResults>());
+      auto inResults = message->getRoot<GetResultResults>();
+      capnp::MessageSize size = inResults.totalSize();
+      ++size.capCount;
+      auto results = context.getResults(size);
+      results.setAppId(inResults.getAppId());
+      results.setManifest(inResults.getManifest());
+      results.setVolume(kj::mv(volume));
       return kj::mv(subprocess);
     });
   }
@@ -418,6 +425,7 @@ protected:
 private:
   Worker::Client workerCap;
   NbdVolumeAdapter nbdVolume;
+  Volume::Client volume;
   kj::Maybe<kj::Own<kj::AsyncOutputStream>> stdinPipe;
   kj::Promise<void> stdinWriteQueue = kj::READY_NOW;
   kj::Own<kj::AsyncInputStream> stdoutPipe;
@@ -464,8 +472,10 @@ kj::Promise<void> WorkerImpl::unpackPackage(UnpackPackageContext context) {
 
   auto promise = subprocessSet.waitForSuccess(kj::mv(options));
 
+  auto volume = context.getParams().getStorage().newVolumeRequest().send().getVolume();
+
   context.getResults().setStream(kj::heap<PackageUploadStreamImpl>(
-      thisCap(), context.getParams().getVolume(), kj::mv(nbdUserEnd),
+      thisCap(), kj::mv(volume), kj::mv(nbdUserEnd),
       kj::mv(stdinPipe), kj::mv(stdoutPipe), kj::mv(promise)));
   return kj::READY_NOW;
 }

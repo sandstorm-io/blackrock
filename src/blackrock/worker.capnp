@@ -25,8 +25,10 @@ interface Worker {
                command :Package.Manifest.Command,
                storage :Storage.StorageFactory)
            -> (grain :Supervisor, grainState :Storage.OwnedAssignable(GrainState));
-  # Start a new grain using the given package. `actionIndex` is an index into the package's
-  # manifest's action table specifying the action to run.
+  # Start a new grain using the given package.
+  #
+  # The caller needs to save `grainState` into a user's grain collection to make the grain
+  # permanent.
 
   restoreGrain @1 (package :PackageInfo,
                    command :Package.Manifest.Command,
@@ -41,12 +43,11 @@ interface Worker {
   # caller must have already called `disconnectAllClients()` at the same time as it claimed the
   # grain.
 
-  unpackPackage @2 (volume :Storage.Volume) -> (stream :PackageUploadStream);
-  # Initiate upload of a package, unpacking it into the given Volume (which should start out
-  # uninitialized).
+  unpackPackage @2 (storage :Storage.StorageFactory) -> (stream :PackageUploadStream);
+  # Initiate upload of a package, unpacking it into a fresh Volume.
 
   interface PackageUploadStream extends(Util.ByteStream) {
-    getResult @0 () -> (appId :Text, manifest :Package.Manifest);
+    getResult @0 () -> (appId :Text, manifest :Package.Manifest, volume :Storage.Volume);
     # Waits until `ByteStream.done()` is called, then returns:
     #
     # `appId`: The verified application ID string, as produced by the `spk` tool.
@@ -59,23 +60,27 @@ interface Worker {
 
 interface Coordinator {
   # Decides which workers should be running which apps.
+  #
+  # The Coordinator's main interface is actually Restorer(SturdyRef.Hosted) -- the Coordinator will
+  # start up the desired grain and restore the capability. The `Coordinator` interface is only
+  # used for creating new grains.
 
-  newGrain @0 (package :PackageInfo,
-               command :Package.Manifest.Command,
+  newGrain @0 (app :Util.Assignable(AppRestoreInfo).Getter,
+               initCommand :Package.Manifest.Command,
                storage :Storage.StorageFactory)
            -> (grain :Supervisor, grainState :Storage.OwnedAssignable(GrainState));
-  # Create a new grain.
-  #
-  # Params:
-  # `package`: The app package to use.
-  # `actionIndex`: The index of the startup action to use, from those defined in the grain's
-  #   manifest.
-  # `storage`: Where to create the grain's per-instance storage.
-  #
-  # Results:
-  # `grain`: The interface to the new grain.
-  # `grainState`: The storage object created using `storage`. This needs to be linked into the
-  #   parent storage in order to persist long-term.
+  # Create a new grain, just like Worker.newGrain().
+
+  restoreGrain @1 (storage :Storage.StorageFactory,
+                   grainState :Storage.Assignable(GrainState))
+               -> (grain :Supervisor);
+  # Restore a grain. Permanently sets the grain's package to `package` and continue command to
+  # `command` if these weren't already the case.
+}
+
+struct AppRestoreInfo {
+  package @0 :PackageInfo;
+  restoreCommand @1 :Package.Manifest.Command;
 }
 
 struct PackageInfo {
