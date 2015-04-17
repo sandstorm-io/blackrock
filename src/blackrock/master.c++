@@ -59,6 +59,7 @@ void runMaster(kj::AsyncIoContext& ioContext, ComputeDriver& driver, MasterConfi
 
   VatPath::Reader storagePath;
   auto workerPaths = kj::heapArray<VatPath::Reader>(config.getWorkerCount());
+  VatPath::Reader frontendPath;
 
   KJ_LOG(INFO, "examining currently-running machines...");
 
@@ -87,6 +88,8 @@ void runMaster(kj::AsyncIoContext& ioContext, ComputeDriver& driver, MasterConfi
     }
   }
 
+  start({ ComputeDriver::MachineType::FRONTEND, 0 }, frontendPath);
+
   KJ_LOG(INFO, "waiting for startup tasks...");
   kj::joinPromises(startupTasks.releaseAsArray()).wait(ioContext.waitScope);
 
@@ -113,6 +116,41 @@ void runMaster(kj::AsyncIoContext& ioContext, ComputeDriver& driver, MasterConfi
   for (auto& workerPath: workerPaths) {
     workers.add(rpcSystem.bootstrap(workerPath).castAs<Machine>()
         .becomeWorkerRequest().send().getWorker());
+  }
+
+  // Start front-end.
+  auto frontend = ({
+    auto req = rpcSystem.bootstrap(frontendPath).castAs<Machine>().becomeFrontendRequest();
+    req.setConfig(config.getFrontendConfig());
+    req.send();
+  });
+
+  // Set up backends for frontend.
+  tasks.add(frontend.getStorageRestorerSet().resetRequest().send().then([](auto){}));
+  {
+    auto req = frontend.getStorageRootSet().resetRequest();
+    auto backend = req.initBackends(1)[0];
+    backend.setId(0);
+    backend.setBackend(storage.getRootSet());
+    tasks.add(req.send().then([](auto){}));
+  }
+  {
+    auto req = frontend.getStorageFactorySet().resetRequest();
+    auto backend = req.initBackends(1)[0];
+    backend.setId(0);
+    backend.setBackend(storage.getStorageFactory());
+    tasks.add(req.send().then([](auto){}));
+  }
+  tasks.add(frontend.getHostedRestorerSet().resetRequest().send().then([](auto){}));
+  {
+    auto req = frontend.getWorkerSet().resetRequest();
+    auto list = req.initBackends(workers.size());
+    for (auto i: kj::indices(workers)) {
+      auto backend = list[i];
+      backend.setId(i);
+      backend.setBackend(workers[i]);
+    }
+    tasks.add(req.send().then([](auto){}));
   }
 
   // Loop forever handling messages.

@@ -367,7 +367,7 @@ class WorkerImpl::PackageUploadStreamImpl: public Worker::PackageUploadStream::S
 public:
   PackageUploadStreamImpl(
       Worker::Client workerCap,
-      Volume::Client volume,
+      OwnedVolume::Client volume,
       kj::Own<kj::AsyncIoStream> nbdUserEnd,
       kj::Own<kj::AsyncOutputStream> stdinPipe,
       kj::Own<kj::AsyncInputStream> stdoutPipe,
@@ -425,7 +425,7 @@ protected:
 private:
   Worker::Client workerCap;
   NbdVolumeAdapter nbdVolume;
-  Volume::Client volume;
+  OwnedVolume::Client volume;
   kj::Maybe<kj::Own<kj::AsyncOutputStream>> stdinPipe;
   kj::Promise<void> stdinWriteQueue = kj::READY_NOW;
   kj::Own<kj::AsyncInputStream> stdoutPipe;

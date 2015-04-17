@@ -38,7 +38,7 @@ private:
 template <typename T>
 class BackendSetImpl: public BackendSet<T>::Server, public kj::Refcounted {
 public:
-  T chooseOne() { return base.chooseOne().template castAs<T>(); }
+  typename T::Client chooseOne() { return base.chooseOne().template castAs<T>(); }
 
 protected:
   typedef typename BackendSet<T>::Server Interface;

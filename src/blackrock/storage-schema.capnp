@@ -18,10 +18,15 @@ struct AccountStorage {
   # - Quota etc.
   # - Opaque collection of received capabilities.
 
-  grains @0 :List(OwnedAssignable(GrainState));
+  grains @0 :List(GrainInfo);
   # All grains owned by the user.
   #
   # TODO(perf): Use a Collection here, when they are implemented.
+
+  struct GrainInfo {
+    id @0 :Text;
+    state @1 :OwnedAssignable(GrainState);
+  }
 }
 
 struct GatewayStorage {

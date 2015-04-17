@@ -1619,6 +1619,22 @@ kj::Promise<void> FilesystemStorage::get(GetContext context) {
   return kj::READY_NOW;
 }
 
+kj::Promise<void> FilesystemStorage::getOrCreateAssignable(GetOrCreateAssignableContext context) {
+  auto params = context.getParams();
+  KJ_IF_MAYBE(fd, sandstorm::raiiOpenAtIfExists(
+      rootsFd, params.getName(), O_RDONLY | O_CLOEXEC)) {
+    capnp::StreamFdMessageReader message(kj::mv(*fd));
+    ObjectKey key(message.getRoot<StoredRoot>().getKey());
+    context.getResults().setObject(factory->openObject(key).client.castAs<OwnedAssignable<>>());
+    return kj::READY_NOW;
+  } else {
+    auto result = factory->newObject<AssignableImpl>();
+    auto promise = result.object.setStoredObject(params.getDefaultValue());
+    context.getResults().setObject(kj::mv(result.client));
+    return kj::mv(promise);
+  }
+}
+
 kj::Promise<void> FilesystemStorage::remove(RemoveContext context) {
   capnp::StreamFdMessageReader message(sandstorm::raiiOpenAt(
       rootsFd, context.getParams().getName(), O_RDONLY | O_CLOEXEC));

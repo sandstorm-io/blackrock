@@ -10,6 +10,7 @@ using ClusterRpc = import "cluster-rpc.capnp";
 using Storage = import "storage.capnp";
 using StorageSchema = import "storage-schema.capnp";
 using Worker = import "worker.capnp";
+using Frontend = import "frontend.capnp";
 using Util = import "/sandstorm/util.capnp";
 
 using VatId = ClusterRpc.VatId;
@@ -41,24 +42,6 @@ interface Gateway {
   #   the fold.
 
   # TODO(cleanup): Move to its own file.
-}
-
-interface Frontend {
-  # Front-ends run the Sandstorm shell UI (a Meteor app). They accept HTTP connections proxied
-  # from the Gateways.
-
-  getHttpAddress @0 () -> (address :Address);
-  # Get the address and port of the frontend's HTTP interface.
-
-  # TODO(cleanup): Move this and Mongo stuff to a separate file frontend.capnp.
-}
-
-interface Mongo {
-  getMongoAddress @0 () -> (address :Address, username :Text, password :Text);
-}
-
-interface MongoSibling {
-  # TODO(soon): Information needed to set up replicas.
 }
 
 interface Machine {
@@ -96,17 +79,16 @@ interface Machine {
                 -> (gateway :Gateway,
                     externalRestorer :MasterRestorer(SturdyRef.External),
                     storageRestorers :BackendSet(Restorer(SturdyRef.Stored)),
-                    frontends :BackendSet(Frontend));
-  becomeFrontend @4 (userStorage :Storage.Collection(StorageSchema.AccountStorage))
-                 -> (frontend :Frontend,
-                     storageRestorerSet: BackendSet(Restorer(SturdyRef.Stored)),
-                     storageRootSet: BackendSet(Storage.StorageRootSet),
-                     storageFactorieSet: BackendSet(Storage.StorageFactory),
-                     hostedRestorerSet: BackendSet(Restorer(SturdyRef.Hosted)),
-                     mongoSet: BackendSet(Mongo));
-  becomeMongo @5 () -> (mongo :Mongo, siblingSet :BackendSet(MongoSibling));
+                    frontends :BackendSet(Frontend.Frontend));
+  becomeFrontend @4 (config :Frontend.FrontendConfig)
+                 -> (frontend :Frontend.Frontend,
+                     storageRestorerSet :BackendSet(Restorer(SturdyRef.Stored)),
+                     storageRootSet :BackendSet(Storage.StorageRootSet),
+                     storageFactorySet :BackendSet(Storage.StorageFactory),
+                     hostedRestorerSet :BackendSet(Restorer(SturdyRef.Hosted)),
+                     workerSet :BackendSet(Worker.Worker));  # `workerSet` is temporary
 
-  shutdown @6 ();
+  shutdown @5 ();
   # Do whatever is necessary to prepare this machine for safe shutdown. Do not return until it's
   # safe.
 }

@@ -315,6 +315,9 @@ interface StorageRootSet {
   get @1 [T] (name :Text) -> (object :OwnedStorage(T));
   # Get the named root object.
 
+  getOrCreateAssignable @4 [T] (name :Text, defaultValue :T) -> (object :OwnedAssignable(T));
+  # Get the named root object, creating it if it doesn't already exist.
+
   remove @2 (name :Text);
   # Recursively delete the named root object.
 

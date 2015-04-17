@@ -23,6 +23,7 @@
 #include <signal.h>
 #include <sys/types.h>
 #include "backend-set.h"
+#include "frontend.h"
 
 namespace blackrock {
 
@@ -31,7 +32,8 @@ class MachineImpl: public Machine::Server {
   //   (But before we do that we probably need to implement Cap'n Proto Level 3.)
 
 public:
-  MachineImpl(kj::AsyncIoContext& ioContext): ioContext(ioContext) {}
+  MachineImpl(kj::AsyncIoContext& ioContext)
+      : ioContext(ioContext), subprocessSet(ioContext.unixEventPort) {}
 
   kj::Promise<void> becomeStorage(BecomeStorageContext context) override {
     StorageInfo* info;
@@ -76,8 +78,32 @@ public:
     return kj::READY_NOW;
   }
 
+  kj::Promise<void> becomeFrontend(BecomeFrontendContext context) override {
+    FrontendInfo* info = nullptr;
+    KJ_IF_MAYBE(i, frontendInfo) {
+      KJ_LOG(INFO, "rebecome frontend...");
+      i->get()->impl->setConfig(context.getParams().getConfig());
+      info = *i;
+    } else {
+      KJ_LOG(INFO, "become frontend...");
+      auto ptr = kj::heap<FrontendInfo>(kj::heap<FrontendImpl>(
+          *ioContext.provider, subprocessSet, context.getParams().getConfig()));
+      info = ptr;
+      frontendInfo = kj::mv(ptr);
+    }
+
+    auto results = context.getResults();
+    results.setFrontend(info->client);
+    results.setStorageRootSet(info->impl->getStorageRootBackendSet());
+    results.setStorageFactorySet(info->impl->getStorageFactoryBackendSet());
+    results.setWorkerSet(info->impl->getWorkerBackendSet());
+
+    return kj::READY_NOW;
+  }
+
 private:
   kj::AsyncIoContext& ioContext;
+  sandstorm::SubprocessSet subprocessSet;
 
   struct StorageInfo {
     StorageSibling::Client selfAsSibling;
@@ -103,6 +129,15 @@ private:
   kj::Maybe<kj::Own<StorageInfo>> storageInfo;
 
   kj::Maybe<Worker::Client> worker;
+
+  struct FrontendInfo {
+    FrontendImpl* impl;
+    Frontend::Client client;
+
+    FrontendInfo(kj::Own<FrontendImpl> impl)
+        : impl(impl), client(kj::mv(impl)) {}
+  };
+  kj::Maybe<kj::Own<FrontendInfo>> frontendInfo;
 };
 
 static constexpr const char LOG_ADDRESS_FILE[] = "/var/run/blackrock-logsink-address";

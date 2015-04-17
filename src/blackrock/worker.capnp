@@ -47,7 +47,7 @@ interface Worker {
   # Initiate upload of a package, unpacking it into a fresh Volume.
 
   interface PackageUploadStream extends(Util.ByteStream) {
-    getResult @0 () -> (appId :Text, manifest :Package.Manifest, volume :Storage.Volume);
+    getResult @0 () -> (appId :Text, manifest :Package.Manifest, volume :Storage.OwnedVolume);
     # Waits until `ByteStream.done()` is called, then returns:
     #
     # `appId`: The verified application ID string, as produced by the `spk` tool.

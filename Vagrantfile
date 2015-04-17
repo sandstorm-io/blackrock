@@ -31,27 +31,28 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
     v.cpus = 1
   end
 
-  # Note: If you get an error about "DHCP server already exists", run the
-  # following command once (on the host):
-  #     VBoxManage dhcpserver remove --netname HostInterfaceNetworking-vboxnet0
-  # See:
-  #     https://github.com/mitchellh/vagrant/issues/3083
-  config.vm.network "private_network", type: "dhcp"
-
   config.vm.define "storage0" do |storage0|
+    config.vm.network "private_network", ip: "172.28.128.10"
   end
   config.vm.define "worker0" do |worker0|
+    config.vm.network "private_network", ip: "172.28.128.20"
   end
   config.vm.define "worker1" do |worker1|
+    config.vm.network "private_network", ip: "172.28.128.21"
   end
   config.vm.define "worker2" do |worker2|
+    config.vm.network "private_network", ip: "172.28.128.22"
   end
   config.vm.define "worker3" do |worker3|
+    config.vm.network "private_network", ip: "172.28.128.23"
   end
   config.vm.define "coordinator0" do |coordinator0|
+    config.vm.network "private_network", ip: "172.28.128.30"
   end
   config.vm.define "frontend0" do |frontend0|
+    config.vm.network "private_network", ip: "172.28.128.31"
   end
   config.vm.define "frontend1" do |frontend1|
+    config.vm.network "private_network", ip: "172.28.128.32"
   end
 end
