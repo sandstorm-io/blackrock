@@ -74,9 +74,7 @@ private:
   }
 
   bool runClient() {
-    sendStderrToLogSink(name, addrFile, "/tmp");
-    KJ_SYSCALL(dup2(STDERR_FILENO, STDOUT_FILENO));
-    sandstorm::Subprocess({"cat"}).waitForSuccess();
+    runLogClient(name, addrFile, "/tmp");
     return true;
   }
 

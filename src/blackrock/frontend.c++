@@ -271,6 +271,7 @@ FrontendImpl::FrontendImpl(kj::AsyncIoProvider& ioProvider,
   setConfig(config);
 
   sandstorm::recursivelyCreateParent(sandstorm::Backend::SOCKET_PATH);
+  unlink(sandstorm::Backend::SOCKET_PATH->cStr());
 
   tasks.add(ioProvider.getNetwork().parseAddress(kj::str("unix:", sandstorm::Backend::SOCKET_PATH))
       .then([this](kj::Own<kj::NetworkAddress>&& addr) {

@@ -98,7 +98,7 @@ private:
 
 class WorkerImpl: public Worker::Server, private kj::TaskSet::ErrorHandler {
 public:
-  explicit WorkerImpl(kj::AsyncIoContext& ioContext);
+  WorkerImpl(kj::AsyncIoContext& ioContext, sandstorm::SubprocessSet& subprocessSet);
   ~WorkerImpl() noexcept(false);
 
   kj::Maybe<sandstorm::Supervisor::Client> getRunningGrain(kj::ArrayPtr<const byte> id);
@@ -115,8 +115,8 @@ private:
   struct CommandInfo;
 
   kj::LowLevelAsyncIoProvider& ioProvider;
+  sandstorm::SubprocessSet& subprocessSet;
   PackageMountSet packageMountSet;
-  sandstorm::SubprocessSet subprocessSet;
   std::unordered_map<kj::ArrayPtr<const byte>, kj::Own<RunningGrain>,
                      ByteStringHash, ByteStringHash> runningGrains;
   kj::TaskSet tasks;

@@ -8,7 +8,6 @@
 #include <time.h>
 #include <unistd.h>
 #include <fcntl.h>
-#include <sys/prctl.h>
 #include <sys/sendfile.h>
 
 namespace blackrock {
@@ -377,34 +376,17 @@ private:
   }
 };
 
-void sendStderrToLogSink(kj::StringPtr name, kj::StringPtr logAddressFile,
-                         kj::StringPtr backlogDir) {
-  int fds[2];
-  KJ_SYSCALL(pipe2(fds, O_CLOEXEC));
-  kj::AutoCloseFd readEnd(fds[0]);
-  kj::AutoCloseFd writeEnd(fds[1]);
+void runLogClient(kj::StringPtr name, kj::StringPtr logAddressFile, kj::StringPtr backlogDir) {
+  auto ioContext = kj::setupAsyncIo();
 
-  sandstorm::Subprocess([&]() -> int {
-    writeEnd = nullptr;
-
-    // Rename the task so that when we kill all blackrock processes we can avoid killing the
-    // logger, which will die naturally as soon as it finishes up.
-    KJ_SYSCALL(prctl(PR_SET_NAME, "blackrock-log", 0, 0, 0));
-
-    auto ioContext = kj::setupAsyncIo();
-
-    LogClient client(ioContext.provider->getNetwork(),
-                     ioContext.lowLevelProvider->getTimer(),
-                     name, backlogDir, logAddressFile,
-                     ioContext.lowLevelProvider->wrapInputFd(readEnd,
-                         kj::LowLevelAsyncIoProvider::ALREADY_CLOEXEC));
-    client.redirectToBacklog(STDOUT_FILENO);
-    client.redirectToBacklog(STDERR_FILENO);
-    client.run().wait(ioContext.waitScope);
-    return 0;
-  }).detach();
-
-  KJ_SYSCALL(dup2(writeEnd, STDERR_FILENO));
+  LogClient client(ioContext.provider->getNetwork(),
+                   ioContext.lowLevelProvider->getTimer(),
+                   name, backlogDir, logAddressFile,
+                   ioContext.lowLevelProvider->wrapInputFd(STDIN_FILENO));
+  client.redirectToBacklog(STDOUT_FILENO);
+  client.redirectToBacklog(STDERR_FILENO);
+  client.run().wait(ioContext.waitScope);
+  KJ_UNREACHABLE;
 }
 
 } // namespace blackrock

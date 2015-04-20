@@ -18,10 +18,12 @@
 #include <netdb.h>
 #include <sys/file.h>
 #include <sys/sendfile.h>
+#include <sys/prctl.h>
 #include <ifaddrs.h>
 #include <stdio.h>
 #include <signal.h>
 #include <sys/types.h>
+#include <sys/eventfd.h>
 #include "backend-set.h"
 #include "frontend.h"
 
@@ -70,7 +72,7 @@ public:
       client = *w;
     } else {
       KJ_LOG(INFO, "become worker...");
-      client = kj::heap<WorkerImpl>(ioContext);
+      client = kj::heap<WorkerImpl>(ioContext, subprocessSet);
       worker = client;
     }
 
@@ -97,6 +99,10 @@ public:
     results.setStorageRootSet(info->impl->getStorageRootBackendSet());
     results.setStorageFactorySet(info->impl->getStorageFactoryBackendSet());
     results.setWorkerSet(info->impl->getWorkerBackendSet());
+
+    // TODO(soon): These are placeholders.
+    results.setStorageRestorerSet(kj::refcounted<BackendSetImpl<Restorer<SturdyRef::Stored>>>());
+    results.setHostedRestorerSet(kj::refcounted<BackendSetImpl<Restorer<SturdyRef::Hosted>>>());
 
     return kj::READY_NOW;
   }
@@ -157,6 +163,7 @@ public:
             "(internal) run a supervised grain")
         .addSubCommand("unpack", KJ_BIND_METHOD(*this, getUnpackMain),
             "(internal) unpack an spk into a network volume")
+        .addSubCommand("log", KJ_BIND_METHOD(*this, getLogMain), "run log client")
         .build();
   }
 
@@ -178,6 +185,14 @@ public:
             "Kill any existing slave running on this machine.")
         .expectArg("<bind-ip>", KJ_BIND_METHOD(*this, setBindIp))
         .callAfterParsing(KJ_BIND_METHOD(*this, runSlave))
+        .build();
+  }
+
+  kj::MainFunc getLogMain() {
+    return kj::MainBuilder(context, "Sandstorm Blackrock version " SANDSTORM_VERSION,
+                           "Starts Blackrock logger client, which reads from standard input "
+                           "and sends the data to the blackrock log server.")
+        .expectArg("<name>", KJ_BIND_METHOD(*this, runLog))
         .build();
   }
 
@@ -300,33 +315,62 @@ private:
     // We're the only slave running. Go!
     KJ_SYSCALL(ftruncate(pidfile, 0));
 
-    // Write logs to log process.
-    kj::Own<sandstorm::Subprocess> logProc;
-    KJ_IF_MAYBE(n, loggingName) {
-      sendStderrToLogSink(*n, LOG_ADDRESS_FILE, "/var/log");
-    }
-
-    // Set up the VatNetwork before we fork, so that we know it's ready to receive connections.
-    auto ioContext = kj::setupAsyncIo();
-    VatNetwork network(ioContext.provider->getNetwork(), ioContext.provider->getTimer(),
-                       bindAddress);
-
-    // Write VatPath to pidfile.
-    {
-      capnp::MallocMessageBuilder vatPath(16);
-      vatPath.setRoot(network.getSelf());
-      capnp::writeMessageToFd(pidfile, vatPath);
-    }
+    int readyPipe[2];
+    KJ_SYSCALL(pipe2(readyPipe, O_CLOEXEC));
+    kj::AutoCloseFd readyPipeIn(readyPipe[0]);
+    kj::AutoCloseFd readyPipeOut(readyPipe[1]);
 
     sandstorm::Subprocess daemon([&]() -> int {
+      readyPipeIn = nullptr;
+
       // Detach from controlling terminal and make ourselves session leader.
       KJ_SYSCALL(setsid());
+
+      // Fork again so that we are no longer session leader, which prevents us from picking up a
+      // controlling terminal by merely opening one.
+      pid_t pid;
+      KJ_SYSCALL(pid = fork());
+      if (pid == 0) {
+        // Parent exits.
+        return 0;
+      }
+
+      // Write logs to log process.
+      KJ_IF_MAYBE(n, loggingName) {
+        int fds[2];
+        KJ_SYSCALL(pipe2(fds, O_CLOEXEC));
+        kj::AutoCloseFd readEnd(fds[0]);
+        kj::AutoCloseFd writeEnd(fds[1]);
+
+        sandstorm::Subprocess::Options options({"blackrock", "log", *n});
+        options.executable = "/proc/self/exe";
+        options.stdin = readEnd;
+        sandstorm::Subprocess(kj::mv(options)).detach();
+        KJ_SYSCALL(dup2(writeEnd, STDERR_FILENO));
+      }
 
       // Redirect stdout to stderr (i.e. the log sink).
       KJ_SYSCALL(dup2(STDERR_FILENO, STDOUT_FILENO));
 
       // Make standard input /dev/null.
-      dup2(sandstorm::raiiOpen("/dev/null", O_RDONLY | O_CLOEXEC), STDIN_FILENO);
+      KJ_SYSCALL(dup2(sandstorm::raiiOpen("/dev/null", O_RDONLY | O_CLOEXEC), STDIN_FILENO));
+
+      // Set up the VatNetwork.
+      auto ioContext = kj::setupAsyncIo();
+      VatNetwork network(ioContext.provider->getNetwork(), ioContext.provider->getTimer(),
+                         bindAddress);
+
+      // Write VatPath to pidfile.
+      {
+        capnp::MallocMessageBuilder vatPath(16);
+        vatPath.setRoot(network.getSelf());
+        capnp::writeMessageToFd(pidfile, vatPath);
+      }
+
+      // Signal readiness to parent.
+      byte b = 0;
+      KJ_SYSCALL(write(readyPipeOut, &b, 1));
+      readyPipeOut = nullptr;
 
       KJ_LOG(INFO, "starting slave...");
 
@@ -339,9 +383,29 @@ private:
       KJ_UNREACHABLE;
     });
 
-    // The pidfile contains the VatPath. Write it to stdout, then exit;
-    dumpFile(pidfile, STDOUT_FILENO);
-    context.exit();
+    readyPipeOut = nullptr;
+
+    // Wait for child ready.
+    byte b;
+    ssize_t n;
+    KJ_SYSCALL(n = read(readyPipeIn, &b, 1));
+    if (n < 1) {
+      // Pipe closed before ready. Child probably logged.
+      context.exitError("child process failed to become ready");
+    } else {
+      // The pidfile contains the VatPath. Write it to stdout, then exit;
+      dumpFile(pidfile, STDOUT_FILENO);
+      context.exit();
+    }
+  }
+
+  bool runLog(kj::StringPtr name) {
+    // Rename the task so that when we kill all blackrock processes we can avoid killing the
+    // logger, which will die naturally as soon as it finishes up.
+    KJ_SYSCALL(prctl(PR_SET_NAME, "blackrock-log", 0, 0, 0));
+
+    runLogClient(name, LOG_ADDRESS_FILE, "/var/log");
+    KJ_UNREACHABLE;
   }
 
   void dumpFile(int inFd, int outFd) {

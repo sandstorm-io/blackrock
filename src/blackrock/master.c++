@@ -56,6 +56,7 @@ void runMaster(kj::AsyncIoContext& ioContext, ComputeDriver& driver, MasterConfi
   std::map<ComputeDriver::MachineType, uint> expectedCounts;
   expectedCounts[ComputeDriver::MachineType::STORAGE] = 1;
   expectedCounts[ComputeDriver::MachineType::WORKER] = workerCount;
+  expectedCounts[ComputeDriver::MachineType::FRONTEND] = 1;
 
   VatPath::Reader storagePath;
   auto workerPaths = kj::heapArray<VatPath::Reader>(config.getWorkerCount());

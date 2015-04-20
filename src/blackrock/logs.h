@@ -42,12 +42,11 @@ private:
   void taskFailed(kj::Exception&& exception) override;
 };
 
-void sendStderrToLogSink(kj::StringPtr name, kj::StringPtr logAddressFile,
-                         kj::StringPtr backlogDir);
-// Redirect standard error to a subprocess which will upload it to the log sink server. The
-// subprocess will handle reconnecting to the server as needed, and will buffer logs to a local
-// file when the log server is unreachable. Note that some logs may be lost around the moment of
-// a disconnect; this is not intended to be 100% reliable, only as reliable as is reasonable.
+void runLogClient(kj::StringPtr name, kj::StringPtr logAddressFile, kj::StringPtr backlogDir);
+// Reads logs from standard input and upload them to the log sink server, reconnecting to the
+// server as needed, buffering logs to a local file when the log server is unreachable. Note that
+// some logs may be lost around the moment of a disconnect; this is not intended to be 100%
+// reliable, only as reliable as is reasonable.
 //
 // `logAddressFile` is the name of a file on the hard drive which contains the address (in
 // SimpleAddress format). The file is re-read every time a reconnect is attempted. This allows an

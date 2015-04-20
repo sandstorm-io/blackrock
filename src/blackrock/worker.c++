@@ -211,9 +211,9 @@ private:
   // from `vatNetwork`, indicating that the supervisor is shutting down.
 };
 
-WorkerImpl::WorkerImpl(kj::AsyncIoContext& ioContext)
-    : ioProvider(*ioContext.lowLevelProvider), packageMountSet(ioContext),
-      subprocessSet(ioContext.unixEventPort), tasks(*this) {}
+WorkerImpl::WorkerImpl(kj::AsyncIoContext& ioContext, sandstorm::SubprocessSet& subprocessSet)
+    : ioProvider(*ioContext.lowLevelProvider), subprocessSet(subprocessSet),
+      packageMountSet(ioContext), tasks(*this) {}
 WorkerImpl::~WorkerImpl() noexcept(false) {}
 
 kj::Maybe<sandstorm::Supervisor::Client> WorkerImpl::getRunningGrain(kj::ArrayPtr<const byte> id) {
