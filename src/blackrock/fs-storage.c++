@@ -1126,16 +1126,22 @@ protected:
 
   void updateSize(uint64_t blocks) {
     // Indicate that the size of the object (in blocks) is now `size`. If this is a change from the
-    // accounted size, arrange to update the accounted size for this object and all parent zones.
+    // accounted size, arrange to update the accounted size for this object and all parents.
 
     KJ_ASSERT(blocks <= uint32_t(kj::maxValue), "file too big");
 
-    if (blocks != xattr.accountedBlockCount) {
-      int64_t delta = blocks - xattr.accountedBlockCount;
-      Journal::Transaction txn(journal);
+    if (state == COMMITTED) {
+      if (blocks != xattr.accountedBlockCount) {
+        int64_t delta = blocks - xattr.accountedBlockCount;
+        Journal::Transaction txn(journal);
+        xattr.accountedBlockCount = blocks;
+        factory->modifyTransitiveSize(id, delta, txn);
+        txn.commit();
+      }
+    } else {
+      // We don't bother counting child size until we're committed to disk.
       xattr.accountedBlockCount = blocks;
-      factory->modifyTransitiveSize(id, delta, txn);
-      txn.commit();
+      xattr.transitiveBlockCount = blocks;
     }
   }
 
@@ -1560,7 +1566,8 @@ auto FilesystemStorage::ObjectFactory::registerObject(kj::Own<T> object)
 
 static kj::AutoCloseFd openOrCreateDirectory(int parentFd, kj::StringPtr name) {
   mkdirat(parentFd, name.cStr(), 0777);
-  return sandstorm::raiiOpenAt(parentFd, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+  auto f = sandstorm::raiiOpenAt(parentFd, name, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+  return f;
 }
 
 FilesystemStorage::FilesystemStorage(
@@ -1708,7 +1715,19 @@ void FilesystemStorage::setAttributesIfExists(ObjectId objectId, const Xattr& at
   // Sadly, there is no setxattrat(). But we can use /proc/self/fd to emulate it.
   auto name = objectId.filename('o');
   auto hackname = kj::str("/proc/self/fd/", mainDirFd, "/", fixedStr(name));
-  KJ_SYSCALL(setxattr(hackname.cStr(), Xattr::NAME, &attributes, sizeof(attributes), 0));
+retry:
+  if (setxattr(hackname.cStr(), Xattr::NAME, &attributes, sizeof(attributes), 0) < 0) {
+    int error = errno;
+    switch (error) {
+      case EINTR:
+        goto retry;
+      case ENOENT:
+        // Acceptable;
+        break;
+      default:
+        KJ_FAIL_SYSCALL("setxattr(name, ...)", error, fixedStr(name));
+    }
+  }
 }
 
 void FilesystemStorage::moveToDeathRow(ObjectId id) {

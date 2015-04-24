@@ -282,6 +282,14 @@ NbdDevice::NbdDevice() {
   KJ_FAIL_ASSERT("all NBD devices are in use");
 }
 
+void NbdDevice::format(uint megabytes) {
+  auto size = kj::str(megabytes, 'M');
+  sandstorm::Subprocess::Options options({"mkfs.ext4", "-q", "-b", "4096", path, size});
+  auto devnull = sandstorm::raiiOpen("/dev/null", O_WRONLY | O_CLOEXEC);
+  options.stdout = devnull;
+  sandstorm::Subprocess(kj::mv(options)).waitForSuccess();
+}
+
 void NbdDevice::resetAll() {
   for (uint i = 0; i < MAX_NBDS; i++) {
     auto devname = kj::str("/dev/nbd", i);

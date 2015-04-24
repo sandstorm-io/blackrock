@@ -140,8 +140,7 @@ private:
 
     if (isNew) {
       context.warning("formatting...");
-      sandstorm::Subprocess({"mkfs.ext4", "-b", "4096", device.getPath(), "256M"})
-          .waitForSuccess();
+      device.format(256);
     }
 
     context.warning("mounting...");

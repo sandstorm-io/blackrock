@@ -449,10 +449,11 @@ static void enterSandstormBundle() {
 
 kj::Promise<void> FrontendImpl::execLoop(MongoInfo&& mongoInfo) {
   // If node fails, we will wait until at least 10 seconds from now before restarting it.
-#warning "bring back to 10s"
-  auto rateLimit = timer.afterDelay(10000 * kj::SECONDS);
+  auto rateLimit = timer.afterDelay(10 * kj::SECONDS);
 
   auto promise = kj::evalNow([&]() {
+    KJ_LOG(INFO, "starting node...");
+
     createSandstormDirectories();
 
     sandstorm::Subprocess subprocess([&]() -> int {
@@ -535,8 +536,7 @@ kj::Promise<void> MongoImpl::startExecLoop(kj::Own<kj::PromiseFulfiller<void>> p
 
 kj::Promise<void> MongoImpl::execLoop(kj::PromiseFulfiller<void>& passwordFulfiller) {
   // If mongo fails, we will wait until at least 10 seconds from now before restarting it.
-#warning "bring back to 10s"
-  auto rateLimit = timer.afterDelay(10000 * kj::SECONDS);
+  auto rateLimit = timer.afterDelay(10 * kj::SECONDS);
 
   return kj::evalNow([&]() {
     createSandstormDirectories();

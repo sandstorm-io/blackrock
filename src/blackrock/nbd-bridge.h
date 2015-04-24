@@ -57,6 +57,10 @@ public:
 
   int getFd() { return fd; }
 
+  void format(uint megabytes);
+  // Format the device as an ext4 filesystem with the given maximum size in megabytes. Does not
+  // write to stdout.
+
   static void resetAll();
   // Iterate through all the nbd devices and reset them, in order to un-block processes wedged
   // trying to read disconnected devices.

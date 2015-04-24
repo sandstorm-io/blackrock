@@ -13,6 +13,7 @@
 #include <sys/mount.h>
 #include <grp.h>
 #include <sandstorm/spk.h>
+#include <sys/syscall.h>
 
 namespace blackrock {
 
@@ -153,6 +154,9 @@ public:
         grainState(kj::mv(grainState)),
         packageMount(kj::mv(packageMount)),
         nbdVolume(kj::mv(nbdSocket), kj::mv(volume)),
+        volumeRunTask(nbdVolume.run().eagerlyEvaluate([](kj::Exception&& exception) {
+          KJ_LOG(FATAL, "NbdVolumeAdapter failed (grain)", exception);
+        })),
         process(worker.subprocessSet.waitForSuccess(kj::mv(subprocessOptions)).fork()),
         capnpSocket(kj::mv(capnpSocket)),
         vatNetwork(*this->capnpSocket, capnp::rpc::twoparty::Side::SERVER),
@@ -170,7 +174,7 @@ public:
   kj::ArrayPtr<const byte> getId() { return id; }
 
   kj::Promise<void> onExit() {
-    return process.addBranch().catch_([](auto) {});
+    return process.addBranch().catch_([this](auto) { return kj::mv(volumeRunTask); });
   }
 
   sandstorm::Supervisor::Client getSupervisor() {
@@ -198,6 +202,7 @@ private:
 
   kj::Own<PackageMountSet::PackageMount> packageMount;
   NbdVolumeAdapter nbdVolume;
+  kj::Promise<void> volumeRunTask;
   kj::ForkedPromise<void> process;
 
   kj::Own<kj::AsyncIoStream> capnpSocket;
@@ -213,7 +218,9 @@ private:
 
 WorkerImpl::WorkerImpl(kj::AsyncIoContext& ioContext, sandstorm::SubprocessSet& subprocessSet)
     : ioProvider(*ioContext.lowLevelProvider), subprocessSet(subprocessSet),
-      packageMountSet(ioContext), tasks(*this) {}
+      packageMountSet(ioContext), tasks(*this) {
+  NbdDevice::loadKernelModule();
+}
 WorkerImpl::~WorkerImpl() noexcept(false) {}
 
 kj::Maybe<sandstorm::Supervisor::Client> WorkerImpl::getRunningGrain(kj::ArrayPtr<const byte> id) {
@@ -375,6 +382,9 @@ public:
       : workerCap(kj::mv(workerCap)),
         nbdVolume(kj::mv(nbdUserEnd), volume),
         volume(kj::mv(volume)),
+        volumeRunTask(nbdVolume.run().eagerlyEvaluate([](kj::Exception&& exception) {
+          KJ_LOG(FATAL, "NbdVolumeAdapter failed (package)", exception);
+        })),
         stdinPipe(kj::mv(stdinPipe)),
         stdoutPipe(kj::mv(stdoutPipe)),
         subprocess(kj::mv(subprocess)) {
@@ -418,7 +428,10 @@ protected:
       results.setAppId(inResults.getAppId());
       results.setManifest(inResults.getManifest());
       results.setVolume(kj::mv(volume));
-      return kj::mv(subprocess);
+      auto promises = kj::heapArrayBuilder<kj::Promise<void>>(2);
+      promises.add(kj::mv(volumeRunTask));
+      promises.add(kj::mv(subprocess));
+      return kj::joinPromises(promises.finish());
     });
   }
 
@@ -426,6 +439,7 @@ private:
   Worker::Client workerCap;
   NbdVolumeAdapter nbdVolume;
   OwnedVolume::Client volume;
+  kj::Promise<void> volumeRunTask;
   kj::Maybe<kj::Own<kj::AsyncOutputStream>> stdinPipe;
   kj::Promise<void> stdinWriteQueue = kj::READY_NOW;
   kj::Own<kj::AsyncInputStream> stdoutPipe;
@@ -534,6 +548,8 @@ kj::MainFunc SupervisorMain::getMain() {
                          "NOT FOR HUMAN CONSUMPTION: Given the FD requirements, you obviously "
                          "can't run this directly from the command-line. It is intended to be "
                          "invoked by the Blackrock worker.")
+      .addOption({'n', "new"}, [this]() { sandstormSupervisor.setIsNew(true); return true; },
+                 "Initializes a new grain. (Otherwise, runs an existing one.)")
       .addOptionWithArg({'e', "env"}, KJ_BIND_METHOD(sandstormSupervisor, addEnv), "<name>=<val>",
                         "Set the environment variable <name> to <val> inside the sandbox.  Note "
                         "that *no* environment variables are set by default.")
@@ -560,9 +576,16 @@ kj::MainBuilder::Validity SupervisorMain::run() {
   // We'll mount our grain data on /mnt because it's our own mount namespace so why not?
   NbdDevice device;
   NbdBinding binding(device, kj::AutoCloseFd(4));
+
+  if (sandstormSupervisor.getIsNew()) {
+    // Experimentally, it seems 256M is a sweet spot that generates a minimal number of non-zero
+    // blocks. We can extend the filesystem later if desired.
+    device.format(256);
+  }
+
   Mount mount(device.getPath(), "/mnt", 0, nullptr);
-  sandstormSupervisor.setVar("/mnt");
   KJ_SYSCALL(chown("/mnt", 1000, 1000));
+  sandstormSupervisor.setVar("/mnt/grain");
 
   // In order to ensure we get a chance to clean up after the supervisor exits, we run it in a
   // fork.
@@ -606,20 +629,36 @@ kj::MainFunc UnpackMain::getMain() {
       .build();
 }
 
+static void seteugidNoHang(uid_t uid, gid_t gid) {
+  // Apparently, glibc's setuid() and setgid() are complicated wrappers which attempt to interrupt
+  // every thread in the process in order to set their IDs. But guess what? Our NBD thread is
+  // NOT INTERRUPTIBLE. So... hang. But we don't actually want to change that thread's IDs anyway.
+
+  KJ_SYSCALL(syscall(SYS_setresgid, -1, gid, -1)) { break; }
+  KJ_SYSCALL(syscall(SYS_setresuid, -1, uid, -1)) { break; }
+}
+
 kj::MainBuilder::Validity UnpackMain::run() {
   // Enter mount namespace!
   KJ_SYSCALL(unshare(CLONE_NEWNS));
 
   // We'll mount our package on /mnt because it's our own mount namespace so why not?
   NbdDevice device;
-  NbdBinding binding(device, kj::AutoCloseFd(4));
+  NbdBinding binding(device, kj::AutoCloseFd(3));
+  device.format(2048);  // TODO(soon): Set max filesystem size based on uncompressed package size.
   Mount mount(device.getPath(), "/mnt", 0, nullptr);
+  KJ_SYSCALL(mkdir("/mnt/spk", 0755));
 
-  kj::String appId = sandstorm::unpackSpk(STDIN_FILENO, "/mnt", "/tmp");
+  // We unpack packages with uid 1/gid 1: IDs that are not zero, but are also not used by apps.
+  KJ_SYSCALL(chown("/mnt/spk", 1, 1));
+  seteugidNoHang(1, 1);
+  KJ_DEFER(seteugidNoHang(0, 0));
+
+  kj::String appId = sandstorm::unpackSpk(STDIN_FILENO, "/mnt/spk", "/tmp");
 
   // Read manifest.
   capnp::StreamFdMessageReader reader(sandstorm::raiiOpen(
-      "/mnt/sandstorm-manifest", O_RDONLY | O_CLOEXEC));
+      "/mnt/spk/sandstorm-manifest", O_RDONLY | O_CLOEXEC));
 
   // Write result to stdout.
   capnp::MallocMessageBuilder message;
