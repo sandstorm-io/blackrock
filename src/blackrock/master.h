@@ -24,7 +24,8 @@ public:
     STORAGE,
     WORKER,
     COORDINATOR,
-    FRONTEND
+    FRONTEND,
+    MONGO
   };
 
   struct MachineId {

@@ -224,6 +224,19 @@ SimpleAddress SimpleAddress::lookup(kj::StringPtr address) {
   return result;
 }
 
+uint16_t SimpleAddress::getPort() const {
+  switch (addr.sa_family) {
+    case AF_INET:
+      return ntohs(ip4.sin_port);
+      break;
+    case AF_INET6:
+      return ntohs(ip6.sin6_port);
+      break;
+    default:
+      KJ_UNREACHABLE;
+  }
+}
+
 void SimpleAddress::setPort(uint16_t port) {
   switch (addr.sa_family) {
     case AF_INET:
@@ -291,19 +304,21 @@ bool SimpleAddress::operator==(const SimpleAddress& other) const {
   }
 }
 
-kj::String KJ_STRINGIFY(const SimpleAddress& addr) {
+kj::String SimpleAddress::toStringWithoutPort() const {
   char buffer[128];
 
-  switch (addr.addr.sa_family) {
+  switch (addr.sa_family) {
     case AF_INET:
-      return kj::str(inet_ntop(AF_INET, &addr.ip4.sin_addr, buffer, sizeof(buffer)),
-                     ":", ntohs(addr.ip4.sin_port));
+      return kj::str(inet_ntop(AF_INET, &ip4.sin_addr, buffer, sizeof(buffer)));
     case AF_INET6:
-      return kj::str(inet_ntop(AF_INET6, &addr.ip6.sin6_addr, buffer, sizeof(buffer)),
-                     ":", ntohs(addr.ip6.sin6_port));
+      return kj::str(inet_ntop(AF_INET6, &ip6.sin6_addr, buffer, sizeof(buffer)));
     default:
       KJ_UNREACHABLE;
   }
+}
+
+kj::String KJ_STRINGIFY(const SimpleAddress& addr) {
+  return kj::str(addr.toStringWithoutPort(), ':', addr.getPort());
 }
 
 // -------------------------------------------------------------------

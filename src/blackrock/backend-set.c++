@@ -7,25 +7,24 @@
 
 namespace blackrock {
 
-BackendSetBase::BackendSetBase(): next(backends.end()) {}
+BackendSetBase::BackendSetBase(kj::PromiseFulfillerPair<void> paf)
+    : next(backends.end()),
+      readyPromise(paf.promise.fork()),
+      readyFulfiller(kj::mv(paf.fulfiller)) {}
 BackendSetBase::~BackendSetBase() noexcept(false) {}
 
 capnp::Capability::Client BackendSetBase::chooseOne() {
   if (backends.empty()) {
-    // "Overloaded" really means "resources temporarily unavailable". It differs from
-    // "disconnected" in that the caller is unlikely to be able to fix the problem by merely
-    // re-establishing connections, but it differs from "failed" in that the problem is expected
-    // not to be permanent.
-    //
-    // TODO(cleanup): Rename KJ "overloaded" exception type to make this clearer?
-    kj::throwFatalException(KJ_EXCEPTION(OVERLOADED, "no back-end available"));
-  }
+    return readyPromise.addBranch().then([this]() {
+      return chooseOne();
+    });
+  } else {
+    if (next == backends.end()) {
+      next = backends.begin();
+    }
 
-  if (next == backends.end()) {
-    next = backends.begin();
+    return (next++)->second.client;
   }
-
-  return (next++)->second.client;
 }
 
 void BackendSetBase::clear() {
@@ -33,6 +32,10 @@ void BackendSetBase::clear() {
 }
 
 void BackendSetBase::add(uint64_t id, capnp::Capability::Client client) {
+  if (backends.empty()) {
+    readyFulfiller->fulfill();
+  }
+
   backends.insert(std::make_pair(id, Backend { kj::mv(client) }));
 }
 
@@ -41,6 +44,12 @@ void BackendSetBase::remove(uint64_t id) {
     ++next;
   }
   backends.erase(id);
+
+  if (backends.empty()) {
+    auto paf = kj::newPromiseAndFulfiller<void>();
+    readyPromise = paf.promise.fork();
+    readyFulfiller = kj::mv(paf.fulfiller);
+  }
 }
 
 } // namespace blackrock

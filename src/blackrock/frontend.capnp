@@ -19,6 +19,12 @@ interface Frontend {
   # Get the address and port of the frontend's HTTP interface.
 }
 
+interface Mongo {
+  getConnectionInfo @0 () -> (address :ClusterRpc.Address, username :Text, password :Text);
+
+  # TODO(someday): Support replicas.
+}
+
 struct FrontendConfig {
   baseUrl @0 :Text;
   # Equivalent to BASE_URL from sandstorm.conf.
@@ -29,18 +35,12 @@ struct FrontendConfig {
   ddpUrl @2 :Text;
   # Equivalent to DDP_DEFAULT_CONNECTION_URL from sandstorm.conf.
 
-  mongoUrl @3 :Text;
-  # Mongo URL, in the format desired by Meteor's MONGO_URL environment variable.
-
-  mongoOplogUrl @4 :Text;
-  # Mongo oplog URL, in the format desired by Meteor's MONGO_OPLOG_URL environment variable.
-
-  mailUrl @5 :Text;
+  mailUrl @3 :Text;
   # Equivalent to MAIL_URL from sandstorm.conf.
 
-  allowDemoAccounts @6 :Bool;
+  allowDemoAccounts @4 :Bool;
   # Equivalent to ALLOW_DEMO_ACCOUNTS from sandstorm.conf.
 
-  isTesting @7 :Bool;
+  isTesting @5 :Bool;
   # Equivalent to IS_TESTING from sandstorm.conf.
 }

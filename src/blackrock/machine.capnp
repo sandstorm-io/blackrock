@@ -86,7 +86,9 @@ interface Machine {
                      storageRootSet :BackendSet(Storage.StorageRootSet),
                      storageFactorySet :BackendSet(Storage.StorageFactory),
                      hostedRestorerSet :BackendSet(Restorer(SturdyRef.Hosted)),
-                     workerSet :BackendSet(Worker.Worker));  # `workerSet` is temporary
+                     workerSet :BackendSet(Worker.Worker),  # `workerSet` is temporary
+                     mongoSet :BackendSet(Frontend.Mongo));
+  becomeMongo @6 () -> (mongo :Frontend.Mongo);
 
   shutdown @5 ();
   # Do whatever is necessary to prepare this machine for safe shutdown. Do not return until it's

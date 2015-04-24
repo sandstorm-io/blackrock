@@ -13,7 +13,7 @@ namespace blackrock {
 
 class BackendSetBase {
 public:
-  BackendSetBase();
+  BackendSetBase(): BackendSetBase(kj::newPromiseAndFulfiller<void>()) {}
   ~BackendSetBase() noexcept(false);
 
   capnp::Capability::Client chooseOne();
@@ -33,12 +33,22 @@ private:
 
   std::map<uint64_t, Backend> backends;
   std::map<uint64_t, Backend>::iterator next;
+  kj::ForkedPromise<void> readyPromise;
+  kj::Own<kj::PromiseFulfiller<void>> readyFulfiller;
+
+  explicit BackendSetBase(kj::PromiseFulfillerPair<void> paf);
 };
 
 template <typename T>
 class BackendSetImpl: public BackendSet<T>::Server, public kj::Refcounted {
 public:
   typename T::Client chooseOne() { return base.chooseOne().template castAs<T>(); }
+  // Choose a capability from the set and return it, cycling through the set every time this
+  // method is called. If the backend set is empty, return a promise that resolves once a backend
+  // is available.
+  //
+  // TODO(someady): Would be nice to build in disconnect handling here, e.g. pass in a callback
+  //   function that initiates the work, catches exceptions and retries with a different back-end.
 
 protected:
   typedef typename BackendSet<T>::Server Interface;

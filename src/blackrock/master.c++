@@ -57,10 +57,12 @@ void runMaster(kj::AsyncIoContext& ioContext, ComputeDriver& driver, MasterConfi
   expectedCounts[ComputeDriver::MachineType::STORAGE] = 1;
   expectedCounts[ComputeDriver::MachineType::WORKER] = workerCount;
   expectedCounts[ComputeDriver::MachineType::FRONTEND] = 1;
+  expectedCounts[ComputeDriver::MachineType::MONGO] = 1;
 
   VatPath::Reader storagePath;
   auto workerPaths = kj::heapArray<VatPath::Reader>(config.getWorkerCount());
   VatPath::Reader frontendPath;
+  VatPath::Reader mongoPath;
 
   KJ_LOG(INFO, "examining currently-running machines...");
 
@@ -90,6 +92,7 @@ void runMaster(kj::AsyncIoContext& ioContext, ComputeDriver& driver, MasterConfi
   }
 
   start({ ComputeDriver::MachineType::FRONTEND, 0 }, frontendPath);
+  start({ ComputeDriver::MachineType::MONGO, 0 }, mongoPath);
 
   KJ_LOG(INFO, "waiting for startup tasks...");
   kj::joinPromises(startupTasks.releaseAsArray()).wait(ioContext.waitScope);
@@ -120,6 +123,7 @@ void runMaster(kj::AsyncIoContext& ioContext, ComputeDriver& driver, MasterConfi
   }
 
   // Start front-end.
+  auto mongo = rpcSystem.bootstrap(mongoPath).castAs<Machine>().becomeMongoRequest().send();
   auto frontend = ({
     auto req = rpcSystem.bootstrap(frontendPath).castAs<Machine>().becomeFrontendRequest();
     req.setConfig(config.getFrontendConfig());
@@ -153,6 +157,13 @@ void runMaster(kj::AsyncIoContext& ioContext, ComputeDriver& driver, MasterConfi
     }
     tasks.add(req.send().then([](auto){}));
   }
+  {
+    auto req = frontend.getMongoSet().resetRequest();
+    auto backend = req.initBackends(1)[0];
+    backend.setId(0);
+    backend.setBackend(mongo.getMongo());
+    tasks.add(req.send().then([](auto){}));
+  }
 
   // Loop forever handling messages.
   KJ_LOG(INFO, "Blackrock READY");
@@ -175,6 +186,7 @@ ComputeDriver::MachineId::MachineId(kj::StringPtr name) {
   else HANDLE_CASE(WORKER, "worker")
   else HANDLE_CASE(COORDINATOR, "coordinator")
   else HANDLE_CASE(FRONTEND, "frontend")
+  else HANDLE_CASE(MONGO, "mongo")
   else KJ_FAIL_ASSERT("couldn't parse machine ID", name);
 #undef HANDLE_CASE
 
@@ -192,6 +204,7 @@ kj::String ComputeDriver::MachineId::toString() const {
     case MachineType::WORKER     : typeName = "worker"     ; break;
     case MachineType::COORDINATOR: typeName = "coordinator"; break;
     case MachineType::FRONTEND   : typeName = "frontend"   ; break;
+    case MachineType::MONGO      : typeName = "mongo"      ; break;
   }
 
   return kj::str(typeName, index);

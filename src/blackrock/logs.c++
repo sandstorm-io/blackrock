@@ -100,6 +100,18 @@ private:
         name = addr;
       }
 
+      if (!sink.namesSeen.insert(kj::str(name)).second) {
+        // Dup name.
+        for (uint counter = 1; ; ++counter) {
+          kj::String altName = kj::str(name, '.', counter);
+          kj::StringPtr ptr = altName;
+          if (sink.namesSeen.insert(kj::mv(altName)).second) {
+            name = ptr;
+            break;
+          }
+        }
+      }
+
       if (valid) {
         sink.write(kj::str(" * ", name, " (", addr, ") CONNECTED\n"));
       } else {

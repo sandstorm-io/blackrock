@@ -19,9 +19,7 @@ const testConfig :MasterConfig = (
   frontendConfig = (
     baseUrl = "http://frontend0:6080",
     wildcardHost = "*.frontend0",   # TODO
-    mongoUrl = "mongodb://172.28.128.1/meteor",
-    mongoOplogUrl = "mongodb://172.28.128.1/local",
-    allowDemoAccounts = true,
+    allowDemoAccounts = false,
     isTesting = true
   )
 );

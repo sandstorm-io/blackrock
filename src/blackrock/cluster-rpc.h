@@ -34,6 +34,7 @@ public:
 
   inline sa_family_t family() const { return addr.sa_family; }
 
+  uint16_t getPort() const;
   void setPort(uint16_t port);
 
   void copyTo(Address::Builder builder) const;
@@ -50,6 +51,8 @@ public:
 
   bool operator==(const SimpleAddress& other) const;
   inline bool operator!=(const SimpleAddress& other) const { return !operator==(other); }
+
+  kj::String toStringWithoutPort() const;
 
 private:
   union {

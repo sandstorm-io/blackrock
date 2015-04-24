@@ -17,12 +17,13 @@
 #include <capnp/rpc.h>
 #include <capnp/rpc-twoparty.h>
 #include "backend-set.h"
+#include "cluster-rpc.h"
 
 namespace blackrock {
 
 class FrontendImpl: public Frontend::Server, private kj::TaskSet::ErrorHandler {
 public:
-  FrontendImpl(kj::AsyncIoProvider& ioProvider, sandstorm::SubprocessSet& subprocessSet,
+  FrontendImpl(kj::Network& network, kj::Timer& timer, sandstorm::SubprocessSet& subprocessSet,
                FrontendConfig::Reader config);
 
   void setConfig(FrontendConfig::Reader config);
@@ -30,8 +31,13 @@ public:
   BackendSet<StorageRootSet>::Client getStorageRootBackendSet();
   BackendSet<StorageFactory>::Client getStorageFactoryBackendSet();
   BackendSet<Worker>::Client getWorkerBackendSet();
+  BackendSet<Mongo>::Client getMongoBackendSet();
 
 private:
+  class BackendImpl;
+  struct MongoInfo;
+
+  kj::Timer& timer;
   sandstorm::SubprocessSet& subprocessSet;
   kj::Own<capnp::MallocMessageBuilder> configMessage;
   FrontendConfig::Reader config;
@@ -40,15 +46,37 @@ private:
   kj::Own<BackendSetImpl<StorageRootSet>> storageRoots;
   kj::Own<BackendSetImpl<StorageFactory>> storageFactories;
   kj::Own<BackendSetImpl<Worker>> workers;
+  kj::Own<BackendSetImpl<Mongo>> mongos;
 
   pid_t frontendPid = 0;
   kj::TaskSet tasks;
 
-  kj::Promise<void> execLoop();
+  kj::Promise<void> execLoop(MongoInfo&& mongoInfo);
 
   void taskFailed(kj::Exception&& exception) override;
+};
 
-  class BackendImpl;
+class MongoImpl: public Mongo::Server {
+public:
+  explicit MongoImpl(
+      kj::Timer& timer, sandstorm::SubprocessSet& subprocessSet, SimpleAddress bindAddress,
+      kj::PromiseFulfillerPair<void> passwordPaf = kj::newPromiseAndFulfiller<void>());
+
+protected:
+  kj::Promise<void> getConnectionInfo(GetConnectionInfoContext context) override;
+
+private:
+  kj::Timer& timer;
+  sandstorm::SubprocessSet& subprocessSet;
+  SimpleAddress bindAddress;
+  kj::Maybe<kj::String> password;
+  kj::ForkedPromise<void> passwordPromise;
+  kj::Promise<void> execTask;
+
+  kj::Promise<void> startExecLoop(kj::Own<kj::PromiseFulfiller<void>> passwordFulfiller);
+  kj::Promise<void> execLoop(kj::PromiseFulfiller<void>& passwordFulfiller);
+  kj::Promise<kj::String> initializeMongo();
+  kj::Promise<void> mongoCommand(kj::String command, kj::StringPtr dbName = "meteor");
 };
 
 } // namespace blackrock

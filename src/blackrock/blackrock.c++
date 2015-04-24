@@ -34,8 +34,9 @@ class MachineImpl: public Machine::Server {
   //   (But before we do that we probably need to implement Cap'n Proto Level 3.)
 
 public:
-  MachineImpl(kj::AsyncIoContext& ioContext)
-      : ioContext(ioContext), subprocessSet(ioContext.unixEventPort) {}
+  MachineImpl(kj::AsyncIoContext& ioContext, SimpleAddress selfAddress)
+      : ioContext(ioContext), subprocessSet(ioContext.unixEventPort),
+        selfAddress(selfAddress) {}
 
   kj::Promise<void> becomeStorage(BecomeStorageContext context) override {
     StorageInfo* info;
@@ -89,7 +90,9 @@ public:
     } else {
       KJ_LOG(INFO, "become frontend...");
       auto ptr = kj::heap<FrontendInfo>(kj::heap<FrontendImpl>(
-          *ioContext.provider, subprocessSet, context.getParams().getConfig()));
+          ioContext.provider->getNetwork(),
+          ioContext.provider->getTimer(),
+          subprocessSet, context.getParams().getConfig()));
       info = ptr;
       frontendInfo = kj::mv(ptr);
     }
@@ -99,6 +102,7 @@ public:
     results.setStorageRootSet(info->impl->getStorageRootBackendSet());
     results.setStorageFactorySet(info->impl->getStorageFactoryBackendSet());
     results.setWorkerSet(info->impl->getWorkerBackendSet());
+    results.setMongoSet(info->impl->getMongoBackendSet());
 
     // TODO(soon): These are placeholders.
     results.setStorageRestorerSet(kj::refcounted<BackendSetImpl<Restorer<SturdyRef::Stored>>>());
@@ -107,9 +111,27 @@ public:
     return kj::READY_NOW;
   }
 
+  kj::Promise<void> becomeMongo(BecomeMongoContext context) override {
+    Mongo::Client client = nullptr;
+    KJ_IF_MAYBE(w, mongo) {
+      KJ_LOG(INFO, "rebecome mongo...");
+      client = *w;
+    } else {
+      KJ_LOG(INFO, "become mongo...");
+      SimpleAddress mongoAddr = selfAddress;
+      mongoAddr.setPort(27017);
+      client = kj::heap<MongoImpl>(ioContext.provider->getTimer(), subprocessSet, mongoAddr);
+      mongo = client;
+    }
+
+    context.getResults().setMongo(kj::mv(client));
+    return kj::READY_NOW;
+  }
+
 private:
   kj::AsyncIoContext& ioContext;
   sandstorm::SubprocessSet subprocessSet;
+  SimpleAddress selfAddress;
 
   struct StorageInfo {
     StorageSibling::Client selfAsSibling;
@@ -144,6 +166,8 @@ private:
         : impl(impl), client(kj::mv(impl)) {}
   };
   kj::Maybe<kj::Own<FrontendInfo>> frontendInfo;
+
+  kj::Maybe<Mongo::Client> mongo;
 };
 
 static constexpr const char LOG_ADDRESS_FILE[] = "/var/run/blackrock-logsink-address";
@@ -272,7 +296,7 @@ private:
 
           KJ_IF_MAYBE(fd, maybeFd) {
             if (sandstorm::trim(sandstorm::readAll(*fd)) == "blackrock") {
-              KJ_SYSCALL(kill(*pid, SIGTERM));
+              KJ_SYSCALL(kill(*pid, SIGKILL));
             }
           }
         }
@@ -326,15 +350,6 @@ private:
       // Detach from controlling terminal and make ourselves session leader.
       KJ_SYSCALL(setsid());
 
-      // Fork again so that we are no longer session leader, which prevents us from picking up a
-      // controlling terminal by merely opening one.
-      pid_t pid;
-      KJ_SYSCALL(pid = fork());
-      if (pid == 0) {
-        // Parent exits.
-        return 0;
-      }
-
       // Write logs to log process.
       KJ_IF_MAYBE(n, loggingName) {
         int fds[2];
@@ -348,6 +363,21 @@ private:
         sandstorm::Subprocess(kj::mv(options)).detach();
         KJ_SYSCALL(dup2(writeEnd, STDERR_FILENO));
       }
+
+      // Create a new pid namespace so that when the blackrock daemon is killed or dies, everything
+      // below it dies.
+      KJ_SYSCALL(unshare(CLONE_NEWPID));
+
+      // Fork again so that we are no longer session leader (which prevents us from picking up a
+      // controlling terminal by merely opening one) and to enter the new PID namespace.
+      pid_t pid;
+      KJ_SYSCALL(pid = fork());
+      if (pid != 0) {
+        // Parent exits.
+        return 0;
+      }
+
+      KJ_ASSERT(getpid() == 1);
 
       // Redirect stdout to stderr (i.e. the log sink).
       KJ_SYSCALL(dup2(STDERR_FILENO, STDOUT_FILENO));
@@ -376,7 +406,8 @@ private:
 
       // Set up RPC.
       // TODO(security): Only let the master bootstrap the MachineImpl.
-      auto rpcSystem = capnp::makeRpcServer(network, kj::heap<MachineImpl>(ioContext));
+      auto rpcSystem = capnp::makeRpcServer(network,
+          kj::heap<MachineImpl>(ioContext, SimpleAddress(network.getSelf().getAddress())));
 
       // Loop forever handling messages.
       kj::NEVER_DONE.wait(ioContext.waitScope);

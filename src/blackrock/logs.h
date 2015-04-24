@@ -7,6 +7,7 @@
 
 #include "common.h"
 #include <kj/async-io.h>
+#include <set>
 
 namespace sandstorm {
   class Subprocess;
@@ -33,6 +34,8 @@ private:
   };
 
   kj::Maybe<LogFile> currentFile;
+
+  std::set<kj::String> namesSeen;
 
   kj::TaskSet tasks;
 
