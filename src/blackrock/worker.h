@@ -64,6 +64,7 @@ public:
     kj::String path;
 
     kj::Own<NbdVolumeAdapter> volumeAdapter;
+    kj::Promise<void> volumeRunTask;
 
     kj::AsyncIoProvider::PipeThread nbdThread;
     // Thread which mounts the NBD device. Protocol as follows:
@@ -123,7 +124,7 @@ private:
 
   sandstorm::Supervisor::Client bootGrain(PackageInfo::Reader packageInfo,
       Assignable<GrainState>::Client grainState, Volume::Client grainVolume,
-      sandstorm::spk::Manifest::Command::Reader command);
+      sandstorm::spk::Manifest::Command::Reader command, bool isNew);
 
   void taskFailed(kj::Exception&& exception) override;
 };

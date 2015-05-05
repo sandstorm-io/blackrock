@@ -250,9 +250,6 @@ SimpleAddress VagrantDriver::getMasterBindAddress() {
 }
 
 auto VagrantDriver::listMachines() -> kj::Promise<kj::Array<MachineId>> {
-  char* cwd = get_current_dir_name();
-  KJ_DEFER(free(cwd));
-
   int fds[2];
   KJ_SYSCALL(pipe2(fds, O_CLOEXEC));
   kj::AutoCloseFd writeEnd(fds[1]);
@@ -265,7 +262,7 @@ auto VagrantDriver::listMachines() -> kj::Promise<kj::Array<MachineId>> {
   auto exitPromise = subprocessSet.waitForSuccess(kj::mv(options));
 
   // Unfortunately, `vagrant global-status` does not appear to support `--machine-readable`; the
-  // output is simply empty. So... we parse.
+  // output is simply empty. So... we parse. Poorly.
   auto outputPromise = readAllAsync(*input);
   return outputPromise.attach(kj::mv(input))
       .then([KJ_MVCAP(exitPromise)](kj::String allText) mutable {
@@ -277,16 +274,29 @@ auto VagrantDriver::listMachines() -> kj::Promise<kj::Array<MachineId>> {
     KJ_ASSERT(text.startsWith("----------------"));
     text = text.slice(KJ_ASSERT_NONNULL(text.findFirst('\n')) + 1);
 
+    // If there are no VMs running, Vagrant says "There are no active blah blah blah",
+    // unfortunately *without* a leading blank line.
     if (!text.startsWith("There are no active")) {
+      char* cwdp = get_current_dir_name();
+      KJ_DEFER(free(cwdp));
+      kj::StringPtr cwd = cwdp;
+
+      // Parse lines until we see an empty line.
       while (!text.startsWith("\n") && !text.startsWith("\r\n")) {
-        text = text.slice(KJ_ASSERT_NONNULL(text.findFirst(' ')));
+        // Parse line in format: id name provider state directory
+
+        uint eol = KJ_ASSERT_NONNULL(text.findFirst('\n'));
+        auto row = text.slice(0, eol);
+        text = text.slice(eol + 1);
         while (text.startsWith(" ")) text = text.slice(1);
 
-        auto name = kj::str(text.slice(0, KJ_ASSERT_NONNULL(text.findFirst(' '))));
-        result.add(MachineId(name));
+        auto cols = sandstorm::splitSpace(row);
+        KJ_ASSERT(cols.size() == 5, "couldn't parse vagrant global-status row", row);
 
-        text = text.slice(KJ_ASSERT_NONNULL(text.findFirst('\n')) + 1);
-        while (text.startsWith(" ")) text = text.slice(1);
+        // Ignore VMs from other Vagrantfiles by checking the directory.
+        if (kj::str(cols[4]) == cwd) {
+          result.add(MachineId(kj::str(cols[1])));
+        }
       }
     }
 

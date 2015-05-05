@@ -46,7 +46,7 @@ auto PackageMountSet::getPackage(PackageInfo::Reader package)
     uint64_t random;
     randombytes_buf(&random, sizeof(random));
 
-    packageMount = kj::heap<PackageMount>(*this, id,
+    packageMount = kj::refcounted<PackageMount>(*this, id,
         kj::str("/var/blackrock/packages/", counter++, '-', kj::hex(random)),
         package.getVolume(), kj::mv(nbdUserEnd), kj::mv(nbdKernelEnd));
     slot = packageMount.get();
@@ -80,13 +80,16 @@ PackageMountSet::PackageMount::PackageMount(PackageMountSet& mountSet,
       id(kj::heapArray(id)),
       path(kj::heapString(path)),
       volumeAdapter(kj::heap<NbdVolumeAdapter>(kj::mv(nbdUserEnd), kj::mv(volume))),
+      volumeRunTask(volumeAdapter->run().eagerlyEvaluate([](kj::Exception&& exception) {
+        KJ_LOG(FATAL, "NbdVolumeAdapter failed (grain)", exception);
+      })),
       nbdThread(mountSet.ioContext.provider->newPipeThread(
           [KJ_MVCAP(path), KJ_MVCAP(nbdKernelEnd)](
             kj::AsyncIoProvider& ioProvider,
             kj::AsyncIoStream& pipe,
             kj::WaitScope& waitScope) mutable {
         // Make sure mount point exists, and try to remove it later.
-        mkdir(path.cStr(), 0777);
+        sandstorm::recursivelyCreateParent(kj::str(path, "/foo"));
         KJ_DEFER(rmdir(path.cStr()));
 
         // Set up NBD.
@@ -114,6 +117,7 @@ PackageMountSet::PackageMount::~PackageMount() noexcept(false) {
 
   auto pipe = kj::mv(nbdThread.pipe);
   pipe->shutdownWrite();
+  auto runTask = kj::mv(volumeRunTask);
   loaded.addBranch().then([KJ_MVCAP(pipe)]() mutable {
     // OK, we read the first byte. Wait for the pipe to become readable again, signalling EOF
     // meaning the thread is done.
@@ -124,7 +128,9 @@ PackageMountSet::PackageMount::~PackageMount() noexcept(false) {
   }, [](kj::Exception&& e) {
     // Apparently the thread exited without ever signaling that NBD setup succeeded.
     return kj::READY_NOW;
-  }).attach(kj::mv(nbdThread.thread))
+  }).then([KJ_MVCAP(runTask)]() mutable {
+    return kj::mv(runTask);
+  }).attach(kj::mv(nbdThread.thread), kj::mv(volumeAdapter))
     .detach([](kj::Exception&& exception) {
     KJ_LOG(ERROR, "Exception while trying to unmount package.", exception);
   });
@@ -271,7 +277,7 @@ kj::Promise<void> WorkerImpl::newGrain(NewGrainContext context) {
   OwnedAssignable<GrainState>::Client grainState = req.send().getAssignable();
 
   sandstorm::Supervisor::Client supervisor = bootGrain(params.getPackage(), grainState,
-      kj::mv(grainVolume), params.getCommand());
+      kj::mv(grainVolume), params.getCommand(), true);
 
   supervisorPaf.fulfiller->fulfill(kj::cp(supervisor));
 
@@ -288,20 +294,21 @@ kj::Promise<void> WorkerImpl::restoreGrain(RestoreGrainContext context) {
 
   context.getResults().setGrain(bootGrain(
       params.getPackage(), params.getGrainState(),
-      params.getVolume(), params.getCommand()));
+      params.getVolume(), params.getCommand(), false));
 
   return kj::READY_NOW;
 }
 
 sandstorm::Supervisor::Client WorkerImpl::bootGrain(PackageInfo::Reader packageInfo,
     Assignable<GrainState>::Client grainState, Volume::Client grainVolume,
-    sandstorm::spk::Manifest::Command::Reader commandReader) {
+    sandstorm::spk::Manifest::Command::Reader commandReader, bool isNew) {
   // Copy command info from params, since params will no longer be valid when we return.
   CommandInfo command(commandReader);
 
   // Make sure the package is mounted, then start the grain.
   return packageMountSet.getPackage(packageInfo)
-      .then([this,grainState,KJ_MVCAP(command),KJ_MVCAP(grainVolume)](auto&& packageMount) mutable {
+      .then([this,isNew,grainState,KJ_MVCAP(command),KJ_MVCAP(grainVolume)]
+            (auto&& packageMount) mutable {
     // Create the NBD socketpair. The Supervisor will actually mount the NBD device (in its own
     // mount namespace) but we'll implement it in the Worker.
     int nbdSocketPair[2];
@@ -323,11 +330,14 @@ sandstorm::Supervisor::Client WorkerImpl::bootGrain(PackageInfo::Reader packageI
 
     // Build array of StringPtr for argv.
     KJ_STACK_ARRAY(kj::StringPtr, argv,
-        command.commandArgs.size() + command.envArgs.size() + 4, 16, 16);
+        command.commandArgs.size() + command.envArgs.size() + 4 + isNew, 16, 16);
     {
       int i = 0;
       argv[i++] = "blackrock";
       argv[i++] = "grain";
+      if (isNew) {
+        argv[i++] = "-n";
+      }
       for (auto& envArg: command.envArgs) {
         argv[i++] = envArg;
       }
