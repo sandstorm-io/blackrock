@@ -24,6 +24,7 @@
 #include <signal.h>
 #include <sys/types.h>
 #include <sys/eventfd.h>
+#include <sys/mount.h>
 #include "backend-set.h"
 #include "frontend.h"
 
@@ -183,8 +184,10 @@ public:
                            "Starts Blackrock.")
         .addSubCommand("master", KJ_BIND_METHOD(*this, getMasterMain), "run as master node")
         .addSubCommand("slave", KJ_BIND_METHOD(*this, getSlaveMain), "run as slave node")
-        .addSubCommand("grain", KJ_BIND_METHOD(*this, getSupervisorMain),
-            "(internal) run a supervised grain")
+        .addSubCommand("grain", KJ_BIND_METHOD(*this, getMetaSupervisorMain),
+            "(internal) run a grain meta-supervisor")
+        .addSubCommand("supervise", KJ_BIND_METHOD(*this, getSupervisorMain),
+            "(internal) run a grain supervisor")
         .addSubCommand("unpack", KJ_BIND_METHOD(*this, getUnpackMain),
             "(internal) unpack an spk into a network volume")
         .addSubCommand("log", KJ_BIND_METHOD(*this, getLogMain), "run log client")
@@ -222,6 +225,11 @@ public:
 
   kj::MainFunc getSupervisorMain() {
     alternateMain = kj::heap<SupervisorMain>(context);
+    return alternateMain->getMain();
+  }
+
+  kj::MainFunc getMetaSupervisorMain() {
+    alternateMain = kj::heap<MetaSupervisorMain>(context);
     return alternateMain->getMain();
   }
 
@@ -296,10 +304,19 @@ private:
 
           KJ_IF_MAYBE(fd, maybeFd) {
             if (sandstorm::trim(sandstorm::readAll(*fd)) == "blackrock") {
-              KJ_SYSCALL(kill(*pid, SIGKILL));
+              kill(*pid, SIGKILL);
             }
           }
         }
+      }
+    }
+
+    // If this is a worker machine, there may be leftover package mounts. Kill them.
+    if (access("/var/blackrock/packages", F_OK) >= 0) {
+      for (auto& pkg: sandstorm::listDirectory("/var/blackrock/packages")) {
+        auto path = kj::str("/var/blackrock/packages/", pkg);
+        umount2(path.cStr(), MNT_FORCE);
+        rmdir(path.cStr());
       }
     }
 

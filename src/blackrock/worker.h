@@ -146,6 +146,22 @@ private:
   class SystemConnectorImpl;
 };
 
+class MetaSupervisorMain: public sandstorm::AbstractMain {
+  // A binary which is responsible for mounting nbd and then exec()ing the supervisor.
+
+public:
+  MetaSupervisorMain(kj::ProcessContext& context);
+
+  kj::MainFunc getMain() override;
+
+  kj::MainBuilder::Validity run();
+
+private:
+  kj::ProcessContext& context;
+  kj::Vector<kj::StringPtr> args;
+  bool isNew = false;
+};
+
 class UnpackMain: public sandstorm::AbstractMain {
   // Thin wrapper around `spk unpack` for use by Blackrock worker.
 

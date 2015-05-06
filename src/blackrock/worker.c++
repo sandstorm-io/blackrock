@@ -322,27 +322,30 @@ sandstorm::Supervisor::Client WorkerImpl::bootGrain(PackageInfo::Reader packageI
     // Create the Cap'n Proto socketpair, for Worker <-> Supervisor communication.
     int capnpSocketPair[2];
     KJ_SYSCALL(socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0, capnpSocketPair));
-    kj::AutoCloseFd capnpSupervisorEnd(nbdSocketPair[0]);
-    auto capnpWorkerEnd = ioProvider.wrapSocketFd(nbdSocketPair[1],
+    kj::AutoCloseFd capnpSupervisorEnd(capnpSocketPair[0]);
+    auto capnpWorkerEnd = ioProvider.wrapSocketFd(capnpSocketPair[1],
         kj::LowLevelAsyncIoProvider::TAKE_OWNERSHIP |
         kj::LowLevelAsyncIoProvider::ALREADY_CLOEXEC |
         kj::LowLevelAsyncIoProvider::ALREADY_NONBLOCK);
 
+    kj::String packageRoot = kj::str(packageMount->getPath(), "/spk");
+
     // Build array of StringPtr for argv.
     KJ_STACK_ARRAY(kj::StringPtr, argv,
-        command.commandArgs.size() + command.envArgs.size() + 4 + isNew, 16, 16);
+        command.commandArgs.size() + command.envArgs.size() + 5 + isNew, 16, 16);
     {
       int i = 0;
       argv[i++] = "blackrock";
-      argv[i++] = "grain";
+      argv[i++] = "grain";  // meta-supervisor
       if (isNew) {
         argv[i++] = "-n";
       }
+      argv[i++] = "--";  // begin supervisor args
       for (auto& envArg: command.envArgs) {
         argv[i++] = envArg;
       }
       argv[i++] = "--";
-      argv[i++] = packageMount->getPath();
+      argv[i++] = packageRoot;
       for (auto& commandArg: command.commandArgs) {
         argv[i++] = commandArg;
       }
@@ -366,9 +369,10 @@ sandstorm::Supervisor::Client WorkerImpl::bootGrain(PackageInfo::Reader packageI
     auto id = grain->getId();
 
     // Put it in the map so that it doesn't go away and can be restore()ed.
+    auto& grainRef = *grain;
     runningGrains[id] = kj::mv(grain);
     auto remover = kj::defer([this,id]() { runningGrains.erase(id); });
-    tasks.add(grain->onExit().attach(kj::mv(remover)));
+    tasks.add(grainRef.onExit().attach(kj::mv(remover)));
 
     return supervisor;
   });
@@ -526,6 +530,10 @@ public:
     // Not relevant for Blackrock.
   }
 
+  kj::Maybe<int> getSaveFd() const override {
+    return 3;
+  }
+
 private:
   struct Runner {
     kj::Own<kj::AsyncIoStream> stream;
@@ -551,13 +559,10 @@ kj::MainFunc SupervisorMain::getMain() {
                          "Runs a Blackrock grain supervisor for an instance of the package found "
                          "at path <package>. <command> is executed inside the sandbox to start "
                          "the grain. The caller must provide a Cap'n Proto towparty socket on "
-                         "FD 3 which is used to talk to the grain supervisor, and FD 4 must be "
-                         "a socket implementing the NBD protocol exporting the grain's mutable "
-                         "storage.\n"
+                         "FD 3 which is used to talk to the grain supervisor.\n"
                          "\n"
-                         "NOT FOR HUMAN CONSUMPTION: Given the FD requirements, you obviously "
-                         "can't run this directly from the command-line. It is intended to be "
-                         "invoked by the Blackrock worker.")
+                         "NOT FOR HUMAN CONSUMPTION: This should only be executed by "
+                         "`blackrock grain`.")
       .addOption({'n', "new"}, [this]() { sandstormSupervisor.setIsNew(true); return true; },
                  "Initializes a new grain. (Otherwise, runs an existing one.)")
       .addOptionWithArg({'e', "env"}, KJ_BIND_METHOD(sandstormSupervisor, addEnv), "<name>=<val>",
@@ -570,24 +575,55 @@ kj::MainFunc SupervisorMain::getMain() {
 }
 
 kj::MainBuilder::Validity SupervisorMain::run() {
+  // Set CLOEXEC on the Cap'n Proto socket so that the app doesn't see it.
+  KJ_SYSCALL(fcntl(3, F_SETFD, FD_CLOEXEC));
+
   sandstormSupervisor.setAppName("appname-not-applicable");
   sandstormSupervisor.setGrainId("grainid-not-applicable");
 
   SystemConnectorImpl connector;
   sandstormSupervisor.setSystemConnector(connector);
 
-  // Set CLOEXEC on the two special FDs we inherited, to be safe.
-  KJ_SYSCALL(fcntl(3, F_SETFD, FD_CLOEXEC));
+  sandstormSupervisor.setVar("/mnt/grain");
+
+  return sandstormSupervisor.run();
+}
+
+// -----------------------------------------------------------------------------
+
+MetaSupervisorMain::MetaSupervisorMain(kj::ProcessContext& context)
+    : context(context) {}
+
+kj::MainFunc MetaSupervisorMain::getMain() {
+  return kj::MainBuilder(context, "Blackrock version " SANDSTORM_VERSION,
+                         "Runs 'blackrock supervise' passing it <args>. Forwards the -n option "
+                         "if given. The caller must provide a Cap'n Proto towparty socket on "
+                         "FD 3 which is used to talk to the grain supervisor, and FD 4 must be "
+                         "a socket implementing the NBD protocol exporting the grain's mutable "
+                         "storage.\n"
+                         "\n"
+                         "NOT FOR HUMAN CONSUMPTION: Given the FD requirements, you obviously "
+                         "can't run this directly from the command-line. It is intended to be "
+                         "invoked by the Blackrock worker.")
+      .addOption({'n', "new"}, [this]() { isNew = true; args.add("-n"); return true; },
+                 "Initializes a new grain. (Otherwise, runs an existing one.)")
+      .expectZeroOrMoreArgs("<args>", [this](kj::StringPtr s) { args.add(s); return true; })
+      .callAfterParsing(KJ_BIND_METHOD(*this, run))
+      .build();
+}
+
+kj::MainBuilder::Validity MetaSupervisorMain::run() {
+  // Set CLOEXEC on the the nbd fd so that the supervisor doesn't see it.
   KJ_SYSCALL(fcntl(4, F_SETFD, FD_CLOEXEC));
 
-  // Enter mount namespace!
+  // Enter mount namespace, to mount the grain.
   KJ_SYSCALL(unshare(CLONE_NEWNS));
 
   // We'll mount our grain data on /mnt because it's our own mount namespace so why not?
   NbdDevice device;
   NbdBinding binding(device, kj::AutoCloseFd(4));
 
-  if (sandstormSupervisor.getIsNew()) {
+  if (isNew) {
     // Experimentally, it seems 256M is a sweet spot that generates a minimal number of non-zero
     // blocks. We can extend the filesystem later if desired.
     device.format(256);
@@ -595,26 +631,32 @@ kj::MainBuilder::Validity SupervisorMain::run() {
 
   Mount mount(device.getPath(), "/mnt", 0, nullptr);
   KJ_SYSCALL(chown("/mnt", 1000, 1000));
-  sandstormSupervisor.setVar("/mnt/grain");
 
   // In order to ensure we get a chance to clean up after the supervisor exits, we run it in a
   // fork.
-  sandstorm::Subprocess child([this]() {
+  sandstorm::Subprocess child([this]() -> int {
     // Unfortunately, we are still root here. Drop privs.
     KJ_SYSCALL(setgroups(0, nullptr));
     KJ_SYSCALL(setresgid(1000, 1000, 1000));
     KJ_SYSCALL(setresuid(1000, 1000, 1000));
 
-    // Make sure the `sandbox` directory exists.
-    mkdir("/mnt/sandbox", 0777);
+    // More unfortunately, the ownership of /proc/self/uid_map and similar special files are set
+    // on exec() and do not change until the next exec() (fork()s inherit the current permissions
+    // of the parent's file). Therefore, now that we've changed our uid, we *must* exec() before
+    // we can set up a sandbox. Otherwise, we'd just call sandstorm::SupervisorMain directly here.
 
-    KJ_IF_MAYBE(error, sandstormSupervisor.run().getError()) {
-      KJ_LOG(ERROR, *error);
-      return 1;
-    } else {
-      KJ_LOG(ERROR, "sandstorm::SupervisorMain::run() should not have returned");
-      return 1;
+    const char* subArgs[args.size() + 3];
+    uint i = 0;
+    subArgs[i++] = "blackrock";
+    subArgs[i++] = "supervise";
+    for (auto& arg: args) {
+      subArgs[i++] = arg.cStr();
     }
+    subArgs[i++] = nullptr;
+
+    auto subArgv = const_cast<char* const*>(subArgs);  // execv() is not const-correct. :(
+    KJ_SYSCALL(execv("/proc/self/exe", subArgv));
+    KJ_UNREACHABLE;
   });
 
   // FD 3 is used by the child. Close our handle.
