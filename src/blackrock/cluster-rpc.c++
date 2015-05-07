@@ -560,7 +560,8 @@ public:
     }
 
     // OK, let's try to connenct.
-    tasks.add(address.onNetwork(network.network)->connect()
+    auto addrObj = address.onNetwork(network.network);
+    tasks.add(addrObj->connect().attach(kj::mv(addrObj))
         .then([this](kj::Own<kj::AsyncIoStream>&& connection) -> kj::Promise<void> {
       if (state == AUTHENTICATED) {
         // Apparently we got a connection in the other direction in the meantime. Ignore.

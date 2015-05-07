@@ -1640,7 +1640,6 @@ kj::Promise<void> FilesystemStorage::getOrCreateAssignable(GetOrCreateAssignable
     return kj::READY_NOW;
   } else {
     auto name = kj::heapString(params.getName());
-    context.releaseParams();
     auto result = factory->newObject<AssignableImpl>();
     auto object = result.client.castAs<OwnedStorage<>>();
     context.getResults(capnp::MessageSize {4, 1}).setObject(kj::mv(result.client));
