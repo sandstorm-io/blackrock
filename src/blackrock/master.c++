@@ -49,6 +49,10 @@ void runMaster(kj::AsyncIoContext& ioContext, ComputeDriver& driver, MasterConfi
                bool shouldRestart) {
   KJ_REQUIRE(config.getWorkerCount() > 0, "need at least one worker");
 
+  VatNetwork network(ioContext.provider->getNetwork(), ioContext.provider->getTimer(),
+                     driver.getMasterBindAddress());
+  auto rpcSystem = capnp::makeRpcClient(network);
+
   kj::Vector<kj::Promise<void>> startupTasks;
 
   uint workerCount = config.getWorkerCount();
@@ -74,10 +78,11 @@ void runMaster(kj::AsyncIoContext& ioContext, ComputeDriver& driver, MasterConfi
     }
   }
 
-  auto start = [&startupTasks,&driver,shouldRestart](
+  auto start = [&startupTasks,&driver,&network,shouldRestart](
       ComputeDriver::MachineId id, VatPath::Reader& pathSlot) {
     KJ_LOG(INFO, "STARTING", id);
-    startupTasks.add(driver.start(id, shouldRestart).then([id,&pathSlot](auto path) {
+    startupTasks.add(driver.start(id, network.getSelf().getId(), shouldRestart)
+        .then([id,&pathSlot](auto path) {
       KJ_LOG(INFO, "READY", id);
       pathSlot = path;
     }));
@@ -98,10 +103,6 @@ void runMaster(kj::AsyncIoContext& ioContext, ComputeDriver& driver, MasterConfi
   kj::joinPromises(startupTasks.releaseAsArray()).wait(ioContext.waitScope);
 
   // -------------------------------------------------------------------------------------
-
-  VatNetwork network(ioContext.provider->getNetwork(), ioContext.provider->getTimer(),
-                     driver.getMasterBindAddress());
-  auto rpcSystem = capnp::makeRpcClient(network);
 
   ErrorLogger logger;
   kj::TaskSet tasks(logger);
@@ -304,15 +305,21 @@ auto VagrantDriver::listMachines() -> kj::Promise<kj::Array<MachineId>> {
   });
 }
 
-kj::Promise<VatPath::Reader> VagrantDriver::start(MachineId id, bool requireRestartProcess) {
+kj::Promise<VatPath::Reader> VagrantDriver::start(
+    MachineId id, blackrock::VatId::Reader masterVatId, bool requireRestartProcess) {
   return subprocessSet.waitForSuccess({"vagrant", "up", kj::str(id)})
-      .then([this,id,requireRestartProcess]() {
+      .then([this,id,requireRestartProcess,masterVatId]() {
     kj::String name = kj::str(id);
 
     int fds[2];
     KJ_SYSCALL(pipe2(fds, O_CLOEXEC));
-    kj::AutoCloseFd writeEnd(fds[1]);
-    auto input = ioProvider.wrapInputFd(fds[0],
+    kj::AutoCloseFd stdinReadEnd(fds[0]);
+    auto stdinWriteEnd = ioProvider.wrapOutputFd(fds[1],
+        kj::LowLevelAsyncIoProvider::Flags::TAKE_OWNERSHIP |
+        kj::LowLevelAsyncIoProvider::Flags::ALREADY_CLOEXEC);
+    KJ_SYSCALL(pipe2(fds, O_CLOEXEC));
+    kj::AutoCloseFd stdoutWriteEnd(fds[1]);
+    auto stdoutReadEnd = ioProvider.wrapInputFd(fds[0],
         kj::LowLevelAsyncIoProvider::Flags::TAKE_OWNERSHIP |
         kj::LowLevelAsyncIoProvider::Flags::ALREADY_CLOEXEC);
 
@@ -323,12 +330,20 @@ kj::Promise<VatPath::Reader> VagrantDriver::start(MachineId id, bool requireRest
         "slave", "--log", addr, "if4:eth1"}));
     if (requireRestartProcess) args.add("-r");
     sandstorm::Subprocess::Options options(args.asPtr());
-    options.stdout = writeEnd;
+    options.stdin = stdinReadEnd;
+    options.stdout = stdoutWriteEnd;
     auto exitPromise = subprocessSet.waitForSuccess(kj::mv(options));
 
-    auto outputPromise = capnp::readMessage(*input);
-    return outputPromise.then([this,id,KJ_MVCAP(exitPromise),KJ_MVCAP(input)](
-                               kj::Own<capnp::MessageReader> reader) mutable {
+    auto message = kj::heap<capnp::MallocMessageBuilder>(masterVatId.totalSize().wordCount + 4);
+    message->setRoot(masterVatId);
+
+    auto& stdoutReadEndRef = *stdoutReadEnd;
+    return capnp::writeMessage(*stdinWriteEnd, *message)
+        .then([&stdoutReadEndRef]() {
+      return capnp::readMessage(stdoutReadEndRef);
+    }).attach(kj::mv(stdinWriteEnd), kj::mv(message))
+      .then([this,id,KJ_MVCAP(exitPromise),KJ_MVCAP(stdoutReadEnd)](
+        kj::Own<capnp::MessageReader> reader) mutable {
       auto path = reader->getRoot<VatPath>();
       vatPaths[id] = kj::mv(reader);
       return exitPromise.then([path]() { return path; });

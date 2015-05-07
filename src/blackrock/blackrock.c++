@@ -27,6 +27,7 @@
 #include <sys/mount.h>
 #include "backend-set.h"
 #include "frontend.h"
+#include "local-persistent-registry.h"
 
 namespace blackrock {
 
@@ -171,6 +172,34 @@ private:
   kj::Maybe<Mongo::Client> mongo;
 };
 
+class BootstrapFactoryImpl: public capnp::BootstrapFactory<VatPath> {
+public:
+  BootstrapFactoryImpl(VatId::Reader masterVatId,
+                       LocalPersistentRegistry& persistentRegistry,
+                       Machine::Client machine)
+      : masterVatId(masterVatId), persistentRegistry(persistentRegistry),
+        machine(machine) {}
+
+  capnp::Capability::Client createFor(VatPath::Reader clientId) override {
+    auto key = clientId.getId();
+    if (masterVatId.getPublicKey0() == key.getPublicKey0() &&
+        masterVatId.getPublicKey1() == key.getPublicKey1() &&
+        masterVatId.getPublicKey2() == key.getPublicKey2() &&
+        masterVatId.getPublicKey3() == key.getPublicKey3()) {
+      // Master calling. Return the machine.
+      return machine;
+    } else {
+      // Some other slave node calling. Return our restorer.
+      return persistentRegistry.createRestorerFor(clientId);
+    }
+  }
+
+private:
+  VatId::Reader masterVatId;
+  LocalPersistentRegistry& persistentRegistry;
+  Machine::Client machine;
+};
+
 static constexpr const char LOG_ADDRESS_FILE[] = "/var/run/blackrock-logsink-address";
 
 class Main {
@@ -205,7 +234,8 @@ public:
 
   kj::MainFunc getSlaveMain() {
     return kj::MainBuilder(context, "Sandstorm Blackrock version " SANDSTORM_VERSION,
-                           "Starts Blackrock slave.")
+                           "Starts Blackrock slave. The master vat's VatId must be written to "
+                           "the slaves stdin. It will then write its own VatPath to stdout.")
         .addOptionWithArg({'l', "log"}, KJ_BIND_METHOD(*this, setLogSink), "<addr>/<name>",
             "Redirect console logs to the log sink server at <addr>, self-identifying as <name>.")
         .addOption({'r', "restart"}, KJ_BIND_METHOD(*this, killExisting),
@@ -342,6 +372,9 @@ private:
   }
 
   bool runSlave() {
+    // Read the master ID from stdin.
+    capnp::StreamFdMessageReader masterIdReader(STDIN_FILENO);
+
     auto pidfile = sandstorm::raiiOpen("/var/run/blackrock-slave",
         O_RDWR | O_CREAT | O_CLOEXEC, 0600);
     int l;
@@ -421,10 +454,13 @@ private:
 
       KJ_LOG(INFO, "starting slave...");
 
-      // Set up RPC.
-      // TODO(security): Only let the master bootstrap the MachineImpl.
-      auto rpcSystem = capnp::makeRpcServer(network,
+      LocalPersistentRegistry persistentRegistry(network.getSelf());
+      BootstrapFactoryImpl bootstrapFactory(
+          masterIdReader.getRoot<VatId>(), persistentRegistry,
           kj::heap<MachineImpl>(ioContext, SimpleAddress(network.getSelf().getAddress())));
+
+      // Set up RPC.
+      auto rpcSystem = capnp::makeRpcServer(network, bootstrapFactory);
 
       // Loop forever handling messages.
       kj::NEVER_DONE.wait(ioContext.waitScope);

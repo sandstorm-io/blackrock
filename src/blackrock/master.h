@@ -64,8 +64,8 @@ public:
   virtual kj::Promise<kj::Array<MachineId>> listMachines() KJ_WARN_UNUSED_RESULT = 0;
   // List all machines currently running in the cluster.
 
-  virtual kj::Promise<VatPath::Reader> start(
-      MachineId id, bool requireRestartProcess) KJ_WARN_UNUSED_RESULT = 0;
+  virtual kj::Promise<VatPath::Reader> start(MachineId id,
+      VatId::Reader masterVatId, bool requireRestartProcess) KJ_WARN_UNUSED_RESULT = 0;
   // Start the given machine if it is not already started. If `requireRestartProcess` is true,
   // then if the machine is already running, all blackrock processes on it should be immediately
   // terminated and restarted using the latest version. Note that `requireRestartProcess` is often
@@ -85,7 +85,8 @@ public:
 
   SimpleAddress getMasterBindAddress() override;
   kj::Promise<kj::Array<MachineId>> listMachines() override;
-  kj::Promise<VatPath::Reader> start(MachineId id, bool requireRestartProcess) override;
+  kj::Promise<VatPath::Reader> start(MachineId id, VatId::Reader masterVatId,
+                                     bool requireRestartProcess) override;
   kj::Promise<void> stop(MachineId id) override;
 
 private:

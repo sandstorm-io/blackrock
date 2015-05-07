@@ -142,6 +142,16 @@ struct SturdyRef {
 interface Persistent extends(GenericPersistent(SturdyRef, SturdyRef.Owner)) {}
 
 interface Restorer(Ref) {
+  # Interface for restoring a SturdyRef.
+  #
+  # Every vat exports a bootstrap interface of type Restorer that handles refs of type `Transient`.
+  # (The interface is of type Restorer(LocalRefType), where LocalRefType is the type of
+  # Transient.localRef for this vat. Every vat may have a different local ref type.)
+  #
+  # For non-transient ref types, the Master is responsible for collecting Restorers from the
+  # machines currently assigned to handle that type and redistributing those to the machines that
+  # need them.
+
   restore @0 (sturdyRef :Ref) -> (cap :Capability);
   drop @1 (sturdyRef :Ref);
 }

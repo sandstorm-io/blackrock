@@ -127,20 +127,6 @@ private:
     byte* key;  // Allocated with sodium_malloc.
   };
 
-  class PinnedMemory {
-    // Some memory that will be pinned into RAM (prevented from swapping). Good for storing keys.
-  public:
-    explicit PinnedMemory(size_t size);
-    ~PinnedMemory();
-
-    template <typename T>
-    inline T* as() { return reinterpret_cast<T*>(location); }
-
-  private:
-    void* location;
-    size_t size;
-  };
-
   class ConnectionImpl;
   struct ConnectionMap;
 

@@ -645,6 +645,10 @@ public:
     return true;
   }
 
+  VatPath::Reader getPeerVatId() override {
+    return peerVatPath.getRoot<VatPath>();
+  }
+
   kj::Own<capnp::OutgoingRpcMessage> newOutgoingMessage(uint firstSegmentWordSize) override {
     return kj::refcounted<OutgoingMessageImpl>(*this, firstSegmentWordSize);
   }
@@ -694,6 +698,7 @@ private:
   VatNetwork& network;
   kj::TaskSet tasks;
   PublicKey peerKey;
+  capnp::MallocMessageBuilder peerVatPath;
 
   uint64_t minConnectionNumber;
   // The minimum connection number that we can create or accept.
@@ -766,8 +771,11 @@ private:
 
   ConnectionImpl(VatNetwork& network, PublicKey peerKey, uint64_t minConnectionNumber,
                  kj::PromiseFulfillerPair<void> paf)
-      : network(network), tasks(*this), peerKey(peerKey), minConnectionNumber(minConnectionNumber),
-        handshakeDone(paf.promise.fork()), handshakeDoneFulfiller(kj::mv(paf.fulfiller)) {}
+      : network(network), tasks(*this), peerKey(peerKey), peerVatPath(32),
+        minConnectionNumber(minConnectionNumber),
+        handshakeDone(paf.promise.fork()), handshakeDoneFulfiller(kj::mv(paf.fulfiller)) {
+    peerKey.copyTo(peerVatPath.initRoot<VatPath>().initId());
+  }
 
   void setStream(kj::Own<kj::AsyncIoStream>&& newStream, uint64_t newOutgoingConnectionNumber,
                  kj::Maybe<SimpleAddress> newConnectAddress) {
@@ -801,6 +809,8 @@ private:
     KJ_ASSERT(state != FAILED);
 
     state = AUTHENTICATED;
+
+    SimpleAddress::getPeer(*stream).copyTo(peerVatPath.getRoot<VatPath>().getAddress());
 
     resendOptimisticMessages();
 
