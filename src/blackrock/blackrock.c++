@@ -31,13 +31,60 @@
 
 namespace blackrock {
 
+class RemoteRestorer: public Restorer<SturdyRef>::Server {
+  // Implements a Restorer intended to be called by *this* process to restore *remote* SturdyRefs.
+  // This mainly delegates to the various other restorer capabilities.
+
+public:
+  explicit RemoteRestorer(capnp::RpcSystem<VatPath>& rpcSystem): rpcSystem(rpcSystem) {}
+
+protected:
+  kj::Promise<void> restore(RestoreContext context) override {
+    auto ref = context.getParams().getSturdyRef();
+
+    if (ref.isTransient()) {
+      auto transient = ref.getTransient();
+      auto req = rpcSystem.bootstrap(transient.getVat()).castAs<Restorer<>>().restoreRequest();
+      req.setSturdyRef(transient.getLocalRef());
+      context.releaseParams();
+      // We can't quite tail-call here because it's a different generic type. Darn.
+      context.getResults(capnp::MessageSize {4, 1}).setCap(req.send().getCap());
+      return kj::READY_NOW;
+    } else {
+      return KJ_EXCEPTION(UNIMPLEMENTED, "Restoring non-transient ref not implemented.");
+    }
+  }
+
+  kj::Promise<void> drop(DropContext context) override {
+    auto ref = context.getParams().getSturdyRef();
+
+    if (ref.isTransient()) {
+      auto transient = ref.getTransient();
+      auto req = rpcSystem.bootstrap(transient.getVat()).castAs<Restorer<>>().dropRequest();
+      req.setSturdyRef(transient.getLocalRef());
+      context.releaseParams();
+      // We can't quite tail-call here because it's a different generic type. Darn.
+      return req.send().then([](auto) {});
+    } else {
+      return KJ_EXCEPTION(UNIMPLEMENTED, "Restoring non-transient ref not implemented.");
+    }
+  }
+
+private:
+  capnp::RpcSystem<VatPath>& rpcSystem;
+};
+
 class MachineImpl: public Machine::Server {
   // TODO(security): For most become*() methods, we should probably actually spawn a child process.
   //   (But before we do that we probably need to implement Cap'n Proto Level 3.)
 
 public:
-  MachineImpl(kj::AsyncIoContext& ioContext, SimpleAddress selfAddress)
-      : ioContext(ioContext), subprocessSet(ioContext.unixEventPort),
+  MachineImpl(kj::AsyncIoContext& ioContext, capnp::RpcSystem<VatPath>& rpcSystem,
+              LocalPersistentRegistry& persistentRegistry, SimpleAddress selfAddress)
+      : ioContext(ioContext),
+        persistentRegistry(persistentRegistry),
+        rpcSystem(rpcSystem),
+        subprocessSet(ioContext.unixEventPort),
         selfAddress(selfAddress) {}
 
   kj::Promise<void> becomeStorage(BecomeStorageContext context) override {
@@ -50,7 +97,7 @@ public:
       mkdir("/var", 0755);
       mkdir("/var/blackrock", 0755);
       mkdir("/var/blackrock/storage", 0755);
-      auto ptr = kj::heap<StorageInfo>(ioContext);
+      auto ptr = kj::heap<StorageInfo>(ioContext, rpcSystem);
       info = ptr;
       storageInfo = kj::mv(ptr);
     }
@@ -75,7 +122,7 @@ public:
       client = *w;
     } else {
       KJ_LOG(INFO, "become worker...");
-      client = kj::heap<WorkerImpl>(ioContext, subprocessSet);
+      client = kj::heap<WorkerImpl>(ioContext, subprocessSet, persistentRegistry);
       worker = client;
     }
 
@@ -132,6 +179,8 @@ public:
 
 private:
   kj::AsyncIoContext& ioContext;
+  LocalPersistentRegistry& persistentRegistry;
+  capnp::RpcSystem<VatPath>& rpcSystem;
   sandstorm::SubprocessSet subprocessSet;
   SimpleAddress selfAddress;
 
@@ -145,11 +194,12 @@ private:
     kj::Own<BackendSetImpl<Restorer<SturdyRef::Hosted>>> hostedRestorerSet;
     kj::Own<BackendSetImpl<Restorer<SturdyRef::External>>> gatewayRestorerSet;
 
-    StorageInfo(kj::AsyncIoContext& ioContext)
+    StorageInfo(kj::AsyncIoContext& ioContext, capnp::RpcSystem<VatPath>& rpcSystem)
         : selfAsSibling(nullptr),  // TODO(someday)
           rootSet(kj::heap<FilesystemStorage>(
               sandstorm::raiiOpen("/var/blackrock/storage", O_RDONLY | O_DIRECTORY | O_CLOEXEC),
-              ioContext.unixEventPort, ioContext.lowLevelProvider->getTimer(), nullptr)),
+              ioContext.unixEventPort, ioContext.lowLevelProvider->getTimer(),
+              kj::heap<RemoteRestorer>(rpcSystem))),
           restorer(nullptr),       // TODO(someday)
           factory(rootSet.getFactoryRequest().send().getFactory()),
           siblingSet(kj::refcounted<BackendSetImpl<StorageSibling>>()),
@@ -454,13 +504,21 @@ private:
 
       KJ_LOG(INFO, "starting slave...");
 
+      // Awkwardly, MachineImpl requires a reference to the RPC system, but we need to pass the
+      // bootstrap capability into the RPC system. We solve this with a promise.
+      auto paf = kj::newPromiseAndFulfiller<Machine::Client>();
+
       LocalPersistentRegistry persistentRegistry(network.getSelf());
       BootstrapFactoryImpl bootstrapFactory(
-          masterIdReader.getRoot<VatId>(), persistentRegistry,
-          kj::heap<MachineImpl>(ioContext, SimpleAddress(network.getSelf().getAddress())));
+          masterIdReader.getRoot<VatId>(), persistentRegistry, kj::mv(paf.promise));
 
       // Set up RPC.
       auto rpcSystem = capnp::makeRpcServer(network, bootstrapFactory);
+
+      // OK, now we can construct the MachineImpl.
+      paf.fulfiller->fulfill(kj::heap<MachineImpl>(
+          ioContext, rpcSystem, persistentRegistry,
+          SimpleAddress(network.getSelf().getAddress())));
 
       // Loop forever handling messages.
       kj::NEVER_DONE.wait(ioContext.waitScope);

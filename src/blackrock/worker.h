@@ -12,6 +12,7 @@
 #include <sandstorm/util.h>
 #include <sandstorm/supervisor.h>
 #include <kj/async-io.h>
+#include "local-persistent-registry.h"
 
 namespace kj {
   class Thread;
@@ -99,10 +100,9 @@ private:
 
 class WorkerImpl: public Worker::Server, private kj::TaskSet::ErrorHandler {
 public:
-  WorkerImpl(kj::AsyncIoContext& ioContext, sandstorm::SubprocessSet& subprocessSet);
+  WorkerImpl(kj::AsyncIoContext& ioContext, sandstorm::SubprocessSet& subprocessSet,
+             LocalPersistentRegistry& persistentRegistry);
   ~WorkerImpl() noexcept(false);
-
-  kj::Maybe<sandstorm::Supervisor::Client> getRunningGrain(kj::ArrayPtr<const byte> id);
 
 protected:
   kj::Promise<void> newGrain(NewGrainContext context) override;
@@ -117,6 +117,7 @@ private:
 
   kj::LowLevelAsyncIoProvider& ioProvider;
   sandstorm::SubprocessSet& subprocessSet;
+  LocalPersistentRegistry& persistentRegistry;
   PackageMountSet packageMountSet;
   std::unordered_map<kj::ArrayPtr<const byte>, kj::Own<RunningGrain>,
                      ByteStringHash, ByteStringHash> runningGrains;

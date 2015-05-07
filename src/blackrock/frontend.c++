@@ -124,9 +124,50 @@ protected:
   }
 
   kj::Promise<void> getGrain(GetGrainContext context) override {
-    // TODO(now): implement -- probably requires restorable sturdyrefs. For now, thorwing
-    //   disconnected will cause the caller to try startGrain().
-    return KJ_EXCEPTION(DISCONNECTED, "getGrain() not implemented");
+    auto params = context.getParams();
+    StorageRootSet::Client storage = frontend.storageRoots->chooseOne();
+
+    auto owner = ({
+      auto userObjectName = kj::str("user-", params.getOwnerId());
+
+      auto req = storage.getOrCreateAssignableRequest<AccountStorage>();
+      req.setName(userObjectName);
+      req.initDefaultValue();
+      req.send().getObject();
+    });
+
+    return owner.getRequest().send()
+        .then([params,context](auto&& getResults) mutable -> kj::Promise<void> {
+      auto grainId = params.getGrainId();
+      auto userInfo = getResults.getValue();
+
+      for (auto grain: userInfo.getGrains()) {
+        if (grain.getId() == grainId) {
+          return grain.getState().getRequest().send()
+              .then([context](auto&& response) mutable -> kj::Promise<void> {
+            auto grainState = response.getValue();
+            if (grainState.isActive()) {
+              auto supervisor = grainState.getActive();
+              context.releaseParams();
+
+              return supervisor.keepAliveRequest().send()
+                  .then([KJ_MVCAP(supervisor),context](auto) mutable -> kj::Promise<void> {
+                context.getResults(capnp::MessageSize {4, 1}).setSupervisor(kj::mv(supervisor));
+                return kj::READY_NOW;
+              }, [](kj::Exception&& e) -> kj::Promise<void> {
+                // Threw exception. Assume dead.
+                return KJ_EXCEPTION(DISCONNECTED, "grain supervisor is dead");
+              });
+            } else {
+              // Not currently active.
+              return KJ_EXCEPTION(DISCONNECTED, "grain is inactive");
+            }
+          });
+        }
+      }
+
+      return KJ_EXCEPTION(FAILED, "no such grain");
+    });
   }
 
   kj::Promise<void> deleteGrain(DeleteGrainContext context) override {

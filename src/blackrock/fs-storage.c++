@@ -1589,7 +1589,10 @@ kj::Promise<void> FilesystemStorage::set(SetContext context) {
   auto object = params.getObject();
   auto name = kj::heapString(params.getName());
   context.releaseParams();
+  return setImpl(kj::mv(name), kj::mv(object));
+}
 
+kj::Promise<void> FilesystemStorage::setImpl(kj::String name, OwnedStorage<>::Client object) {
   KJ_ASSERT(name.size() > 0, "invalid storage root name", name);
   KJ_ASSERT(('a' <= name[0] && name[0] <= 'z') ||
             ('A' <= name[0] && name[0] <= 'Z') ||
@@ -1636,10 +1639,15 @@ kj::Promise<void> FilesystemStorage::getOrCreateAssignable(GetOrCreateAssignable
     context.getResults().setObject(factory->openObject(key).client.castAs<OwnedAssignable<>>());
     return kj::READY_NOW;
   } else {
+    auto name = kj::heapString(params.getName());
+    context.releaseParams();
     auto result = factory->newObject<AssignableImpl>();
-    auto promise = result.object.setStoredObject(params.getDefaultValue());
-    context.getResults().setObject(kj::mv(result.client));
-    return kj::mv(promise);
+    auto object = result.client.castAs<OwnedStorage<>>();
+    context.getResults(capnp::MessageSize {4, 1}).setObject(kj::mv(result.client));
+    return result.object.setStoredObject(params.getDefaultValue())
+        .then([this,KJ_MVCAP(name),KJ_MVCAP(object)]() mutable {
+      return setImpl(kj::mv(name), kj::mv(object));
+    });
   }
 }
 

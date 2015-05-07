@@ -165,9 +165,9 @@ public:
         })),
         process(worker.subprocessSet.waitForSuccess(kj::mv(subprocessOptions)).fork()),
         capnpSocket(kj::mv(capnpSocket)),
-        vatNetwork(*this->capnpSocket, capnp::rpc::twoparty::Side::SERVER),
-        rpcSystem(capnp::makeRpcServer(vatNetwork, kj::heap<SandstormCoreImpl>())),
-        disconnectTask(vatNetwork.onDisconnect().attach(kj::defer([this]() {
+        rpcClient(*this->capnpSocket, kj::heap<SandstormCoreImpl>()),
+        persistentRegistration(worker.persistentRegistry, rpcClient.bootstrap()),
+        disconnectTask(rpcClient.onDisconnect().attach(kj::defer([this]() {
           disconnected = true;
         })).eagerlyEvaluate(nullptr)) {
     randombytes(id, sizeof(id));
@@ -184,20 +184,7 @@ public:
   }
 
   sandstorm::Supervisor::Client getSupervisor() {
-    if (disconnected) {
-      // Presumably we'll get notification of exit shortly, but we shouldn't return a broken
-      // supervisor just yet because we might still be cleaning up (unmounting) and it would be
-      // bad if the coordinator decided to revoke our access to the volume. So, we return a promise
-      // that will be broken as soon as we receive notification of exit.
-      return process.addBranch().then([]() -> kj::Promise<sandstorm::Supervisor::Client> {
-        return KJ_EXCEPTION(FAILED, "grain has shut down");
-      });
-    } else {
-      capnp::MallocMessageBuilder builder(8);
-      auto root = builder.getRoot<capnp::rpc::twoparty::VatId>();
-      root.setSide(capnp::rpc::twoparty::Side::CLIENT);
-      return rpcSystem.bootstrap(root).castAs<sandstorm::Supervisor>();
-    }
+    return persistentRegistration.getWrapped().castAs<sandstorm::Supervisor>();
   }
 
 private:
@@ -212,9 +199,10 @@ private:
   kj::ForkedPromise<void> process;
 
   kj::Own<kj::AsyncIoStream> capnpSocket;
-  capnp::TwoPartyVatNetwork vatNetwork;
-  capnp::RpcSystem<capnp::rpc::twoparty::VatId> rpcSystem;
+  capnp::TwoPartyClient rpcClient;
   // Cap'n Proto RPC connection to the grain's supervisor.
+
+  LocalPersistentRegistry::Registration persistentRegistration;
 
   bool disconnected = false;
   kj::Promise<void> disconnectTask;
@@ -222,21 +210,13 @@ private:
   // from `vatNetwork`, indicating that the supervisor is shutting down.
 };
 
-WorkerImpl::WorkerImpl(kj::AsyncIoContext& ioContext, sandstorm::SubprocessSet& subprocessSet)
+WorkerImpl::WorkerImpl(kj::AsyncIoContext& ioContext, sandstorm::SubprocessSet& subprocessSet,
+                       LocalPersistentRegistry& persistentRegistry)
     : ioProvider(*ioContext.lowLevelProvider), subprocessSet(subprocessSet),
-      packageMountSet(ioContext), tasks(*this) {
+      persistentRegistry(persistentRegistry), packageMountSet(ioContext), tasks(*this) {
   NbdDevice::loadKernelModule();
 }
 WorkerImpl::~WorkerImpl() noexcept(false) {}
-
-kj::Maybe<sandstorm::Supervisor::Client> WorkerImpl::getRunningGrain(kj::ArrayPtr<const byte> id) {
-  auto iter = runningGrains.find(id);
-  if (iter == runningGrains.end()) {
-    return nullptr;
-  } else {
-    return iter->second->getSupervisor();
-  }
-}
 
 struct WorkerImpl::CommandInfo {
   kj::Array<kj::String> commandArgs;

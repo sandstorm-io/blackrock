@@ -108,6 +108,8 @@ private:
   kj::Own<Journal> journal;
   kj::Own<ObjectFactory> factory;
 
+  kj::Promise<void> setImpl(kj::String name, OwnedStorage<>::Client object);
+
   kj::Maybe<kj::AutoCloseFd> openObject(ObjectId id);
   kj::Maybe<kj::AutoCloseFd> openStaging(uint64_t number);
   kj::AutoCloseFd createObject(ObjectId id);
