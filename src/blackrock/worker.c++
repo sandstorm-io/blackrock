@@ -163,24 +163,17 @@ public:
         volumeRunTask(nbdVolume.run().eagerlyEvaluate([](kj::Exception&& exception) {
           KJ_LOG(FATAL, "NbdVolumeAdapter failed (grain)", exception);
         })),
-        process(worker.subprocessSet.waitForSuccess(kj::mv(subprocessOptions)).fork()),
+        process(worker.subprocessSet.waitForSuccess(kj::mv(subprocessOptions))),
         capnpSocket(kj::mv(capnpSocket)),
         rpcClient(*this->capnpSocket, kj::heap<SandstormCoreImpl>()),
-        persistentRegistration(worker.persistentRegistry, rpcClient.bootstrap()),
-        disconnectTask(rpcClient.onDisconnect().attach(kj::defer([this]() {
-          disconnected = true;
-        })).eagerlyEvaluate(nullptr)) {
-    randombytes(id, sizeof(id));
-  }
+        persistentRegistration(worker.persistentRegistry, rpcClient.bootstrap()) {}
 
   ~RunningGrain() {
     worker.packageMountSet.returnPackage(kj::mv(packageMount));
   }
 
-  kj::ArrayPtr<const byte> getId() { return id; }
-
   kj::Promise<void> onExit() {
-    return process.addBranch().catch_([this](auto) { return kj::mv(volumeRunTask); });
+    return process.catch_([this](auto) { return kj::mv(volumeRunTask); });
   }
 
   sandstorm::Supervisor::Client getSupervisor() {
@@ -190,24 +183,18 @@ public:
 private:
   WorkerImpl& worker;
   Worker::Client workerCap;
-  byte id[16];
   Assignable<GrainState>::Client grainState;
 
   kj::Own<PackageMountSet::PackageMount> packageMount;
   NbdVolumeAdapter nbdVolume;
   kj::Promise<void> volumeRunTask;
-  kj::ForkedPromise<void> process;
+  kj::Promise<void> process;  // until onExit() is called.
 
   kj::Own<kj::AsyncIoStream> capnpSocket;
   capnp::TwoPartyClient rpcClient;
   // Cap'n Proto RPC connection to the grain's supervisor.
 
   LocalPersistentRegistry::Registration persistentRegistration;
-
-  bool disconnected = false;
-  kj::Promise<void> disconnectTask;
-  // `disconnected` is set true (by `disconnectTask`) when we receive notification of disconnect
-  // from `vatNetwork`, indicating that the supervisor is shutting down.
 };
 
 WorkerImpl::WorkerImpl(kj::AsyncIoContext& ioContext, sandstorm::SubprocessSet& subprocessSet,
@@ -346,13 +333,12 @@ sandstorm::Supervisor::Client WorkerImpl::bootGrain(PackageInfo::Reader packageI
         kj::mv(capnpWorkerEnd), kj::mv(packageMount), kj::mv(options));
 
     auto supervisor = grain->getSupervisor();
-    auto id = grain->getId();
 
-    // Put it in the map so that it doesn't go away and can be restore()ed.
-    auto& grainRef = *grain;
-    runningGrains[id] = kj::mv(grain);
-    auto remover = kj::defer([this,id]() { runningGrains.erase(id); });
-    tasks.add(grainRef.onExit().attach(kj::mv(remover)));
+    // Put it in the map so that it doesn't go away.
+    auto grainPtr = grain.get();
+    runningGrains[grainPtr] = kj::mv(grain);
+    auto remover = kj::defer([this,grainPtr]() { runningGrains.erase(grainPtr); });
+    tasks.add(grainPtr->onExit().attach(kj::mv(remover)));
 
     return supervisor;
   });

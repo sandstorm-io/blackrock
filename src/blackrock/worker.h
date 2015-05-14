@@ -119,8 +119,7 @@ private:
   sandstorm::SubprocessSet& subprocessSet;
   LocalPersistentRegistry& persistentRegistry;
   PackageMountSet packageMountSet;
-  std::unordered_map<kj::ArrayPtr<const byte>, kj::Own<RunningGrain>,
-                     ByteStringHash, ByteStringHash> runningGrains;
+  std::unordered_map<RunningGrain*, kj::Own<RunningGrain>> runningGrains;
   kj::TaskSet tasks;
 
   sandstorm::Supervisor::Client bootGrain(PackageInfo::Reader packageInfo,
