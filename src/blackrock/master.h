@@ -76,7 +76,7 @@ public:
 };
 
 void runMaster(kj::AsyncIoContext& ioContext, ComputeDriver& driver, MasterConfig::Reader config,
-               bool shouldRestart);
+               bool shouldRestart, kj::ArrayPtr<kj::StringPtr> machinesToRestart);
 
 class VagrantDriver: public ComputeDriver {
 public:

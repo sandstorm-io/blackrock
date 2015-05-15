@@ -28,6 +28,7 @@
 #include "backend-set.h"
 #include "frontend.h"
 #include "local-persistent-registry.h"
+#include <stdio.h>
 
 namespace blackrock {
 
@@ -224,13 +225,16 @@ private:
 
 class BootstrapFactoryImpl: public capnp::BootstrapFactory<VatPath> {
 public:
-  BootstrapFactoryImpl(VatId::Reader masterVatId,
-                       LocalPersistentRegistry& persistentRegistry,
+  BootstrapFactoryImpl(LocalPersistentRegistry& persistentRegistry,
                        Machine::Client machine)
-      : masterVatId(masterVatId), persistentRegistry(persistentRegistry),
-        machine(machine) {}
+      : persistentRegistry(persistentRegistry), machine(machine) {}
 
   capnp::Capability::Client createFor(VatPath::Reader clientId) override {
+    // Read the master ID from disk.
+    capnp::StreamFdMessageReader masterIdReader(
+        sandstorm::raiiOpen("/var/run/master-vatid", O_RDONLY | O_CLOEXEC));
+    auto masterVatId = masterIdReader.getRoot<VatId>();
+
     auto key = clientId.getId();
     if (masterVatId.getPublicKey0() == key.getPublicKey0() &&
         masterVatId.getPublicKey1() == key.getPublicKey1() &&
@@ -245,7 +249,6 @@ public:
   }
 
 private:
-  VatId::Reader masterVatId;
   LocalPersistentRegistry& persistentRegistry;
   Machine::Client machine;
 };
@@ -277,7 +280,9 @@ public:
     return kj::MainBuilder(context, "Sandstorm Blackrock version " SANDSTORM_VERSION,
                            "Starts Blackrock master.")
         .addOption({'r', "restart"}, KJ_BIND_METHOD(*this, setRestart),
-            "Restart all slave machines immediately.")
+            "Restarts Blackrock processes on all slave machines if already running.")
+        .addOptionWithArg({'R', "restart-one"}, KJ_BIND_METHOD(*this, addRestart), "<machine>",
+            "Restarts Blackrock process on the given machine if already running.")
         .expectArg("<master-config>", KJ_BIND_METHOD(*this, runMaster))
         .build();
   }
@@ -324,6 +329,7 @@ private:
   SimpleAddress bindAddress = nullptr;
   bool killedExisting = false;
   bool shouldRestart = false;
+  kj::Vector<kj::StringPtr> machinesToRestart;
 
   kj::Maybe<kj::StringPtr> loggingName;
 
@@ -410,6 +416,11 @@ private:
     return true;
   }
 
+  kj::MainBuilder::Validity addRestart(kj::StringPtr arg) {
+    machinesToRestart.add(arg);
+    return true;
+  }
+
   bool runMaster(kj::StringPtr configFile) {
     capnp::StreamFdMessageReader configReader(
         sandstorm::raiiOpen(configFile, O_RDONLY | O_CLOEXEC));
@@ -417,22 +428,28 @@ private:
     auto ioContext = kj::setupAsyncIo();
     sandstorm::SubprocessSet subprocessSet(ioContext.unixEventPort);
     VagrantDriver driver(subprocessSet, *ioContext.lowLevelProvider);
-    blackrock::runMaster(ioContext, driver, configReader.getRoot<MasterConfig>(), shouldRestart);
+    blackrock::runMaster(ioContext, driver, configReader.getRoot<MasterConfig>(),
+                         shouldRestart, machinesToRestart);
     KJ_UNREACHABLE;
   }
 
   bool runSlave() {
-    // Read the master ID from stdin.
-    capnp::StreamFdMessageReader masterIdReader(STDIN_FILENO);
-
     auto pidfile = sandstorm::raiiOpen("/var/run/blackrock-slave",
         O_RDWR | O_CREAT | O_CLOEXEC, 0600);
     int l;
     KJ_NONBLOCKING_SYSCALL(l = flock(pidfile, LOCK_EX | (killedExisting ? 0 : LOCK_NB)));
 
+    // Copy master's VatId from stdin to disk.
+    dumpToFile(STDIN_FILENO, sandstorm::raiiOpen("/var/run/master-vatid.next",
+        O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600));
+    KJ_SYSCALL(rename("/var/run/master-vatid.next", "/var/run/master-vatid"));
+
     if (l < 0) {
       // pidfile locked; slave already running
+
+      // Copy pidfile (slave VatPath) from disk to stdout.
       dumpFile(pidfile, STDOUT_FILENO);
+
       context.exit();
     }
 
@@ -509,8 +526,7 @@ private:
       auto paf = kj::newPromiseAndFulfiller<Machine::Client>();
 
       LocalPersistentRegistry persistentRegistry(network.getSelf());
-      BootstrapFactoryImpl bootstrapFactory(
-          masterIdReader.getRoot<VatId>(), persistentRegistry, kj::mv(paf.promise));
+      BootstrapFactoryImpl bootstrapFactory(persistentRegistry, kj::mv(paf.promise));
 
       // Set up RPC.
       auto rpcSystem = capnp::makeRpcServer(network, bootstrapFactory);
@@ -555,6 +571,13 @@ private:
     off_t offset = 0;
     do {
       KJ_SYSCALL(n = sendfile(outFd, inFd, &offset, 4096));
+    } while (n > 0);
+  }
+
+  void dumpToFile(int inFd, int outFd) {
+    ssize_t n;
+    do {
+      KJ_SYSCALL(n = splice(inFd, nullptr, outFd, nullptr, 4096, 0));
     } while (n > 0);
   }
 };

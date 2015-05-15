@@ -46,8 +46,13 @@ kj::Promise<kj::String> readAllAsync(kj::AsyncInputStream& input,
 }  // namespace
 
 void runMaster(kj::AsyncIoContext& ioContext, ComputeDriver& driver, MasterConfig::Reader config,
-               bool shouldRestart) {
+               bool shouldRestart, kj::ArrayPtr<kj::StringPtr> machinesToRestart) {
   KJ_REQUIRE(config.getWorkerCount() > 0, "need at least one worker");
+
+  std::set<ComputeDriver::MachineId> restartSet;
+  for (auto& m: machinesToRestart) {
+    restartSet.insert(m);
+  }
 
   VatNetwork network(ioContext.provider->getNetwork(), ioContext.provider->getTimer(),
                      driver.getMasterBindAddress());
@@ -78,10 +83,10 @@ void runMaster(kj::AsyncIoContext& ioContext, ComputeDriver& driver, MasterConfi
     }
   }
 
-  auto start = [&startupTasks,&driver,&network,shouldRestart](
-      ComputeDriver::MachineId id, VatPath::Reader& pathSlot) {
+  auto start = [&](ComputeDriver::MachineId id, VatPath::Reader& pathSlot) {
     KJ_LOG(INFO, "STARTING", id);
-    startupTasks.add(driver.start(id, network.getSelf().getId(), shouldRestart)
+    startupTasks.add(driver.start(id, network.getSelf().getId(),
+                                  shouldRestart || restartSet.count(id) > 0)
         .then([id,&pathSlot](auto path) {
       KJ_LOG(INFO, "READY", id);
       pathSlot = path;
@@ -339,10 +344,10 @@ kj::Promise<VatPath::Reader> VagrantDriver::start(
 
     auto& stdoutReadEndRef = *stdoutReadEnd;
     return capnp::writeMessage(*stdinWriteEnd, *message)
+        .attach(kj::mv(stdinWriteEnd), kj::mv(message))
         .then([&stdoutReadEndRef]() {
       return capnp::readMessage(stdoutReadEndRef);
-    }).attach(kj::mv(stdinWriteEnd), kj::mv(message))
-      .then([this,id,KJ_MVCAP(exitPromise),KJ_MVCAP(stdoutReadEnd)](
+    }).then([this,id,KJ_MVCAP(exitPromise),KJ_MVCAP(stdoutReadEnd)](
         kj::Own<capnp::MessageReader> reader) mutable {
       auto path = reader->getRoot<VatPath>();
       vatPaths[id] = kj::mv(reader);
