@@ -314,8 +314,18 @@ void NbdDevice::resetAll() {
   }
 }
 
+void NbdDevice::disconnectAll() {
+  for (uint i = 0; i < MAX_NBDS; i++) {
+    auto devname = kj::str("/dev/nbd", i);
+    KJ_LOG(WARNING, "disconnecting nbd device", devname);
+    // We ignore ioctl() errors here because if the device isn't connected then the ioctl fails.
+    ioctl(sandstorm::raiiOpen(devname, O_RDWR | O_CLOEXEC), NBD_DISCONNECT);
+  }
+}
+
 void NbdDevice::loadKernelModule() {
-  sandstorm::Subprocess({"modprobe", "nbd", kj::str("nbds_max=", MAX_NBDS)}).waitForSuccess();
+  sandstorm::Subprocess({"modprobe", "nbd", kj::str("nbds_max=", MAX_NBDS), "max_part=0"})
+      .waitForSuccess();
 }
 
 // =======================================================================================

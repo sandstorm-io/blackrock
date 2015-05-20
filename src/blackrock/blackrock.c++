@@ -29,6 +29,7 @@
 #include "frontend.h"
 #include "local-persistent-registry.h"
 #include <stdio.h>
+#include "nbd-bridge.h"
 
 namespace blackrock {
 
@@ -381,6 +382,52 @@ private:
   kj::MainBuilder::Validity killExisting() {
     pid_t me = getpid();
 
+    // Carefully find and terminate all meta-supervisors, which should in turn terminate
+    // supervisors.
+    auto supers = findProcesses("blackrock-msup");
+    if (supers.size() > 0) {
+      for (auto pid: supers) {
+        kill(pid, SIGTERM);
+      }
+      KJ_LOG(INFO, "waiting for supervisors to terminate", supers.size());
+
+      for (;;) {
+        uint n = 4;
+        while (n > 0) n = sleep(n);
+
+        supers = findProcesses("blackrock-msup");
+        if (supers.size() == 0) break;
+
+        KJ_LOG(INFO, "still waiting...", supers.size());
+      }
+    }
+
+    // All supervisors should be dead, but let's check.
+    supers = findProcesses("blackrock-sup");
+    if (supers.size() > 0) {
+      KJ_LOG(ERROR, "orphan supervisors detected!");
+      for (auto pid: supers) {
+        kill(pid, SIGKILL);
+      }
+    }
+
+    // If this is a worker machine, there may be leftover package mounts. Unmount them.
+    if (access("/var/blackrock/packages", F_OK) >= 0) {
+      for (auto& pkg: sandstorm::listDirectory("/var/blackrock/packages")) {
+        KJ_LOG(INFO, "unmounting package", pkg);
+        auto path = kj::str("/var/blackrock/packages/", pkg);
+        umount2(path.cStr(), MNT_FORCE);
+        rmdir(path.cStr());
+      }
+    }
+
+    // Reset all NBD devices if present.
+    if (access("/dev/nbd0", F_OK) == 0) {
+      NbdDevice::disconnectAll();
+      KJ_LOG(INFO, "NBD disconnect successful");
+    }
+
+    // Kill the blackrock processes.
     for (auto& file: sandstorm::listDirectory("/proc")) {
       KJ_IF_MAYBE(pid, sandstorm::parseUInt(file, 10)) {
         if (*pid != me) {
@@ -397,18 +444,32 @@ private:
       }
     }
 
-    // If this is a worker machine, there may be leftover package mounts. Kill them.
-    if (access("/var/blackrock/packages", F_OK) >= 0) {
-      for (auto& pkg: sandstorm::listDirectory("/var/blackrock/packages")) {
-        auto path = kj::str("/var/blackrock/packages/", pkg);
-        umount2(path.cStr(), MNT_FORCE);
-        rmdir(path.cStr());
-      }
-    }
-
     killedExisting = true;
 
     return true;
+  }
+
+  kj::Array<pid_t> findProcesses(kj::StringPtr comm) {
+    pid_t me = getpid();
+    kj::Vector<pid_t> result;
+
+    for (auto& file: sandstorm::listDirectory("/proc")) {
+      KJ_IF_MAYBE(pid, sandstorm::parseUInt(file, 10)) {
+        if (*pid != me) {
+          auto maybeFd = sandstorm::raiiOpenIfExists(kj::str("/proc/", file, "/comm"), O_RDONLY);
+          // No big deal if it doesn't exist. Probably the pid disappeared while we were listing
+          // the directory.
+
+          KJ_IF_MAYBE(fd, maybeFd) {
+            if (sandstorm::trim(sandstorm::readAll(*fd)) == comm) {
+              result.add(*pid);
+            }
+          }
+        }
+      }
+    }
+
+    return result.releaseAsArray();
   }
 
   kj::MainBuilder::Validity setRestart() {

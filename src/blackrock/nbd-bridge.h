@@ -75,6 +75,12 @@ public:
   //
   // THIS WILL BREAK EVERYTHING CURRENTLY USING ANY NBD DEVICE.
 
+  static void disconnectAll();
+  // Iterate through all the nbd devices and disconnect them, in an attempt to forcefully tear
+  // down a worker.
+  //
+  // THIS WILL BREAK EVERYTHING CURRENTLY USING ANY NBD DEVICE.
+
   static void loadKernelModule();
   // Make sure the NBD kernel module is loaded.
 

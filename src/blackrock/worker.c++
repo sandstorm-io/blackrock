@@ -14,6 +14,7 @@
 #include <grp.h>
 #include <sandstorm/spk.h>
 #include <sys/syscall.h>
+#include <sys/prctl.h>
 #include <signal.h>
 
 namespace blackrock {
@@ -179,6 +180,14 @@ public:
 
   ~RunningGrain() {
     auto newState = grainState->getRoot<GrainState>();
+
+    // TODO(cleanup): Calling setInactive() doesn't actually remove the `active` pointer;
+    //   it just sets the union discriminant to "inactive". Unfortunately the storage
+    //   server just sees the pointers. Is this a bug in Cap'n Proto? It seems
+    //   challenging to fix, except perhaps by introducing the native-mutable-objects
+    //   idea.
+    newState.disownActive();
+
     newState.setInactive();
     auto sizeHint = newState.totalSize();
     sizeHint.wordCount += 4;
@@ -295,11 +304,23 @@ kj::Promise<void> WorkerImpl::restoreGrain(RestoreGrainContext context) {
       grainState.totalSize().wordCount + 8);
   grainStateHolder->setRoot(grainState);
 
-  context.getResults().setGrain(bootGrain(
-      params.getPackage(), kj::mv(grainStateHolder), params.getExclusiveGrainStateSetter(),
-      params.getExclusiveVolume(), params.getCommand(), false));
+  auto mutableGrainState = grainStateHolder->getRoot<GrainState>();
+  auto setter = params.getExclusiveGrainStateSetter();
 
-  return kj::READY_NOW;
+  auto supervisor = bootGrain(
+      params.getPackage(), kj::mv(grainStateHolder), setter,
+      params.getExclusiveVolume(), params.getCommand(), false);
+
+  mutableGrainState.setActive(supervisor);
+
+  auto sizeHint = mutableGrainState.totalSize();
+  sizeHint.wordCount += 4;
+  auto req = setter.setRequest(sizeHint);
+  req.setValue(mutableGrainState);
+
+  context.getResults(capnp::MessageSize { 4, 1 }).setGrain(kj::mv(supervisor));
+
+  return req.send().then([](auto) {});
 }
 
 sandstorm::Supervisor::Client WorkerImpl::bootGrain(
@@ -579,6 +600,9 @@ kj::MainFunc SupervisorMain::getMain() {
 }
 
 kj::MainBuilder::Validity SupervisorMain::run() {
+  // Rename the task to allow for orderly teardown when killing all blackrock processes.
+  KJ_SYSCALL(prctl(PR_SET_NAME, "blackrock-sup", 0, 0, 0));
+
   // Set CLOEXEC on the Cap'n Proto socket so that the app doesn't see it.
   KJ_SYSCALL(fcntl(3, F_SETFD, FD_CLOEXEC));
 
@@ -617,6 +641,9 @@ kj::MainFunc MetaSupervisorMain::getMain() {
 }
 
 kj::MainBuilder::Validity MetaSupervisorMain::run() {
+  // Rename the task to allow for orderly teardown when killing all blackrock processes.
+  KJ_SYSCALL(prctl(PR_SET_NAME, "blackrock-msup", 0, 0, 0));
+
   // Set CLOEXEC on the the nbd fd so that the supervisor doesn't see it.
   KJ_SYSCALL(fcntl(4, F_SETFD, FD_CLOEXEC));
 

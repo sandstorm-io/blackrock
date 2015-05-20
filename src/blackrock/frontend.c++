@@ -309,11 +309,17 @@ private:
     sandstorm::spk::Manifest::Command::Reader command;
   };
 
-  kj::Promise<sandstorm::Supervisor::Client> continueGrain(ContinueParams params) {
+  kj::Promise<sandstorm::Supervisor::Client> continueGrain(
+      ContinueParams params, uint retryCount = 0) {
     // Try to continue a grain that already exists. Called as part of startGrain() but may recurse.
 
+    if (retryCount >= 4) {
+      KJ_LOG(ERROR, "couldn't start grain due to repeated optimistic concurrency failure");
+      return KJ_EXCEPTION(DISCONNECTED, "couldn't start grain");
+    }
+
     auto promise = params.grainAssignable.getRequest().send();
-    return promise.then([this,KJ_MVCAP(params)](auto grainGetResult) mutable
+    return promise.then([this,KJ_MVCAP(params),retryCount](auto grainGetResult) mutable
                         -> kj::Promise<sandstorm::Supervisor::Client> {
       auto grainState = grainGetResult.getValue();
 
@@ -352,7 +358,8 @@ private:
               -> kj::Promise<sandstorm::Supervisor::Client> {
             // Keep-alive succeeded. Use existing supervisor.
             return kj::mv(supervisor);
-          }, [this,KJ_MVCAP(params),KJ_MVCAP(grainGetResult),grainState](kj::Exception&& e) mutable
+          }, [this,KJ_MVCAP(params),KJ_MVCAP(grainGetResult),grainState,retryCount]
+             (kj::Exception&& e) mutable
               -> kj::Promise<sandstorm::Supervisor::Client> {
             // Keep-alive failed. Possibilities:
             // 1. The grain is in the midst of shutting down. The supervisor has already exited
@@ -385,6 +392,14 @@ private:
               sizeHint.wordCount += 16;
               auto req = setter.setRequest(sizeHint);
               req.setValue(grainState);
+
+              // TODO(cleanup): Calling setInactive() doesn't actually remove the `active` pointer;
+              //   it just sets the union discriminant to "inactive". Unfortunately the storage
+              //   server just sees the pointers. Is this a bug in Cap'n Proto? It seems
+              //   challenging to fix, except perhaps by introducing the native-mutable-objects
+              //   idea.
+              req.getValue().disownActive();
+
               req.getValue().setInactive();
               return req.send().then([](auto) -> kj::Promise<void> {
                 // successfully updated
@@ -399,9 +414,9 @@ private:
                   return kj::mv(e);
                 }
               });
-            }).then([this,KJ_MVCAP(params)]() mutable {
+            }).then([this,KJ_MVCAP(params),retryCount]() mutable {
               // OK, try again now.
-              return continueGrain(kj::mv(params));
+              return continueGrain(kj::mv(params), retryCount + 1);
             });
           });
         }
