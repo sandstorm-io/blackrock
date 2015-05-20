@@ -802,15 +802,14 @@ kj::Promise<void> MongoImpl::mongoCommand(kj::String command, kj::StringPtr dbNa
     // If /var/blackrock/bundle/mongo/passwd exists, we interpret it as containing the password
     // for a Mongo user "sandstorm", and assume we are expected to log in as this user. (If it
     // doesn't exist yet, then probably we haven't actually initialized the database yet.)
-    kj::String password;
+    kj::String passwordArg;
     if (access("/var/mongo/passwd", F_OK) == 0) {
-      password = sandstorm::trim(sandstorm::readAll(
-          sandstorm::raiiOpen("/var/mongo/passwd", O_RDONLY)));
+      passwordArg = kj::str("--password=", sandstorm::trim(sandstorm::readAll(
+          sandstorm::raiiOpen("/var/mongo/passwd", O_RDONLY))));
 
       args.add("-u");
       args.add("sandstorm");
-      args.add("-p");
-      args.add(password.cStr());
+      args.add(passwordArg.cStr());
       args.add("--authenticationDatabase");
       args.add("admin");
     }
