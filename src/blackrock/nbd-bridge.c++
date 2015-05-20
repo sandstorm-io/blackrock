@@ -46,7 +46,9 @@ constexpr uint MAX_RPC_BLOCKS = 512;
 }  // namespace
 
 NbdVolumeAdapter::NbdVolumeAdapter(kj::Own<kj::AsyncIoStream> socket, Volume::Client volume)
-    : socket(kj::mv(socket)), volume(kj::mv(volume)), tasks(*this) {}
+    : socket(kj::mv(socket)), volume(kj::mv(volume)),
+      disconnectedPaf(kj::newPromiseAndFulfiller<void>()),
+      tasks(*this) {}
 
 struct NbdVolumeAdapter::RequestHandle {
   char handle[8];
@@ -238,9 +240,17 @@ void NbdVolumeAdapter::reply(RequestHandle reqHandle, int error) {
 
 void NbdVolumeAdapter::replyError(
     RequestHandle reqHandle, kj::Exception&& exception, const char* op) {
-  // TODO(soon): Reconnect when disconnected. Probably should be accomplished by wrapping the
-  //   Volume rather than handling errors here.
-  KJ_LOG(ERROR, "Volume I/O threw exception!", op, exception);
+  if (exception.getType() == kj::Exception::Type::DISCONNECTED) {
+    // The volume was disconnected, probably because we killed this grain.
+    if (!disconnected) {
+      disconnected = true;
+      KJ_LOG(WARNING, "RARE: NBD volume disconnected. Maybe due to STONITH? "
+                      "But client is still alive.", exception);
+      disconnectedPaf.fulfiller->fulfill();
+    }
+  } else {
+    KJ_LOG(ERROR, "Volume I/O threw exception!", op, exception);
+  }
   reply(reqHandle, EIO);
 }
 

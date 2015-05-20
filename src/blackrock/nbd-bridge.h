@@ -20,11 +20,19 @@ public:
   // NBD requests are read from `socket` and implemented via `volume`.
 
   kj::Promise<void> run();
-  // Actually runs the loop.
+  // Actually runs the loop. The promise resolves successfully when the device has been shut down.
+  // It is extremely important to wait for this before destroying the NbdVolumeAdapter; failure
+  // to do so can leave the kernel in an unhappy state.
+
+  kj::Promise<void> onDisconnected() { return kj::mv(disconnectedPaf.promise); }
+  // Resolves if the underlying volume becomes disconnected, in which case it's time to force-kill
+  // everything using it. Can only be called once.
 
 private:
   kj::Own<kj::AsyncIoStream> socket;
   Volume::Client volume;
+  kj::PromiseFulfillerPair<void> disconnectedPaf;
+  bool disconnected = false;
   kj::TaskSet tasks;
 
   kj::Promise<void> replyQueue = kj::READY_NOW;

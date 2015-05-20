@@ -14,6 +14,7 @@
 #include <grp.h>
 #include <sandstorm/spk.h>
 #include <sys/syscall.h>
+#include <signal.h>
 
 namespace blackrock {
 
@@ -165,10 +166,16 @@ public:
         volumeRunTask(nbdVolume.run().eagerlyEvaluate([](kj::Exception&& exception) {
           KJ_LOG(FATAL, "NbdVolumeAdapter failed (grain)", exception);
         })),
-        process(worker.subprocessSet.waitForSuccess(kj::mv(subprocessOptions))),
+        volumeDisconnectTask(nbdVolume.onDisconnected().then([this]() {
+          // If the volume disconnected while the grain is still running, kill the grain.
+          subprocess.signal(SIGTERM);
+        }).eagerlyEvaluate(nullptr)),
+        subprocess(kj::mv(subprocessOptions)),
+        processWaitTask(worker.subprocessSet.waitForSuccess(subprocess)),
         capnpSocket(kj::mv(capnpSocket)),
         rpcClient(*this->capnpSocket, kj::heap<SandstormCoreImpl>()),
-        persistentRegistration(worker.persistentRegistry, rpcClient.bootstrap()) {}
+        persistentRegistration(worker.persistentRegistry, rpcClient.bootstrap()) {
+  }
 
   ~RunningGrain() {
     auto newState = grainState->getRoot<GrainState>();
@@ -184,7 +191,7 @@ public:
   }
 
   kj::Promise<void> onExit() {
-    return process.catch_([this](auto) { return kj::mv(volumeRunTask); });
+    return processWaitTask.catch_([this](auto) { return kj::mv(volumeRunTask); });
   }
 
   sandstorm::Supervisor::Client getSupervisor() {
@@ -203,7 +210,10 @@ private:
   kj::Own<PackageMountSet::PackageMount> packageMount;
   NbdVolumeAdapter nbdVolume;
   kj::Promise<void> volumeRunTask;
-  kj::Promise<void> process;  // until onExit() is called.
+  kj::Promise<void> volumeDisconnectTask;
+
+  sandstorm::Subprocess subprocess;
+  kj::Promise<void> processWaitTask;  // until onExit() is called.
 
   kj::Own<kj::AsyncIoStream> capnpSocket;
   capnp::TwoPartyClient rpcClient;
@@ -626,9 +636,21 @@ kj::MainBuilder::Validity MetaSupervisorMain::run() {
   Mount mount(device.getPath(), "/mnt", 0, nullptr);
   KJ_SYSCALL(chown("/mnt", 1000, 1000));
 
+  // Mask SIGCHLD and SIGTERM so that we can handle them later.
+  sigset_t sigmask;
+  sigemptyset(&sigmask);
+  sigaddset(&sigmask, SIGCHLD);
+  sigaddset(&sigmask, SIGTERM);
+  KJ_SYSCALL(sigprocmask(SIG_SETMASK, &sigmask, nullptr));
+
   // In order to ensure we get a chance to clean up after the supervisor exits, we run it in a
   // fork.
   sandstorm::Subprocess child([this]() -> int {
+    // Change signal mask back to empty.
+    sigset_t emptymask;
+    sigemptyset(&emptymask);
+    KJ_SYSCALL(sigprocmask(SIG_SETMASK, &emptymask, nullptr));
+
     // Unfortunately, we are still root here. Drop privs.
     KJ_SYSCALL(setgroups(0, nullptr));
     KJ_SYSCALL(setresgid(1000, 1000, 1000));
@@ -655,6 +677,20 @@ kj::MainBuilder::Validity MetaSupervisorMain::run() {
 
   // FD 3 is used by the child. Close our handle.
   KJ_SYSCALL(close(3));
+
+  // Wait for signal indicating child exit.
+  for (;;) {
+    siginfo_t siginfo;
+    KJ_SYSCALL(sigwaitinfo(&sigmask, &siginfo));
+    if (siginfo.si_signo == SIGTERM) {
+      // We might get a SIGTERM if the worker wants this grain to shut down. Forward it to the
+      // supervisor process.
+      child.signal(SIGTERM);
+    } else {
+      KJ_ASSERT(siginfo.si_signo == SIGCHLD);
+      break;
+    }
+  }
 
   child.waitForSuccess();
   return true;
