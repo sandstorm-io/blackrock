@@ -84,9 +84,13 @@ void runMaster(kj::AsyncIoContext& ioContext, ComputeDriver& driver, MasterConfi
   }
 
   auto start = [&](ComputeDriver::MachineId id, VatPath::Reader& pathSlot) {
-    KJ_LOG(INFO, "STARTING", id);
-    startupTasks.add(driver.start(id, network.getSelf().getId(),
-                                  shouldRestart || restartSet.count(id) > 0)
+    bool shouldRestartNode = shouldRestart || restartSet.count(id) > 0;
+    if (shouldRestartNode) {
+      KJ_LOG(INFO, "RESTARTING", id);
+    } else {
+      KJ_LOG(INFO, "STARTING", id);
+    }
+    startupTasks.add(driver.start(id, network.getSelf().getId(), shouldRestartNode)
         .then([id,&pathSlot](auto path) {
       KJ_LOG(INFO, "READY", id);
       pathSlot = path;
