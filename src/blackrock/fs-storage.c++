@@ -703,7 +703,7 @@ private:
         storage.setAttributesIfExists(entry.objectId, entry.xattr);
         break;
       case Entry::Type::MOVE_TO_DEATH_ROW:
-        storage.moveToDeathRow(entry.objectId);
+        storage.moveToDeathRowIfExists(entry.objectId);
         break;
     }
   }
@@ -1422,8 +1422,44 @@ public:
     // TODO(someday)
 //  }
 
+  kj::Promise<void> getExclusive(GetExclusiveContext context) override {
+    context.getResults(capnp::MessageSize {4, 1}).setExclusive(
+        capnp::Capability::Client(kj::heap<ExclusiveWrapper>(*this)).castAs<Volume>());
+    return kj::READY_NOW;
+  }
+
 private:
+  class ExclusiveWrapper: public capnp::Capability::Server {
+  public:
+    ExclusiveWrapper(VolumeImpl& inner)
+        : inner(inner.thisCap()), ptr(inner.currentExclusiveWrapper) {
+      ptr = this;
+    }
+
+    kj::Promise<void> dispatchCall(uint64_t interfaceId, uint16_t methodId,
+        capnp::CallContext<capnp::AnyPointer, capnp::AnyPointer> context) override {
+      if (ptr != this) {
+        return KJ_EXCEPTION(DISCONNECTED, "Volume revoked due to concurrent write");
+      }
+
+      if (interfaceId != capnp::typeId<Volume>()) {
+        return KJ_EXCEPTION(UNIMPLEMENTED, "actual interface: blackrock::Volume",
+                            interfaceId, methodId);
+      }
+
+      auto params = context.getParams();
+      auto req = inner.typelessRequest(interfaceId, methodId, params.targetSize());
+      req.set(params);
+      return context.tailCall(kj::mv(req));
+    }
+
+  private:
+    capnp::Capability::Client inner;
+    ExclusiveWrapper*& ptr;
+  };
+
   uint32_t counter = 0;
+  ExclusiveWrapper* currentExclusiveWrapper = nullptr;
 
   void maybeUpdateSize(uint32_t count) {
     // Periodically update our accounting of the volume size. Called every time some blocks are
@@ -1738,9 +1774,21 @@ retry:
   }
 }
 
-void FilesystemStorage::moveToDeathRow(ObjectId id) {
+void FilesystemStorage::moveToDeathRowIfExists(ObjectId id) {
   auto name = id.filename('o');
-  KJ_SYSCALL(renameat(mainDirFd, name.begin(), deathRowFd, name.begin()), name.begin());
+retry:
+  if (renameat(mainDirFd, name.begin(), deathRowFd, name.begin()), name.begin() < 0) {
+    int error = errno;
+    switch (error) {
+      case EINTR:
+        goto retry;
+      case ENOENT:
+        // Acceptable;
+        break;
+      default:
+        KJ_FAIL_SYSCALL("renameat(move to death row)", error, fixedStr(name));
+    }
+  }
 }
 
 void FilesystemStorage::sync() {

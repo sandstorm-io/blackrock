@@ -20,7 +20,8 @@ namespace blackrock {
 
 class FrontendImpl::BackendImpl: public sandstorm::Backend::Server {
 public:
-  explicit BackendImpl(FrontendImpl& frontend): frontend(frontend) {}
+  BackendImpl(FrontendImpl& frontend, kj::Timer& timer)
+      : frontend(frontend), timer(timer) {}
 
 protected:
   kj::Promise<void> startGrain(StartGrainContext context) override {
@@ -94,31 +95,26 @@ protected:
         return req.send().then([](auto) {});
       });
     } else {
-      return ownerGet.then([params](auto&& getResults) {
+      return ownerGet.then(
+          [this,context,params,packageId,KJ_MVCAP(storageFactory),KJ_MVCAP(packageVolume)]
+          (auto&& getResults) mutable {
         auto grainId = params.getGrainId();
         for (auto grainInfo: getResults.getValue().getGrains()) {
           if (grainInfo.getId() == grainId) {
             // This is the grain we're looking for.
-            return grainInfo.getState();
+
+            // TODO(perf): It would be cool to return a promise for the supervisor without waiting
+            //   for continueGrain() to finish, but we need `packageId` and `command` to stay
+            //   live in the continueGrain() loop. Make a copy?
+            return continueGrain({grainInfo.getState(), kj::mv(storageFactory),
+                    kj::mv(packageVolume), packageId, params.getCommand()})
+                .then([context](sandstorm::Supervisor::Client supervisor) mutable {
+              context.getResults(capnp::MessageSize { 4, 1 })
+                  .setSupervisor(kj::mv(supervisor));
+            });
           }
         }
         KJ_FAIL_REQUIRE("no such grain", grainId);
-      }).then([this,context,packageId,params,KJ_MVCAP(storageFactory),KJ_MVCAP(packageVolume)]
-              (auto grainState) mutable {
-        auto volume = grainState.getRequest().send().getValue().getVolume();
-        Worker::Client worker = frontend.workers->chooseOne();
-
-        auto req = worker.restoreGrainRequest();
-        auto packageInfo = req.initPackage();
-        packageInfo.setId(packageId.asBytes());  // TODO(perf): parse ID hex to bytes?
-        packageInfo.setVolume(kj::mv(packageVolume));
-        req.setCommand(params.getCommand());
-        req.setStorage(kj::mv(storageFactory));
-        req.setGrainState(kj::mv(grainState));
-        // TODO(now): Disconnect the volume!
-        req.setVolume(kj::mv(volume));
-
-        context.getResults().setSupervisor(req.send().getGrain());
       });
     }
   }
@@ -250,6 +246,7 @@ protected:
 
 private:
   FrontendImpl& frontend;
+  kj::Timer& timer;
 
   class PackageUploadStreamImpl: public sandstorm::Backend::PackageUploadStream::Server {
   public:
@@ -303,6 +300,115 @@ private:
     StorageRootSet::Client storage;
     Worker::PackageUploadStream::Client inner;
   };
+
+  struct ContinueParams {
+    sandstorm::Assignable<GrainState>::Client grainAssignable;
+    StorageFactory::Client storageFactory;
+    Volume::Client packageVolume;
+    capnp::Text::Reader packageId;
+    sandstorm::spk::Manifest::Command::Reader command;
+  };
+
+  kj::Promise<sandstorm::Supervisor::Client> continueGrain(ContinueParams params) {
+    // Try to continue a grain that already exists. Called as part of startGrain() but may recurse.
+
+    auto promise = params.grainAssignable.getRequest().send();
+    return promise.then([this,KJ_MVCAP(params)](auto grainGetResult) mutable
+                        -> kj::Promise<sandstorm::Supervisor::Client> {
+      auto grainState = grainGetResult.getValue();
+
+      switch (grainState.which()) {
+        case GrainState::INACTIVE: {
+          // Grain is not running. Start it.
+
+          // TODO(integrity): We ought to somehow "claim" the grain here before we call
+          //   volume.getExclusive() so that concurrent claims don't interfere. This probably
+          //   requires a "starting" state in addition to active/inactive. Unfortunately we can't
+          //   just store a promise for the supervisor into the "active" field now because the
+          //   set() will not complete until the promise resolves, and we don't know that there
+          //   is no conflict until the set() completes.
+
+          auto volume = grainState.getVolume();
+          Worker::Client worker = frontend.workers->chooseOne();
+
+          auto req = worker.restoreGrainRequest();
+          auto packageInfo = req.initPackage();
+          packageInfo.setId(params.packageId.asBytes());  // TODO(perf): parse ID hex to bytes?
+          packageInfo.setVolume(kj::mv(params.packageVolume));
+          req.setCommand(params.command);
+          req.setStorage(kj::mv(params.storageFactory));
+          req.setGrainState(grainState);
+          req.setExclusiveGrainStateSetter(grainGetResult.getSetter());
+          req.setExclusiveVolume(volume.getExclusiveRequest().send().getExclusive());
+
+          return req.send().getGrain();
+        }
+
+        case GrainState::ACTIVE: {
+          // Attempt to keep-alive the old supervisor.
+          auto supervisor = grainState.getActive();
+          auto promise = timer.timeoutAfter(4 * kj::SECONDS, supervisor.keepAliveRequest().send());
+          return promise.then([KJ_MVCAP(supervisor)](auto&&) mutable
+              -> kj::Promise<sandstorm::Supervisor::Client> {
+            // Keep-alive succeeded. Use existing supervisor.
+            return kj::mv(supervisor);
+          }, [this,KJ_MVCAP(params),KJ_MVCAP(grainGetResult),grainState](kj::Exception&& e) mutable
+              -> kj::Promise<sandstorm::Supervisor::Client> {
+            // Keep-alive failed. Possibilities:
+            // 1. The grain is in the midst of shutting down. The supervisor has already exited
+            //    but we're still waiting for clean unmount. We should pause for a short time to
+            //    give it a chance to clean up.
+            // 2. The worker died while the grain was running and as a result never managed to
+            //    update the grain state to reflect that it is no longer live. We can simply take
+            //    ownership.
+            // 3. The worker is unhealthy but still executing. This state is dangerous, since we
+            //    cannot support concurrent access to the same underlying volume. Luckily each
+            //    grain takes out an "exclusive" Volume capability which will disconnect itself
+            //    the moment we attempt to take over. We may lose some data that was not yet
+            //    written, but given that the worker appears unhealthy that data was probably
+            //    in bad shape already.
+            //
+            // To cover all cases, waiting a few seconds should be sufficient.
+            //
+            // TODO(integrity): We could handle case (1) more precisely by observing the GrainState,
+            //   waiting for the previous worker to set it to `inactive`. Then we could pause much
+            //   longer, so that we don't interrupt an unmount that has a lot of data to flush.
+            //   This should be exceedingly rare, though. In fact, this whole branch is rare.
+            KJ_LOG(INFO, "RARE: GrainState is active, but supervisor appears dead.", e);
+
+            return timer.afterDelay(4 * kj::SECONDS)
+                .then([KJ_MVCAP(grainGetResult),grainState]() {
+              // OK, a few seconds have gone by. Let's attempt to switch this grain's state to
+              // "inactive".
+              auto setter = grainGetResult.getSetter();
+              auto sizeHint = grainState.totalSize();
+              sizeHint.wordCount += 16;
+              auto req = setter.setRequest(sizeHint);
+              req.setValue(grainState);
+              req.getValue().setInactive();
+              return req.send().then([](auto) -> kj::Promise<void> {
+                // successfully updated
+                return kj::READY_NOW;
+              }, [](kj::Exception&& e) -> kj::Promise<void> {
+                if (e.getType() == kj::Exception::Type::DISCONNECTED) {
+                  // Concurrent modification blocked our update. That's fine, we were about to
+                  // start over anyway.
+                  return kj::READY_NOW;
+                } else {
+                  // Other exception.
+                  return kj::mv(e);
+                }
+              });
+            }).then([this,KJ_MVCAP(params)]() mutable {
+              // OK, try again now.
+              return continueGrain(kj::mv(params));
+            });
+          });
+        }
+      }
+      KJ_UNREACHABLE;
+    });
+  }
 };
 
 // =======================================================================================
@@ -327,7 +433,7 @@ FrontendImpl::FrontendImpl(kj::Network& network, kj::Timer& timer,
                            FrontendConfig::Reader config)
     : timer(timer),
       subprocessSet(subprocessSet),
-      capnpServer(kj::heap<BackendImpl>(*this)),
+      capnpServer(kj::heap<BackendImpl>(*this, timer)),
       storageRoots(kj::refcounted<BackendSetImpl<StorageRootSet>>()),
       storageFactories(kj::refcounted<BackendSetImpl<StorageFactory>>()),
       workers(kj::refcounted<BackendSetImpl<Worker>>()),

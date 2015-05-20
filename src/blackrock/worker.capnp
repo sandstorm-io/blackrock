@@ -33,15 +33,20 @@ interface Worker {
   restoreGrain @1 (package :PackageInfo,
                    command :Package.Manifest.Command,
                    storage :Storage.StorageFactory,
-                   grainState :Storage.Assignable(GrainState),
-                   volume :Storage.Volume)
+                   grainState :GrainState,
+                   exclusiveGrainStateSetter :Util.Assignable(GrainState).Setter,
+                   exclusiveVolume :Storage.Volume)
                -> (grain :Supervisor);
   # Continue an existing grain.
   #
   # It is the caller's (coordinator's) responsibility to have updated `grainState` to take
-  # ownership of the grain before calling this. `volume` is the volume from `grainState`, but the
-  # caller must have already called `disconnectAllClients()` at the same time as it claimed the
-  # grain.
+  # ownership of the grain before calling this. `exclusiveGrainStateSetter` and `exclusiveVolume`
+  # are obtained from calling getSetter() on the grain's state Assignable and getExclusive() on the
+  # state's Volume. These capabilities will thus become disconnected if a new worker takes
+  # ownership of the grain, thereby preventing the old owner from corrupting data. Normally a new
+  # worker will only be assigned if the old worker appears unhealthy or dead; the forceable
+  # disconnection is performed to prevent zombies from corrupting data after the new worker has
+  # taken over.
 
   unpackPackage @2 (storage :Storage.StorageFactory) -> (stream :PackageUploadStream);
   # Initiate upload of a package, unpacking it into a fresh Volume.

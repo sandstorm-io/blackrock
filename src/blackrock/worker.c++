@@ -149,7 +149,8 @@ class WorkerImpl::RunningGrain {
 public:
   RunningGrain(WorkerImpl& worker,
                Worker::Client workerCap,
-               Assignable<GrainState>::Client&& grainState,
+               kj::Own<capnp::MessageBuilder>&& grainState,
+               sandstorm::Assignable<GrainState>::Setter::Client&& grainStateSetter,
                kj::Own<kj::AsyncIoStream> nbdSocket,
                Volume::Client volume,
                kj::Own<kj::AsyncIoStream> capnpSocket,
@@ -158,6 +159,7 @@ public:
       : worker(worker),
         workerCap(kj::mv(workerCap)),
         grainState(kj::mv(grainState)),
+        grainStateSetter(kj::mv(grainStateSetter)),
         packageMount(kj::mv(packageMount)),
         nbdVolume(kj::mv(nbdSocket), kj::mv(volume)),
         volumeRunTask(nbdVolume.run().eagerlyEvaluate([](kj::Exception&& exception) {
@@ -169,6 +171,15 @@ public:
         persistentRegistration(worker.persistentRegistry, rpcClient.bootstrap()) {}
 
   ~RunningGrain() {
+    auto newState = grainState->getRoot<GrainState>();
+    newState.setInactive();
+    auto sizeHint = newState.totalSize();
+    sizeHint.wordCount += 4;
+    auto req = grainStateSetter.setRequest(sizeHint);
+    req.setValue(newState);
+    req.send().detach([](kj::Exception&& exception) {
+      KJ_LOG(ERROR, "dirty grain shutdown", exception);
+    });
     worker.packageMountSet.returnPackage(kj::mv(packageMount));
   }
 
@@ -183,7 +194,11 @@ public:
 private:
   WorkerImpl& worker;
   Worker::Client workerCap;
-  Assignable<GrainState>::Client grainState;
+  kj::Own<capnp::MessageBuilder> grainState;
+  sandstorm::Assignable<GrainState>::Setter::Client grainStateSetter;
+  // TODO(cleanup): `grainState` holds a GrainState value in a MessageBuilder so that we can modify
+  //   it over time and call grainStateSetter.set(). We really need to extend Cap'n Proto with
+  //   mutable types.
 
   kj::Own<PackageMountSet::PackageMount> packageMount;
   NbdVolumeAdapter nbdVolume;
@@ -232,19 +247,25 @@ kj::Promise<void> WorkerImpl::newGrain(NewGrainContext context) {
   auto storageFactory = params.getStorage();
 
   auto grainVolume = storageFactory.newVolumeRequest().send().getVolume();
+  auto exclusiveVolume = grainVolume.getExclusiveRequest().send().getExclusive();
 
   auto supervisorPaf = kj::newPromiseAndFulfiller<sandstorm::Supervisor::Client>();
+
+  auto grainStateHolder = kj::heap<capnp::MallocMessageBuilder>(8);
 
   auto req = storageFactory.newAssignableRequest<GrainState>();
   {
     auto grainStateValue = req.initInitialValue();
     grainStateValue.setActive(kj::mv(supervisorPaf.promise));
-    grainStateValue.setVolume(grainVolume);
+    grainStateValue.setVolume(kj::mv(grainVolume));
+    grainStateHolder->setRoot(grainStateValue.asReader());
   }
   OwnedAssignable<GrainState>::Client grainState = req.send().getAssignable();
+  auto setter = grainState.getRequest().send().getSetter();
 
-  sandstorm::Supervisor::Client supervisor = bootGrain(params.getPackage(), grainState,
-      kj::mv(grainVolume), params.getCommand(), true);
+  sandstorm::Supervisor::Client supervisor = bootGrain(params.getPackage(),
+      kj::mv(grainStateHolder), kj::mv(setter),
+      kj::mv(exclusiveVolume), params.getCommand(), true);
 
   supervisorPaf.fulfiller->fulfill(kj::cp(supervisor));
 
@@ -259,22 +280,29 @@ kj::Promise<void> WorkerImpl::newGrain(NewGrainContext context) {
 kj::Promise<void> WorkerImpl::restoreGrain(RestoreGrainContext context) {
   auto params = context.getParams();
 
+  auto grainState = params.getGrainState();
+  auto grainStateHolder = kj::heap<capnp::MallocMessageBuilder>(
+      grainState.totalSize().wordCount + 8);
+  grainStateHolder->setRoot(grainState);
+
   context.getResults().setGrain(bootGrain(
-      params.getPackage(), params.getGrainState(),
-      params.getVolume(), params.getCommand(), false));
+      params.getPackage(), kj::mv(grainStateHolder), params.getExclusiveGrainStateSetter(),
+      params.getExclusiveVolume(), params.getCommand(), false));
 
   return kj::READY_NOW;
 }
 
-sandstorm::Supervisor::Client WorkerImpl::bootGrain(PackageInfo::Reader packageInfo,
-    Assignable<GrainState>::Client grainState, Volume::Client grainVolume,
+sandstorm::Supervisor::Client WorkerImpl::bootGrain(
+    PackageInfo::Reader packageInfo, kj::Own<capnp::MessageBuilder> grainState,
+    sandstorm::Assignable<GrainState>::Setter::Client grainStateSetter, Volume::Client grainVolume,
     sandstorm::spk::Manifest::Command::Reader commandReader, bool isNew) {
   // Copy command info from params, since params will no longer be valid when we return.
   CommandInfo command(commandReader);
 
   // Make sure the package is mounted, then start the grain.
   return packageMountSet.getPackage(packageInfo)
-      .then([this,isNew,grainState,KJ_MVCAP(command),KJ_MVCAP(grainVolume)]
+      .then([this,isNew,KJ_MVCAP(grainState),KJ_MVCAP(grainStateSetter),
+             KJ_MVCAP(command),KJ_MVCAP(grainVolume)]
             (auto&& packageMount) mutable {
     // Create the NBD socketpair. The Supervisor will actually mount the NBD device (in its own
     // mount namespace) but we'll implement it in the Worker.
@@ -329,8 +357,8 @@ sandstorm::Supervisor::Client WorkerImpl::bootGrain(PackageInfo::Reader packageI
 
     // Make the RunningGrain.
     auto grain = kj::heap<RunningGrain>(
-        *this, thisCap(), kj::mv(grainState), kj::mv(nbdUserEnd), kj::mv(grainVolume),
-        kj::mv(capnpWorkerEnd), kj::mv(packageMount), kj::mv(options));
+        *this, thisCap(), kj::mv(grainState), kj::mv(grainStateSetter), kj::mv(nbdUserEnd),
+        kj::mv(grainVolume), kj::mv(capnpWorkerEnd), kj::mv(packageMount), kj::mv(options));
 
     auto supervisor = grain->getSupervisor();
 

@@ -119,7 +119,7 @@ private:
   void deleteAllStaging();
   void finalizeStagingIfExists(uint64_t stagingId, ObjectId finalId, const Xattr& attributes);
   void setAttributesIfExists(ObjectId objectId, const Xattr& attributes);
-  void moveToDeathRow(ObjectId id);
+  void moveToDeathRowIfExists(ObjectId id);
   void sync();
 
   static bool isStoredObjectType(Type type);

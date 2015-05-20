@@ -77,6 +77,12 @@ interface Volume {
 
   asBlob @4 () -> (blob :Blob);
   # Get a Blob that reflects the content of this volume.
+
+  getExclusive @5 () -> (exclusive :Volume);
+  # Get a capability representing the same Volume except that it will be automatically disconnected
+  # the next time getExclusive() is called. This is basically a form of optimistic concurrency: it
+  # gives you exclusive access without taking a lock (as long as all other clients also use
+  # `getExclusive()`).
 }
 
 interface Immutable(T) {
@@ -230,17 +236,6 @@ interface OwnedStorage(T) {
 
   getSize @1 () -> (totalBytes :UInt64);
   # Get the total storage space consumed by this object, including owned sub-objects.
-
-  disconnectAllClients @2 () -> (self :OwnedStorage(T));
-  # Causes all outstanding capabilities to this object -- including this one -- to immediately
-  # begin throwing DISCONNECTED exceptions from all methods. The method returns a new capability
-  # to this object which is not disconnected. Additionally, it is possible for other clients to
-  # restore access by re-loading the parent object and getting a new capability through it.
-  #
-  # The purpose of this method is to effectively implement STONITH ("Shoot The Other Node In The
-  # Head"). For example, it's unsafe to restart a grain on a new worker node when it might still
-  # be running and connected to storage elsewhere. If the old node is not responding to requests
-  # to kill the grain, it may be necessary to disconnect it forcefully.
 
   # TODO(someday): Observe the total size of this object (including children). Use cases:
   # - Track size of grain to display to user. This only needs to run on-demand.

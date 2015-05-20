@@ -122,8 +122,9 @@ private:
   std::unordered_map<RunningGrain*, kj::Own<RunningGrain>> runningGrains;
   kj::TaskSet tasks;
 
-  sandstorm::Supervisor::Client bootGrain(PackageInfo::Reader packageInfo,
-      Assignable<GrainState>::Client grainState, Volume::Client grainVolume,
+  sandstorm::Supervisor::Client bootGrain(
+      PackageInfo::Reader packageInfo, kj::Own<capnp::MessageBuilder> grainState,
+      sandstorm::Assignable<GrainState>::Setter::Client grainStateSetter, Volume::Client grainVolume,
       sandstorm::spk::Manifest::Command::Reader command, bool isNew);
 
   void taskFailed(kj::Exception&& exception) override;
