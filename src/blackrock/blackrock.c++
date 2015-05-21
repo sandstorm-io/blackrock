@@ -392,8 +392,7 @@ private:
       KJ_LOG(INFO, "waiting for supervisors to terminate", supers.size());
 
       for (;;) {
-        uint n = 4;
-        while (n > 0) n = sleep(n);
+        sleep(1);
 
         supers = findProcesses("blackrock-msup");
         if (supers.size() == 0) break;
@@ -421,13 +420,14 @@ private:
       }
     }
 
-    // Reset all NBD devices if present.
+    // Disconnect all NBD devices if present.
     if (access("/dev/nbd0", F_OK) == 0) {
       NbdDevice::disconnectAll();
       KJ_LOG(INFO, "NBD disconnect successful");
     }
 
-    // Kill the blackrock processes.
+    // Kill the blackrock processes. (We didn't do this earlier because killing the server end
+    // of an NBD while the client is still running can lead to deadlock and other badness.)
     for (auto& file: sandstorm::listDirectory("/proc")) {
       KJ_IF_MAYBE(pid, sandstorm::parseUInt(file, 10)) {
         if (*pid != me) {

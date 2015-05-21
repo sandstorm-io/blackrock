@@ -159,6 +159,7 @@ public:
 
 private:
   kj::ProcessContext& context;
+  kj::StringPtr packageMount;
   kj::Vector<kj::StringPtr> args;
   bool isNew = false;
 };

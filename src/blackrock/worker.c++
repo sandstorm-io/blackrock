@@ -16,6 +16,8 @@
 #include <sys/syscall.h>
 #include <sys/prctl.h>
 #include <signal.h>
+#include <sys/wait.h>
+#include <errno.h>
 
 namespace blackrock {
 
@@ -32,8 +34,8 @@ auto PackageMountSet::getPackage(PackageInfo::Reader package)
   kj::Own<PackageMount> packageMount;
 
   auto id = package.getId();
-  auto& slot = mounts[id];
-  if (slot == nullptr) {
+  auto iter = mounts.find(id);
+  if (iter == mounts.end()) {
     // Create the NBD socketpair.
     int nbdSocketPair[2];
     KJ_SYSCALL(socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0, nbdSocketPair));
@@ -51,9 +53,9 @@ auto PackageMountSet::getPackage(PackageInfo::Reader package)
     packageMount = kj::refcounted<PackageMount>(*this, id,
         kj::str("/var/blackrock/packages/", counter++, '-', kj::hex(random)),
         package.getVolume(), kj::mv(nbdUserEnd), kj::mv(nbdKernelEnd));
-    slot = packageMount.get();
+    mounts[packageMount->getId()] = packageMount.get();
   } else {
-    packageMount = kj::addRef(*slot);
+    packageMount = kj::addRef(*iter->second);
   }
 
   auto promise = packageMount->loaded.addBranch();
@@ -97,13 +99,26 @@ PackageMountSet::PackageMount::PackageMount(PackageMountSet& mountSet,
         // Set up NBD.
         NbdDevice device;
         NbdBinding binding(device, kj::mv(nbdKernelEnd));
-        Mount mount(device.getPath(), path, MS_RDONLY, nullptr);
 
-        // Signal setup is complete.
-        pipe.write(&dummyByte, 1).wait(waitScope);
+        {
+          Mount mount(device.getPath(), path, MS_RDONLY, nullptr);
 
-        // Wait for pipe disconnect.
-        while (pipe.tryRead(&dummyByte, 1, 1).wait(waitScope) > 0) {}
+          // Signal setup is complete.
+          pipe.write(&dummyByte, 1).wait(waitScope);
+
+          // Wait for pipe disconnect.
+          while (pipe.tryRead(&dummyByte, 1, 1).wait(waitScope) > 0) {}
+        }
+
+        // We've now unmounted, but wait a couple seconds before we disconnected the nbd device
+        // because it's possible that a grain supervisor started *just before* the unmount could
+        // still have a reference to the mount in its private mount namespace. The meta-supervisor
+        // immediately unmounts these after creating its mount namespace, but there's a race
+        // condition between its unshare() and its unmount().
+        //
+        // TODO(race): We really need a way to ask the kernel to tell us when the device is
+        //   unmounted.
+        ioProvider.getTimer().afterDelay(2 * kj::SECONDS).wait(waitScope);
 
         // We'll close our end of the pipe on the way out, thus signaling completion.
       })),
@@ -358,7 +373,7 @@ sandstorm::Supervisor::Client WorkerImpl::bootGrain(
 
     // Build array of StringPtr for argv.
     KJ_STACK_ARRAY(kj::StringPtr, argv,
-        command.commandArgs.size() + command.envArgs.size() + 5 + isNew, 16, 16);
+        command.commandArgs.size() + command.envArgs.size() + 6 + isNew, 16, 16);
     {
       int i = 0;
       argv[i++] = "blackrock";
@@ -366,6 +381,7 @@ sandstorm::Supervisor::Client WorkerImpl::bootGrain(
       if (isNew) {
         argv[i++] = "-n";
       }
+      argv[i++] = packageMount->getPath();
       argv[i++] = "--";  // begin supervisor args
       for (auto& envArg: command.envArgs) {
         argv[i++] = envArg;
@@ -635,6 +651,7 @@ kj::MainFunc MetaSupervisorMain::getMain() {
                          "invoked by the Blackrock worker.")
       .addOption({'n', "new"}, [this]() { isNew = true; args.add("-n"); return true; },
                  "Initializes a new grain. (Otherwise, runs an existing one.)")
+      .expectArg("<pkg>", [this](kj::StringPtr s) { packageMount = s; return true; })
       .expectZeroOrMoreArgs("<args>", [this](kj::StringPtr s) { args.add(s); return true; })
       .callAfterParsing(KJ_BIND_METHOD(*this, run))
       .build();
@@ -644,11 +661,36 @@ kj::MainBuilder::Validity MetaSupervisorMain::run() {
   // Rename the task to allow for orderly teardown when killing all blackrock processes.
   KJ_SYSCALL(prctl(PR_SET_NAME, "blackrock-msup", 0, 0, 0));
 
+  // Make sure any descendents that die are re-parented to us. This way we can make sure all
+  // children are reaped before we attempt to unmount, which is important to ensure that all
+  // clones of the mount are gone before we disconnect nbd.
+  KJ_SYSCALL(prctl(PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0));
+
   // Set CLOEXEC on the the nbd fd so that the supervisor doesn't see it.
   KJ_SYSCALL(fcntl(4, F_SETFD, FD_CLOEXEC));
 
   // Enter mount namespace, to mount the grain.
   KJ_SYSCALL(unshare(CLONE_NEWNS));
+
+  // Unmount all packages other than our own, so that we don't hold them open in our mount
+  // namespace.
+  //
+  // TODO(race): One of these packages could expire and be disconnected by the worker between
+  //   our unshare() and our unmount(), in which case the kernel could freak out because we're
+  //   unmounting something not connected. To help avoid this, when the worker cleans up a package,
+  //   it sleeps for a couple seconds after unmount. It may also not be a big deal because the
+  //   package is mounted read-only and the only observed kernel issues with disconnecting before
+  //   unmount had to do with flushing write buffers.
+  bool sawSelf = false;
+  for (auto& file: sandstorm::listDirectory("/var/blackrock/packages")) {
+    auto path = kj::str("/var/blackrock/packages/", file);
+    if (path == packageMount) {
+      sawSelf = true;
+    } else {
+      KJ_SYSCALL(umount(path.cStr()));
+    }
+  }
+  KJ_REQUIRE(sawSelf, "package mount not seen in packages dir", packageMount);
 
   // We'll mount our grain data on /mnt because it's our own mount namespace so why not?
   NbdDevice device;
@@ -720,6 +762,24 @@ kj::MainBuilder::Validity MetaSupervisorMain::run() {
   }
 
   child.waitForSuccess();
+
+  // Wait for any children that were reparented to us when the supervisor died. The supervisor
+  // should have already sent them SIGKILL but we need to make sure they've actually died before
+  // unmounting because they may hold a reference to the mount in their mount namespace, and we
+  // need to make sure the mount really is unmounted before we disconnect nbd.
+  for (;;) {
+    int status;
+    if (wait(&status) < 0) {
+      int error = errno;
+      if (error == ECHILD) {
+        // No more children.
+        break;
+      } else if (error != EINTR) {
+        KJ_FAIL_SYSCALL("wait()", error);
+      }
+    }
+  }
+
   return true;
 }
 

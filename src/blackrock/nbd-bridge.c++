@@ -292,6 +292,12 @@ NbdDevice::NbdDevice() {
   KJ_FAIL_ASSERT("all NBD devices are in use");
 }
 
+NbdDevice::NbdDevice(uint number)
+    : path(kj::str("/dev/nbd", number)),
+      fd(sandstorm::raiiOpen(path, O_RDWR | O_CLOEXEC)) {
+  KJ_SYSCALL(flock(fd, LOCK_EX | LOCK_NB), "requested nbd device is already in-use", path);
+}
+
 void NbdDevice::format(uint megabytes) {
   auto size = kj::str(megabytes, 'M');
   sandstorm::Subprocess::Options options({"mkfs.ext4", "-q", "-b", "4096", path, size});
@@ -318,8 +324,14 @@ void NbdDevice::disconnectAll() {
   for (uint i = 0; i < MAX_NBDS; i++) {
     auto devname = kj::str("/dev/nbd", i);
     KJ_LOG(WARNING, "disconnecting nbd device", devname);
-    // We ignore ioctl() errors here because if the device isn't connected then the ioctl fails.
-    ioctl(sandstorm::raiiOpen(devname, O_RDWR | O_CLOEXEC), NBD_DISCONNECT);
+    auto fd = sandstorm::raiiOpen(devname, O_RDWR | O_CLOEXEC);
+
+    // We ignore ioctl() errors on NBD_DISCONNECT because if the device isn't connected then the
+    // ioctl fails.
+    ioctl(fd, NBD_DISCONNECT);
+
+    // Clear socket for good measure.
+    KJ_SYSCALL(ioctl(fd, NBD_CLEAR_SOCK));
   }
 }
 
@@ -333,6 +345,7 @@ void NbdDevice::loadKernelModule() {
 NbdBinding::NbdBinding(NbdDevice& device, kj::AutoCloseFd socket)
     : device(setup(device, kj::mv(socket))),
       doItThread([&device,KJ_MVCAP(socket)]() mutable {
+        KJ_DEFER(KJ_SYSCALL(ioctl(device.getFd(), NBD_CLEAR_SOCK)) { break; });
         KJ_SYSCALL(ioctl(device.getFd(), NBD_DO_IT));
       }) {}
 
@@ -342,10 +355,10 @@ NbdBinding::~NbdBinding() noexcept(false) {
 
 NbdDevice& NbdBinding::setup(NbdDevice& device, kj::AutoCloseFd socket) {
   int nbdFd = device.getFd();
+  KJ_SYSCALL(ioctl(nbdFd, NBD_CLEAR_SOCK));
   KJ_SYSCALL(ioctl(nbdFd, NBD_SET_BLKSIZE, Volume::BLOCK_SIZE));
   KJ_SYSCALL(ioctl(nbdFd, NBD_SET_SIZE, VOLUME_SIZE));
   KJ_SYSCALL(ioctl(nbdFd, NBD_SET_FLAGS, NBD_FLAG_SEND_FLUSH | NBD_FLAG_SEND_TRIM));
-  KJ_SYSCALL(ioctl(nbdFd, NBD_CLEAR_SOCK));
   KJ_SYSCALL(ioctl(nbdFd, NBD_SET_SOCK, socket.get()));
   return device;
 }

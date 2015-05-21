@@ -56,9 +56,12 @@ class NbdDevice {
   // Represents a claim to a specific `/dev/nbdX` device node.
 
 public:
-  explicit NbdDevice();
+  NbdDevice();
   // Claims an unused NBD device and binds it to the given socket. (The other end of the socket
   // pair should be passed to `NbdVolumeAdapter`.)
+
+  explicit NbdDevice(uint number);
+  // Explicitly claim a specific device number. For debugging purposes only!
 
   kj::StringPtr getPath() { return path; }
   // E.g. "/dev/nbd12".
