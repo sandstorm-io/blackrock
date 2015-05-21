@@ -620,8 +620,14 @@ private:
         auto entries = kj::heapArray<Entry>(count);
         preadAllOrZero(journalFd, entries.begin(), entries.asBytes().size(), position);
 
-        // Make sure this data is synced.
-        KJ_SYSCALL(fdatasync(journalFd));
+        // Make sure the journal is synced. We do fsync() instead of fdatasync() because:
+        // - We want to make sure that the metadata for all staging files used in this transaction
+        //   are also synced. Ext4 by default guarantees ordering of metadata changes, so syncing
+        //   the journal metadata should ensure that all the other files are in-place.
+        // - It probably makes no difference anyway because we always extend the endpoint of the
+        //   journal when adding a transaction, therefore a metadata flush is necessary even if
+        //   we use fdatasync().
+        KJ_SYSCALL(fsync(journalFd));
 
         // Post back to main thread that sync is finished through these bytes.
         uint64_t byteCount = entries.asBytes().size();
