@@ -190,7 +190,10 @@ struct FilesystemStorage::Xattr {
 
   Type type;
 
-  byte reserved[3];
+  bool readOnly;
+  // For volumes, prevents the volume from being modified. Once set this can never be unset.
+
+  byte reserved[2];
   // Must be zero.
 
   uint32_t accountedBlockCount;
@@ -1152,6 +1155,17 @@ protected:
     }
   }
 
+  kj::Promise<void> setReadOnly() {
+    if (xattr.readOnly) {
+      return kj::READY_NOW;
+    } else {
+      Journal::Transaction txn(journal);
+      xattr.readOnly = true;
+      txn.updateObjectXattr(id, xattr);
+      return txn.commit();
+    }
+  }
+
   int openRaw() {
     // Directly get the underlying file descriptor. Used for types that aren't in StoredObject
     // format and do not have child capabilities.
@@ -1382,6 +1396,8 @@ public:
   }
 
   kj::Promise<void> write(WriteContext context) override {
+    KJ_REQUIRE(!getXattrRef().readOnly, "attempted to write to a read-only Volume");
+
     auto params = context.getParams();
     uint64_t blockNum = params.getBlockNum();
     capnp::Data::Reader data = params.getData();
@@ -1399,6 +1415,8 @@ public:
   }
 
   kj::Promise<void> zero(ZeroContext context) override {
+    KJ_REQUIRE(!getXattrRef().readOnly, "attempted to write to a read-only Volume");
+
     auto params = context.getParams();
     uint64_t blockNum = params.getBlockNum();
     uint32_t count = params.getCount();
@@ -1432,6 +1450,10 @@ public:
     context.getResults(capnp::MessageSize {4, 1}).setExclusive(
         capnp::Capability::Client(kj::heap<ExclusiveWrapper>(*this)).castAs<Volume>());
     return kj::READY_NOW;
+  }
+
+  kj::Promise<void> freeze(FreezeContext context) override {
+    return setReadOnly();
   }
 
 private:

@@ -477,11 +477,14 @@ protected:
       auto results = context.getResults(size);
       results.setAppId(inResults.getAppId());
       results.setManifest(inResults.getManifest());
-      results.setVolume(kj::mv(volume));
+      results.setVolume(volume);
       auto promises = kj::heapArrayBuilder<kj::Promise<void>>(2);
       promises.add(kj::mv(volumeRunTask));
       promises.add(kj::mv(subprocess));
       return kj::joinPromises(promises.finish());
+    }).then([this]() {
+      // Freeze the volume so it can never be written again.
+      return volume.freezeRequest().send().then([](auto) {});
     });
   }
 

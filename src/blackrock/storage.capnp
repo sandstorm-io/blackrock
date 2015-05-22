@@ -83,6 +83,13 @@ interface Volume {
   # the next time getExclusive() is called. This is basically a form of optimistic concurrency: it
   # gives you exclusive access without taking a lock (as long as all other clients also use
   # `getExclusive()`).
+
+  freeze @6 ();
+  # Prevent this volume from ever being modified again. Useful e.g. for packages which should be
+  # immutable once unpacked. Implies a sync(). No-op if the volume is already frozen.
+  #
+  # TODO(someday): Arguably freeze() should return a frozen snapshot Volume but not affect the
+  #   original, but that would be a lot harder to implement and isn't needed now.
 }
 
 interface Immutable(T) {
