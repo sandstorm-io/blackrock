@@ -688,9 +688,10 @@ kj::MainBuilder::Validity MetaSupervisorMain::run() {
   NbdBinding binding(device, kj::AutoCloseFd(4), NbdAccessType::READ_WRITE);
 
   if (isNew) {
-    // Experimentally, it seems 256M is a sweet spot that generates a minimal number of non-zero
-    // blocks. We can extend the filesystem later if desired.
-    device.format(256);
+    // Experimentally, filesystem overhead (count of non-zero blocks after initialization) for
+    // ext4 seems to be 12 blocks plus 1 for every 2GiB of space. At 8GiB we use 16 blocks, aka
+    // 64KiB, which seems reasonable.
+    device.format(8192);
   }
 
   Mount mount(device.getPath(), "/mnt", 0, nullptr);
@@ -805,7 +806,7 @@ kj::MainBuilder::Validity UnpackMain::run() {
   // We'll mount our package on /mnt because it's our own mount namespace so why not?
   NbdDevice device;
   NbdBinding binding(device, kj::AutoCloseFd(3), NbdAccessType::READ_WRITE);
-  device.format(2048);  // TODO(soon): Set max filesystem size based on uncompressed package size.
+  device.format(8192);
   Mount mount(device.getPath(), "/mnt", 0, nullptr);
   KJ_SYSCALL(mkdir("/mnt/spk", 0755));
 

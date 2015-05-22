@@ -344,7 +344,12 @@ NbdDevice::NbdDevice(uint number)
 
 void NbdDevice::format(uint megabytes) {
   auto size = kj::str(megabytes, 'M');
-  sandstorm::Subprocess::Options options({"mkfs.ext4", "-q", "-b", "4096", path, size});
+  sandstorm::Subprocess::Options options({
+      "mkfs.ext4", "-q", "-b", "4096", "-m", "0",
+      // Use sparse_super2 and num_backup_sb=0 to disable superblock backups so that the initial
+      // filesystem overhead is minimal.
+      "-O", "sparse_super2", "-E", "num_backup_sb=0,resize=4294967295",
+      path, size});
   auto devnull = sandstorm::raiiOpen("/dev/null", O_WRONLY | O_CLOEXEC);
   options.stdout = devnull;
   sandstorm::Subprocess(kj::mv(options)).waitForSuccess();
