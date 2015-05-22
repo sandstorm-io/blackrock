@@ -277,10 +277,29 @@ NbdDevice::NbdDevice() {
     int flockResult;
     KJ_NONBLOCKING_SYSCALL(flockResult = flock(tryFd, LOCK_EX | LOCK_NB));
     if (flockResult >= 0) {
-      // Success! It's ours! The lock will be dropped when the fd is closed.
-      fd = kj::mv(tryFd);
-      path = kj::mv(tryPath);
-      return;
+      // We locked the file, meaning it doesn't appear to be in-use by any Blackrock process.
+      // However, just to be safe, let's also use the kernel's nifty O_EXCL trick to check whether
+      // the device is mounted.
+    retry:
+      int fd2 = open(tryPath.cStr(), O_RDONLY | O_EXCL | O_CLOEXEC);
+      if (fd2 < 0) {
+        int error = errno;
+        if (error == EINTR) {
+          goto retry;
+        } else if (error == EBUSY) {
+          // Yikes, this NBD is mounted! Let's steer clear.
+          KJ_LOG(ERROR, "unlocked nbd device appears to be mounted; skipping");
+        } else {
+          KJ_FAIL_SYSCALL("open(nbd device, O_EXCL)", error, tryPath);
+        }
+      } else {
+        KJ_SYSCALL(close(fd2));
+
+        // Success! It's ours! The lock will be dropped when the fd is closed.
+        fd = kj::mv(tryFd);
+        path = kj::mv(tryPath);
+        return;
+      }
     }
 
     index = (index + step) % MAX_NBDS;
@@ -350,7 +369,28 @@ NbdBinding::NbdBinding(NbdDevice& device, kj::AutoCloseFd socket)
       }) {}
 
 NbdBinding::~NbdBinding() noexcept(false) {
-  KJ_SYSCALL(ioctl(device.getFd(), NBD_DISCONNECT)) { break; }
+  KJ_DEFER(KJ_SYSCALL(ioctl(device.getFd(), NBD_DISCONNECT)) { break; });
+
+  // Before we actually try to disconnect, make sure the device is not still in-use.
+  uint delay = 1;
+retry:
+  int fd = open(device.getPath().cStr(), O_RDONLY | O_EXCL | O_CLOEXEC);
+  if (fd < 0) {
+    int error = errno;
+    if (error == EINTR) {
+      goto retry;
+    } else if (error == EBUSY) {
+      KJ_LOG(WARNING, "requested disconnect of nbd device that is still mounted; waiting a bit "
+                      "for unmount", delay);
+      sleep(delay);
+      delay = delay * 2;  // exponential backoff
+      goto retry;
+    } else {
+      KJ_FAIL_SYSCALL("open(nbd device, O_EXCL)", error, device.getPath()) { break; }
+    }
+  } else {
+    close(fd);
+  }
 }
 
 NbdDevice& NbdBinding::setup(NbdDevice& device, kj::AutoCloseFd socket) {

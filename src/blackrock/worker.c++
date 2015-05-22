@@ -99,26 +99,20 @@ PackageMountSet::PackageMount::PackageMount(PackageMountSet& mountSet,
         // Set up NBD.
         NbdDevice device;
         NbdBinding binding(device, kj::mv(nbdKernelEnd));
+        Mount mount(device.getPath(), path, MS_RDONLY, nullptr);
 
-        {
-          Mount mount(device.getPath(), path, MS_RDONLY, nullptr);
+        // Signal setup is complete.
+        pipe.write(&dummyByte, 1).wait(waitScope);
 
-          // Signal setup is complete.
-          pipe.write(&dummyByte, 1).wait(waitScope);
+        // Wait for pipe disconnect.
+        while (pipe.tryRead(&dummyByte, 1, 1).wait(waitScope) > 0) {}
 
-          // Wait for pipe disconnect.
-          while (pipe.tryRead(&dummyByte, 1, 1).wait(waitScope) > 0) {}
-        }
-
-        // We've now unmounted, but wait a couple seconds before we disconnected the nbd device
-        // because it's possible that a grain supervisor started *just before* the unmount could
-        // still have a reference to the mount in its private mount namespace. The meta-supervisor
-        // immediately unmounts these after creating its mount namespace, but there's a race
-        // condition between its unshare() and its unmount().
-        //
-        // TODO(race): We really need a way to ask the kernel to tell us when the device is
-        //   unmounted.
-        ioProvider.getTimer().afterDelay(2 * kj::SECONDS).wait(waitScope);
+        // Note that a just-created grain process could in theory have inherited our package mount
+        // into its mount namespace. The meta-supervisor unmounts all packages other than its own
+        // immediately after unsharing the mount namespace, but there is a brief time in between
+        // when it holds a reference to our mount, and thus our attempt to umount() won't actually
+        // unmount the filesystem. Luckily, NbdBinding checks if the device is still mounted and
+        // delays disconnect in the meantime, so we're actually safe.
 
         // We'll close our end of the pipe on the way out, thus signaling completion.
       })),
@@ -674,13 +668,6 @@ kj::MainBuilder::Validity MetaSupervisorMain::run() {
 
   // Unmount all packages other than our own, so that we don't hold them open in our mount
   // namespace.
-  //
-  // TODO(race): One of these packages could expire and be disconnected by the worker between
-  //   our unshare() and our unmount(), in which case the kernel could freak out because we're
-  //   unmounting something not connected. To help avoid this, when the worker cleans up a package,
-  //   it sleeps for a couple seconds after unmount. It may also not be a big deal because the
-  //   package is mounted read-only and the only observed kernel issues with disconnecting before
-  //   unmount had to do with flushing write buffers.
   bool sawSelf = false;
   for (auto& file: sandstorm::listDirectory("/var/blackrock/packages")) {
     auto path = kj::str("/var/blackrock/packages/", file);
