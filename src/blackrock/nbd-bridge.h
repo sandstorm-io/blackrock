@@ -13,10 +13,16 @@
 
 namespace blackrock {
 
+enum class NbdAccessType {
+  READ_ONLY,
+  READ_WRITE
+};
+
 class NbdVolumeAdapter: private kj::TaskSet::ErrorHandler {
   // Implements the NBD protocol in terms of `Volume`.
 public:
-  NbdVolumeAdapter(kj::Own<kj::AsyncIoStream> socket, Volume::Client volume);
+  NbdVolumeAdapter(kj::Own<kj::AsyncIoStream> socket, Volume::Client volume,
+                   NbdAccessType access);
   // NBD requests are read from `socket` and implemented via `volume`.
 
   kj::Promise<void> run();
@@ -32,6 +38,7 @@ private:
   kj::Own<kj::AsyncIoStream> socket;
   Volume::Client volume;
   kj::PromiseFulfillerPair<void> disconnectedPaf;
+  NbdAccessType access;
   bool disconnected = false;
   kj::TaskSet tasks;
 
@@ -101,7 +108,7 @@ class NbdBinding {
   // and writes to the device, and will not return until those operations complete.
 
 public:
-  NbdBinding(NbdDevice& device, kj::AutoCloseFd socket);
+  NbdBinding(NbdDevice& device, kj::AutoCloseFd socket, NbdAccessType access);
   // Binds the given NBD device to the given socket. (The other end of the socket pair should be
   // passed to `NbdVolumeAdapter`.)
 
@@ -114,7 +121,7 @@ private:
   // Executes the NBD_DO_IT ioctl(), which runs the NBD device loop in the kernel, not returning
   // until the device is disconnected.
 
-  static NbdDevice& setup(NbdDevice& device, kj::AutoCloseFd socket);
+  static NbdDevice& setup(NbdDevice& device, kj::AutoCloseFd socket, NbdAccessType access);
 };
 
 class Mount {

@@ -45,10 +45,11 @@ constexpr uint MAX_RPC_BLOCKS = 512;
 
 }  // namespace
 
-NbdVolumeAdapter::NbdVolumeAdapter(kj::Own<kj::AsyncIoStream> socket, Volume::Client volume)
+NbdVolumeAdapter::NbdVolumeAdapter(kj::Own<kj::AsyncIoStream> socket, Volume::Client volume,
+                                   NbdAccessType access)
     : socket(kj::mv(socket)), volume(kj::mv(volume)),
       disconnectedPaf(kj::newPromiseAndFulfiller<void>()),
-      tasks(*this) {}
+      access(access), tasks(*this) {}
 
 struct NbdVolumeAdapter::RequestHandle {
   char handle[8];
@@ -146,6 +147,14 @@ kj::Promise<void> NbdVolumeAdapter::run() {
         RequestHandle reqHandle = request.handle;
         return socket->read(data.begin(), data.size())
             .then([this,reqHandle,data,KJ_MVCAP(req)]() mutable {
+          if (access != NbdAccessType::READ_WRITE) {
+            // Whoops, read-only block device. This shouldn't happen since we mount the filesystem
+            // read-only and set the block device read-only at the kernel level.
+            KJ_LOG(ERROR, "caught write() on read-only NBD device");
+            reply(reqHandle, EPERM);
+            return run();
+          }
+
           // Check if the data is all-zero.
           bool allZero = true;
           for (const uint64_t* ptr = reinterpret_cast<uint64_t*>(data.begin()),
@@ -197,6 +206,14 @@ kj::Promise<void> NbdVolumeAdapter::run() {
       }
       case NBD_CMD_FLUSH: {
         RequestHandle reqHandle = request.handle;
+        if (access != NbdAccessType::READ_WRITE) {
+          // Whoops, read-only block device. This shouldn't happen since we mount the filesystem
+          // read-only and set the block device read-only at the kernel level.
+          KJ_LOG(ERROR, "caught flush() on read-only NBD device");
+          reply(reqHandle, EPERM);
+          return run();
+        }
+
         tasks.add(volume.syncRequest().send().then([this,reqHandle](auto resp) {
           reply(reqHandle);
         }, [this,reqHandle](kj::Exception&& e) {
@@ -205,6 +222,15 @@ kj::Promise<void> NbdVolumeAdapter::run() {
         return run();
       }
       case NBD_CMD_TRIM: {
+        RequestHandle reqHandle = request.handle;
+        if (access != NbdAccessType::READ_WRITE) {
+          // Whoops, read-only block device. This shouldn't happen since we mount the filesystem
+          // read-only and set the block device read-only at the kernel level.
+          KJ_LOG(ERROR, "caught trim() on read-only NBD device");
+          reply(reqHandle, EPERM);
+          return run();
+        }
+
         auto req = volume.zeroRequest();
         uint64_t offset = ntohll(request.from);
         uint32_t size = ntohl(request.len);
@@ -213,7 +239,6 @@ kj::Promise<void> NbdVolumeAdapter::run() {
         KJ_ASSERT(size % Volume::BLOCK_SIZE == 0);
         req.setCount(size / Volume::BLOCK_SIZE);
 
-        RequestHandle reqHandle = request.handle;
         tasks.add(req.send().then([this,reqHandle](auto resp) {
           reply(reqHandle);
         }, [this,reqHandle](kj::Exception&& e) {
@@ -230,7 +255,7 @@ kj::Promise<void> NbdVolumeAdapter::run() {
 void NbdVolumeAdapter::reply(RequestHandle reqHandle, int error) {
   auto reply = kj::heap<struct nbd_reply>();
   reply->magic = htonl(NBD_REPLY_MAGIC);
-  reply->error = error;
+  reply->error = htonl(error);
   memcpy(reply->handle, reqHandle.handle, sizeof(reqHandle.handle));
   replyQueue = replyQueue.then([this,KJ_MVCAP(reply)]() mutable {
     auto promise = socket->write(reply.get(), sizeof(*reply));
@@ -361,8 +386,8 @@ void NbdDevice::loadKernelModule() {
 
 // =======================================================================================
 
-NbdBinding::NbdBinding(NbdDevice& device, kj::AutoCloseFd socket)
-    : device(setup(device, kj::mv(socket))),
+NbdBinding::NbdBinding(NbdDevice& device, kj::AutoCloseFd socket, NbdAccessType access)
+    : device(setup(device, kj::mv(socket), access)),
       doItThread([&device,KJ_MVCAP(socket)]() mutable {
         KJ_DEFER(KJ_SYSCALL(ioctl(device.getFd(), NBD_CLEAR_SOCK)) { break; });
         KJ_SYSCALL(ioctl(device.getFd(), NBD_DO_IT));
@@ -393,12 +418,14 @@ retry:
   }
 }
 
-NbdDevice& NbdBinding::setup(NbdDevice& device, kj::AutoCloseFd socket) {
+NbdDevice& NbdBinding::setup(NbdDevice& device, kj::AutoCloseFd socket, NbdAccessType access) {
   int nbdFd = device.getFd();
+  int readOnly = access == NbdAccessType::READ_ONLY;
   KJ_SYSCALL(ioctl(nbdFd, NBD_CLEAR_SOCK));
   KJ_SYSCALL(ioctl(nbdFd, NBD_SET_BLKSIZE, Volume::BLOCK_SIZE));
   KJ_SYSCALL(ioctl(nbdFd, NBD_SET_SIZE, VOLUME_SIZE));
   KJ_SYSCALL(ioctl(nbdFd, NBD_SET_FLAGS, NBD_FLAG_SEND_FLUSH | NBD_FLAG_SEND_TRIM));
+  KJ_SYSCALL(ioctl(nbdFd, BLKROSET, &readOnly));
   KJ_SYSCALL(ioctl(nbdFd, NBD_SET_SOCK, socket.get()));
   return device;
 }

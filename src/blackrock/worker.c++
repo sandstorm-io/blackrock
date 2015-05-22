@@ -83,7 +83,8 @@ PackageMountSet::PackageMount::PackageMount(PackageMountSet& mountSet,
     : mountSet(mountSet),
       id(kj::heapArray(id)),
       path(kj::heapString(path)),
-      volumeAdapter(kj::heap<NbdVolumeAdapter>(kj::mv(nbdUserEnd), kj::mv(volume))),
+      volumeAdapter(kj::heap<NbdVolumeAdapter>(kj::mv(nbdUserEnd), kj::mv(volume),
+                                               NbdAccessType::READ_ONLY)),
       volumeRunTask(volumeAdapter->run().eagerlyEvaluate([](kj::Exception&& exception) {
         KJ_LOG(FATAL, "NbdVolumeAdapter failed (grain)", exception);
       })),
@@ -98,7 +99,7 @@ PackageMountSet::PackageMount::PackageMount(PackageMountSet& mountSet,
 
         // Set up NBD.
         NbdDevice device;
-        NbdBinding binding(device, kj::mv(nbdKernelEnd));
+        NbdBinding binding(device, kj::mv(nbdKernelEnd), NbdAccessType::READ_ONLY);
         Mount mount(device.getPath(), path, MS_RDONLY, nullptr);
 
         // Signal setup is complete.
@@ -172,7 +173,7 @@ public:
         grainState(kj::mv(grainState)),
         grainStateSetter(kj::mv(grainStateSetter)),
         packageMount(kj::mv(packageMount)),
-        nbdVolume(kj::mv(nbdSocket), kj::mv(volume)),
+        nbdVolume(kj::mv(nbdSocket), kj::mv(volume), NbdAccessType::READ_WRITE),
         volumeRunTask(nbdVolume.run().eagerlyEvaluate([](kj::Exception&& exception) {
           KJ_LOG(FATAL, "NbdVolumeAdapter failed (grain)", exception);
         })),
@@ -429,7 +430,7 @@ public:
       kj::Own<kj::AsyncInputStream> stdoutPipe,
       kj::Promise<void> subprocess)
       : workerCap(kj::mv(workerCap)),
-        nbdVolume(kj::mv(nbdUserEnd), volume),
+        nbdVolume(kj::mv(nbdUserEnd), volume, NbdAccessType::READ_WRITE),
         volume(kj::mv(volume)),
         volumeRunTask(nbdVolume.run().eagerlyEvaluate([](kj::Exception&& exception) {
           KJ_LOG(FATAL, "NbdVolumeAdapter failed (package)", exception);
@@ -681,7 +682,7 @@ kj::MainBuilder::Validity MetaSupervisorMain::run() {
 
   // We'll mount our grain data on /mnt because it's our own mount namespace so why not?
   NbdDevice device;
-  NbdBinding binding(device, kj::AutoCloseFd(4));
+  NbdBinding binding(device, kj::AutoCloseFd(4), NbdAccessType::READ_WRITE);
 
   if (isNew) {
     // Experimentally, it seems 256M is a sweet spot that generates a minimal number of non-zero
@@ -800,7 +801,7 @@ kj::MainBuilder::Validity UnpackMain::run() {
 
   // We'll mount our package on /mnt because it's our own mount namespace so why not?
   NbdDevice device;
-  NbdBinding binding(device, kj::AutoCloseFd(3));
+  NbdBinding binding(device, kj::AutoCloseFd(3), NbdAccessType::READ_WRITE);
   device.format(2048);  // TODO(soon): Set max filesystem size based on uncompressed package size.
   Mount mount(device.getPath(), "/mnt", 0, nullptr);
   KJ_SYSCALL(mkdir("/mnt/spk", 0755));

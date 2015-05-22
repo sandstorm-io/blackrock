@@ -121,7 +121,7 @@ private:
             io.lowLevelProvider->wrapSocketFd(userEnd,
                 kj::LowLevelAsyncIoProvider::ALREADY_CLOEXEC |
                 kj::LowLevelAsyncIoProvider::ALREADY_NONBLOCK),
-            kj::mv(volume));
+            kj::mv(volume), NbdAccessType::READ_WRITE);
         volumeAdapter.run().exclusiveJoin(cancelObserver.whenBecomesReadable())
             .wait(io.waitScope);
       })) {
@@ -135,7 +135,7 @@ private:
     NbdDevice device;
     context.warning(kj::str("using: ", device.getPath()));
 
-    NbdBinding binding(device, kj::mv(kernelEnd));
+    NbdBinding binding(device, kj::mv(kernelEnd), NbdAccessType::READ_WRITE);
     KJ_DEFER(context.warning("unbinding..."));
 
     if (isNew) {
