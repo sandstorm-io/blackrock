@@ -1932,8 +1932,14 @@ void FilesystemStorage::createFromStagingIfExists(
   // Verify that file doesn't already exist in main.
   //
   // TODO(cleanup): Once we can assume kernel 3.15, we can do this atomically with renameat2().
-  KJ_ASSERT(faccessat(mainDirFd, finalName.begin(), F_OK, 0) != 0,
-      "can't create storage object: an object with that ID already exists");
+  if (faccessat(mainDirFd, finalName.begin(), F_OK, 0) == 0) {
+    // Hmm, the target file already exists. This is OK *if* the source file doesn't exist, which
+    // indicates that we're replaying a transaction that already happened.
+    KJ_ASSERT(faccessat(stagingDirFd, stagingName.begin(), F_OK, 0) != 0,
+        "can't create storage object: an object with that ID already exists",
+        stagingName.begin(), finalName.begin());
+    return;
+  }
 
   if (attributes.owner != nullptr) {
     // Verify that owner exists. If the owner was moved directly to death row, then we need to
