@@ -65,11 +65,6 @@ struct StorageTestFixture {
         factory(storage.getFactoryRequest().send().getFactory()) {}
 
   kj::AsyncIoContext io;
-  kj::AutoCloseFd staging;
-  kj::AutoCloseFd main;
-  kj::AutoCloseFd deathRow;
-  kj::AutoCloseFd roots;
-  kj::AutoCloseFd journal;
 
   StorageRootSet::Client storage;
   StorageFactory::Client factory;
@@ -117,7 +112,10 @@ KJ_TEST("basic assignables") {
     auto newVal = req.initValue();
     newVal.setText("bar");
     newVal.setSub1(env.newTextObject("baz"));
-    newVal.setSub2(env.newTextObject("qux"));
+    newVal.setSub2(env.newObject([&](auto value) {
+      value.setText("qux");
+      value.setSub1(env.newTextObject("corge"));
+    }));
     auto promise = req.send();
 
     auto response2 = root.getRequest().send().wait(env.io.waitScope);
@@ -129,7 +127,7 @@ KJ_TEST("basic assignables") {
     auto subResponse2 = readback.getSub2().getRequest().send().wait(env.io.waitScope);
     KJ_EXPECT(subResponse2.getValue().getText() == "qux");
 
-    KJ_EXPECT(root.getSizeRequest().send().wait(env.io.waitScope).getTotalBytes() == 4096 * 3);
+    KJ_EXPECT(root.getSizeRequest().send().wait(env.io.waitScope).getTotalBytes() == 4096 * 4);
 
     promise.wait(env.io.waitScope);
   }
@@ -149,6 +147,13 @@ KJ_TEST("basic assignables") {
   }
 }
 
+// Current state of storage:
+//
+// root = (text = "bar", sub1 = x, sub2 = y)
+// x = (text = "baz", sub1 = z)
+// y = (text = "qux")
+// z = (text = "corge")
+
 KJ_TEST("use after reload") {
   StorageTestFixture env;
 
@@ -162,15 +167,33 @@ KJ_TEST("use after reload") {
   auto subResponse2 = value.getSub2().getRequest().send().wait(env.io.waitScope);
   KJ_EXPECT(subResponse2.getValue().getText() == "qux");
 
-  KJ_EXPECT(root.getSizeRequest().send().wait(env.io.waitScope).getTotalBytes() == 4096 * 3);
+  auto subSubResponse = subResponse2.getValue().getSub1()
+      .getRequest().send().wait(env.io.waitScope);
+  KJ_EXPECT(subSubResponse.getValue().getText() == "corge");
+
+  KJ_EXPECT(root.getSizeRequest().send().wait(env.io.waitScope).getTotalBytes() == 4096 * 4);
 }
+
+// Current state of storage:
+//
+// root = (text = "bar", sub1 = x, sub2 = y)
+// x = (text = "baz")
+// y = (text = "qux", sub1 = z)
+// z = (text = "corge")
 
 KJ_TEST("delete some children") {
   StorageTestFixture env;
 
   auto root = env.getRoot("root");
 
-  {
+  auto main = sandstorm::raiiOpenAt(testTempdir.fd, "main", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+  auto deathRow = sandstorm::raiiOpenAt(testTempdir.fd, "death-row",
+      O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+
+  KJ_EXPECT(sandstorm::listDirectoryFd(main).size() == 4);
+  KJ_EXPECT(sandstorm::listDirectoryFd(deathRow).size() == 0);
+
+  OwnedAssignable<TestStoredObject>::Client zombie = ({
     auto response = root.getRequest().send().wait(env.io.waitScope);
     auto req = response.getSetter().setRequest();
     auto value = req.initValue();
@@ -179,10 +202,35 @@ KJ_TEST("delete some children") {
     // don't set sub2
     req.send().wait(env.io.waitScope);
 
-    KJ_EXPECT(root.getSizeRequest().send().wait(env.io.waitScope).getTotalBytes() == 4096 * 2);
+    uint64_t size = root.getSizeRequest().send().wait(env.io.waitScope).getTotalBytes();
+    KJ_EXPECT(size == 4096 * 2, size);
 
-    // TODO(test): verify that sub2 is deleted from disk somehow
+    response.getValue().getSub2();
+  });
+
+  // Death row is cleaned up asynchronously, so wait a bit before checking.
+  env.io.provider->getTimer().afterDelay(10 * kj::MILLISECONDS).wait(env.io.waitScope);
+
+  // Verify that tree was deleted. We'll need to give the death-row deleter thread some time, too.
+  KJ_EXPECT(sandstorm::listDirectoryFd(main).size() == 2);
+  KJ_EXPECT(sandstorm::listDirectoryFd(deathRow).size() == 0);
+
+  // Try overwriting our zombie reference.
+  {
+    auto req = zombie.asSetterRequest().send().getSetter().setRequest();
+    req.initValue().setText("doesnt matter already deleted");
+    req.send().wait(env.io.waitScope);
   }
+
+  // That shouldn't have added a file to main.
+  KJ_EXPECT(sandstorm::listDirectoryFd(main).size() == 2);
+
+  // It adds a file directly to death row, which should get cleaned up.
+  env.io.provider->getTimer().afterDelay(10 * kj::MILLISECONDS).wait(env.io.waitScope);
+  KJ_EXPECT(sandstorm::listDirectoryFd(deathRow).size() == 0);
+
+  // Expect parent's size wasn't unexpectedly modified.
+  KJ_EXPECT(root.getSizeRequest().send().wait(env.io.waitScope).getTotalBytes() == 4096 * 2);
 }
 
 // TODO(test): journal recovery

@@ -98,6 +98,7 @@ private:
   enum class Type: uint8_t;
   struct Xattr;
   class Journal;
+  class DeathRow;
   class ObjectFactory;
 
   kj::AutoCloseFd mainDirFd;
@@ -105,6 +106,7 @@ private:
   kj::AutoCloseFd deathRowFd;
   kj::AutoCloseFd rootsFd;
 
+  kj::Own<DeathRow> deathRow;
   kj::Own<Journal> journal;
   kj::Own<ObjectFactory> factory;
 
@@ -117,9 +119,10 @@ private:
   void linkTempIntoStaging(uint64_t number, int fd, const Xattr& xattr);
   void deleteStaging(uint64_t number);
   void deleteAllStaging();
-  void finalizeStagingIfExists(uint64_t stagingId, ObjectId finalId, const Xattr& attributes);
+  void createFromStagingIfExists(uint64_t stagingId, ObjectId finalId, const Xattr& attributes);
+  void replaceFromStagingIfExists(uint64_t stagingId, ObjectId finalId, const Xattr& attributes);
   void setAttributesIfExists(ObjectId objectId, const Xattr& attributes);
-  void moveToDeathRowIfExists(ObjectId id);
+  void moveToDeathRowIfExists(ObjectId id, bool notify = true);
   void sync();
 
   static bool isStoredObjectType(Type type);

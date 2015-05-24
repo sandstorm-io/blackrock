@@ -207,11 +207,81 @@ struct FilesystemStorage::Xattr {
   // What object owns this one?
 };
 
+class FilesystemStorage::DeathRow {
+public:
+  explicit DeathRow(FilesystemStorage& storage)
+      : storage(storage),
+        eventFd(newEventFd(0, EFD_CLOEXEC)),
+        thread([this]() { doThread(); }) {}
+
+  ~DeathRow() noexcept(false) {
+    // Write the maximum possible value to the eventfd. This write will actually block until the
+    // eventfd reaches 0, which is nice because it means the processing thread will be able to
+    // receive the previous event and process it before it receives this one, resulting in clean
+    // shutdown.
+    writeEvent(eventFd, EVENTFD_MAX);
+
+    // Now the destructor of the thread will wait for the thread to exit.
+  }
+
+  void notifyNewInmates() {
+    // Alert deleter thread that there's new stuff.
+    writeEvent(eventFd, 1);
+  }
+
+private:
+  FilesystemStorage& storage;
+  kj::AutoCloseFd eventFd;
+  kj::Thread thread;
+
+  // TODO(perf): Replace use of eventFd in DeathRow and in Journal with a thread signaling
+  //   primitive ultimately based on futex?
+
+  void doThread() {
+    KJ_IF_MAYBE(exception, kj::runCatchingExceptions([&]() {
+      for (;;) {
+        // Scan directory, delete all files.
+        auto files = sandstorm::listDirectoryFd(storage.deathRowFd);
+        if (files.size() == 0) {
+          // Wait for signal that more files have arrived to be deleted.
+          uint64_t count = readEvent(eventFd);
+          if (count == EVENTFD_MAX) {
+            // Clean shutdown requested.
+            break;
+          }
+        } else {
+          // Delete the files, but not before moving their children to death row.
+          for (auto& file: files) {
+            auto fd = sandstorm::raiiOpenAt(storage.deathRowFd, file, O_RDONLY | O_CLOEXEC);
+            Xattr xattr;
+            memset(&xattr, 0, sizeof(xattr));
+            KJ_SYSCALL(fgetxattr(fd, Xattr::NAME, &xattr, sizeof(xattr)));
+            if (isStoredObjectType(xattr.type)) {
+              // Read children to move them to death row.
+              capnp::StreamFdMessageReader reader(fd.get());
+
+              for (auto child: reader.getRoot<StoredChildIds>().getChildren()) {
+                storage.moveToDeathRowIfExists(child, false);
+              };
+            }
+            KJ_SYSCALL(unlinkat(storage.deathRowFd, file.cStr(), 0));
+          }
+        }
+      }
+    })) {
+      // exception!
+      KJ_LOG(FATAL, "exception in death row thread", *exception);
+
+      // Tear down the process because we're no longer garbage-collecting.
+      abort();
+    }
+  }
+};
+
 class FilesystemStorage::Journal {
   struct Entry;
 public:
-  explicit Journal(FilesystemStorage& storage, kj::UnixEventPort& unixEventPort,
-                   kj::AutoCloseFd journalFd)
+  Journal(FilesystemStorage& storage, kj::UnixEventPort& unixEventPort, kj::AutoCloseFd journalFd)
       : storage(storage),
         journalFd(kj::mv(journalFd)),
         journalEnd(getFileSize(this->journalFd)),
@@ -289,6 +359,35 @@ public:
 
     KJ_DISALLOW_COPY(Transaction);
 
+    void createObject(ObjectId id, const Xattr& attributes, int tmpFd) {
+      // Replace the object on disk with the file referenced by `tmpFd` with the given attributes.
+      //
+      // Should never replace an existing object.
+
+      KJ_REQUIRE(journal.txInProgress, "transaction already committed");
+
+      // Link temp file into staging.
+      uint64_t stagingId = journal.nextStagingId++;
+      journal.storage.linkTempIntoStaging(stagingId, tmpFd, attributes);
+
+      // Add the operation to the transaction.
+      entries.add();
+      Entry& entry = entries.back();
+      memset(&entry, 0, sizeof(entry));
+      entry.type = Entry::Type::CREATE_OBJECT;
+      entry.stagingId = stagingId;
+      entry.objectId = id;
+      entry.xattr = attributes;
+
+      // Update cache.
+      CacheEntry& cache = journal.cache[id];
+      cache.lastUpdate = journal.journalEnd + entries.size() * sizeof(Entry);
+      cache.location = CacheEntry::Location::STAGING;
+      cache.stagingId = stagingId;
+      cache.xattr = attributes;
+      journal.cacheDropQueue.push({cache.lastUpdate, entry.objectId});
+    }
+
     void updateObject(ObjectId id, const Xattr& attributes, int tmpFd) {
       // Replace the object on disk with the file referenced by `tmpFd` with the given attributes.
 
@@ -363,11 +462,16 @@ public:
         KJ_IF_MAYBE(fd, journal.storage.openObject(id)) {
           KJ_SYSCALL(fgetxattr(*fd, Xattr::NAME, &cache.xattr, sizeof(cache.xattr)));
         } else {
-          // Apparently this object isn't on disk. Don't assert-fail because it will bring down
-          // the server since we're in the middle of a transaction.
-          KJ_LOG(ERROR, "asked to delete object that doesn't exist?");
+          // Apparently this object isn't on disk. This can happen if the parent (from which this
+          // object is being deleted) has itself already been deleted asynchronously. We can safely
+          // set any value here because updating the parent's size is irrelevant at this point.
         }
       }
+
+      // Prevent later changes to the object or its children (if there are still live refs) from
+      // affecting the owner.
+      cache.xattr.owner = nullptr;
+
       return cache.xattr.transitiveBlockCount;
     }
 
@@ -424,10 +528,19 @@ private:
     // If recovering from a failure, ignore an incomplete transaction at the end of the journal.
 
     enum class Type :uint8_t {
+      CREATE_OBJECT,
+      // Move the staging file identified by `stagingId` into main storage, first setting the xattrs
+      // on the staging file, then rename()ing it into place, expecting that there is no existing
+      // file there already. If no such staging file exists, this operation probably already
+      // occurred; ignore it.
+
       UPDATE_OBJECT,
       // Replace the object with a staging file identified by `stagingId`, first setting the xattrs
       // on the staging file, then rename()ing it into place. If no such staging file exists, this
       // operation probably already occurred; ignore it.
+      //
+      // If there is not already a file in the target location, assume it was asynchronously
+      // deleted and immediately delete this file as well.
 
       UPDATE_XATTR,
       // Update the xattrs on an existing file.
@@ -705,8 +818,11 @@ private:
 
   void executeEntry(const Entry& entry) {
     switch (entry.type) {
+      case Entry::Type::CREATE_OBJECT:
+        storage.createFromStagingIfExists(entry.stagingId, entry.objectId, entry.xattr);
+        break;
       case Entry::Type::UPDATE_OBJECT:
-        storage.finalizeStagingIfExists(entry.stagingId, entry.objectId, entry.xattr);
+        storage.replaceFromStagingIfExists(entry.stagingId, entry.objectId, entry.xattr);
         break;
       case Entry::Type::UPDATE_XATTR:
         storage.setAttributesIfExists(entry.objectId, entry.xattr);
@@ -767,6 +883,11 @@ public:
   void modifyTransitiveSize(ObjectId id, int64_t deltaBlocks, Journal::Transaction& txn);
   // Update the transitive size of the given object and its parents, adding `deltaBlocks` to each.
   // Call this when a new child was added.
+
+  void disowned(ObjectId id);
+  // Notes that the given object ID has been disowned by its owner. If the object is live, it needs
+  // to have its owner reference cleared so that any later changes to the object's size don't
+  // cause the owner to be updated.
 
 private:
   Journal& journal;
@@ -876,36 +997,54 @@ public:
 
     const ObjectId& getId() const { return object.getId(); }
 
-    uint64_t commit(ObjectId owner, Journal::Transaction& transaction) {
-      // Add an operation to the transaction which officially adopts this object.
+    uint64_t prepCommit(ObjectId owner) {
+      // Must call before commit() (but after opening the transaction) to prepare all Xattrs with
+      // correct transitive size numbers.
       //
-      // Returns the transitive block count just adopted.
+      // Returns the transitive block count for the adopted object.
 
+      KJ_ASSERT(!prepped);
+      prepped = true;
+
+      object.xattr.owner = owner;
+
+      // Prep children.
+      for (auto& adoption: KJ_ASSERT_NONNULL(object.currentData).transitiveAdoptions) {
+        object.xattr.transitiveBlockCount += adoption.prepCommit(object.id);
+      }
+
+      return object.xattr.transitiveBlockCount;
+    }
+
+    void commit(Journal::Transaction& transaction) {
+      // Add an operation to the transaction which officially adopts this object.
+
+      KJ_ASSERT(prepped);
       KJ_ASSERT(!committed);
       committed = true;
       object.state = COMMITTED;
 
-      object.xattr.owner = owner;
-
       auto& data = KJ_ASSERT_NONNULL(object.currentData);
 
+      // Currently, only adopting of newly-created objects is allowed, so we know data.fd is a
+      // temp file, and we should call createObject() here. Later, when we support ownership
+      // transfers, this may not be true.
+      transaction.createObject(object.id, object.xattr, data.fd);
+
+      // Recurse to all children. Note that it's important to move the parent into place before
+      // children because the code that finalizes an object will immediately delete it if the
+      // parent doesn't exist.
       for (auto& adoption: data.transitiveAdoptions) {
-        object.xattr.transitiveBlockCount += adoption.commit(object.id, transaction);
+        adoption.commit(transaction);
       }
       data.transitiveAdoptions = nullptr;
-
-      // Currently, only adopting of newly-created objects is allowed, so we know data.fd is a
-      // temp file, and we should call updateObject() here. Later, when we support ownership
-      // transfers, this may not be true.
-      transaction.updateObject(object.id, object.xattr, data.fd);
-
-      return object.xattr.transitiveBlockCount;
     }
 
   private:
     ObjectBase& object;
     capnp::Capability::Client cap;  // Make sure `object` can't be deleted.
     bool committed;
+    bool prepped = false;
   };
 
 protected:
@@ -962,7 +1101,7 @@ protected:
             kj::Array<kj::Maybe<SavedChild>> results) mutable -> kj::Promise<void> {
       if (commitedSetSeqnum > seqnum) {
         // Some later set() was already written to disk.
-        // TODO(soon): Drop references that we just saved.
+        // TODO(leak): Drop references that we just saved.
         return kj::READY_NOW;
       }
 
@@ -1052,10 +1191,14 @@ protected:
         int64_t deltaBlocks = newBlockCount - xattr.accountedBlockCount;
 
         for (auto& adoption: adoptions) {
-          deltaBlocks += adoption.commit(id, txn);
+          deltaBlocks += adoption.prepCommit(id);
+        }
+        for (auto& adoption: adoptions) {
+          adoption.commit(txn);
         }
         for (auto& disown: disowned) {
           deltaBlocks -= txn.moveToDeathRow(disown);
+          factory->disowned(disown);
         }
 
         if (deltaBlocks < 0 && -deltaBlocks > xattr.transitiveBlockCount) {
@@ -1094,7 +1237,7 @@ protected:
         return kj::READY_NOW;
       }
 
-      // TODO(soon): Call drop() on all references from the old object. These don't have to
+      // TODO(leak): Call drop() on all references from the old object. These don't have to
       //   succeed.
       // TODO(perf): Detect which external references from the old capability are being re-saved
       //   in the new capability to avoid a redundant save/drop pair.
@@ -1321,6 +1464,15 @@ public:
     context.releaseParams();
     getStoredObject(context);
     context.getResults().setSetter(kj::heap<SetterImpl>(*this, thisCap(), version));
+    return kj::READY_NOW;
+  }
+
+  // TODO(soon): Implement asGetter().
+
+  kj::Promise<void> asSetter(AsSetterContext context) override {
+    context.releaseParams();
+    context.getResults(capnp::MessageSize { 4, 1 })
+        .setSetter(kj::heap<SetterImpl>(*this, thisCap()));
     return kj::READY_NOW;
   }
 
@@ -1616,6 +1768,13 @@ void FilesystemStorage::ObjectFactory::modifyTransitiveSize(
   modifyTransitiveSize(xattr->owner, deltaBlocks, txn);
 }
 
+void FilesystemStorage::ObjectFactory::disowned(ObjectId id) {
+  auto iter = objectCache.find(id);
+  if (iter != objectCache.end()) {
+    iter->second->getXattrRef().owner = nullptr;
+  }
+}
+
 template <typename T>
 auto FilesystemStorage::ObjectFactory::registerObject(kj::Own<T> object)
     -> ClientObjectPair<typename T::Serves, T> {
@@ -1642,6 +1801,7 @@ FilesystemStorage::FilesystemStorage(
       stagingDirFd(openOrCreateDirectory(directoryFd, "staging")),
       deathRowFd(openOrCreateDirectory(directoryFd, "death-row")),
       rootsFd(openOrCreateDirectory(directoryFd, "roots")),
+      deathRow(kj::heap<DeathRow>(*this)),
       journal(kj::heap<Journal>(*this, eventPort,
           sandstorm::raiiOpenAt(directoryFd, "journal", O_RDWR | O_CREAT | O_CLOEXEC))),
       factory(kj::refcounted<ObjectFactory>(*journal, timer, kj::mv(restorer))) {}
@@ -1681,7 +1841,8 @@ kj::Promise<void> FilesystemStorage::setImpl(kj::String name, OwnedStorage<>::Cl
         rootMessage);
 
     Journal::Transaction txn(*journal);
-    adoption.commit(nullptr, txn);
+    adoption.prepCommit(nullptr);
+    adoption.commit(txn);
     return txn.commit();
   });
 }
@@ -1763,10 +1924,101 @@ void FilesystemStorage::deleteAllStaging() {
   }
 }
 
-void FilesystemStorage::finalizeStagingIfExists(
+void FilesystemStorage::createFromStagingIfExists(
     uint64_t stagingId, ObjectId finalId, const Xattr& attributes) {
   auto stagingName = hex64(stagingId);
   auto finalName = finalId.filename('o');
+
+  // Verify that file doesn't already exist in main.
+  //
+  // TODO(cleanup): Once we can assume kernel 3.15, we can do this atomically with renameat2().
+  KJ_ASSERT(faccessat(mainDirFd, finalName.begin(), F_OK, 0) != 0,
+      "can't create storage object: an object with that ID already exists");
+
+  if (attributes.owner != nullptr) {
+    // Verify that owner exists. If the owner was moved directly to death row, then we need to
+    // move directly to death row as well, because the death row thread may have already deleted
+    // the owner and failed to find this child.
+    auto ownerName = attributes.owner.filename('o');
+  retryAccess:
+    if (faccessat(mainDirFd, ownerName.begin(), F_OK, 0) != 0) {
+      int error = errno;
+      if (error == EINTR) {
+        goto retryAccess;
+      } else if (error == ENOENT) {
+        // Owner no longer exists, so we should just delete. Note that any children of this object
+        // which we attempt to create later will find that this object doesn't exist and therefore
+        // will delete themselves as well, so there's no need to move to death row.
+      retryUnlink:
+        if (unlinkat(stagingDirFd, stagingName.begin(), 0) != 0) {
+          int error = errno;
+          if (error == EINTR) {
+            goto retryUnlink;
+          } else if (error == ENOENT) {
+            // acceptable; file already deleted by someone else
+          } else {
+            KJ_FAIL_SYSCALL("unlinkat(stagingDirFd, stagingName)", error, stagingName);
+          }
+        }
+        return;
+      } else {
+        KJ_FAIL_SYSCALL("faccessat", error, ownerName.begin());
+      }
+    }
+  }
+
+retry:
+  if (renameat(stagingDirFd, stagingName.begin(), mainDirFd, finalName.begin()) < 0) {
+    int error = errno;
+    switch (error) {
+      case EINTR:
+        goto retry;
+      case ENOENT:
+        // Acceptable;
+        break;
+      default:
+        KJ_FAIL_SYSCALL("renameat(staging -> final)", error,
+                        fixedStr(stagingName), fixedStr(finalName));
+    }
+  }
+}
+
+void FilesystemStorage::replaceFromStagingIfExists(
+    uint64_t stagingId, ObjectId finalId, const Xattr& attributes) {
+  auto stagingName = hex64(stagingId);
+  auto finalName = finalId.filename('o');
+
+  // First check that the old file still exists, since we're updating. If it doesn't, it was
+  // probably deleted, and the new copy should also be immediately deleted.
+  //
+  // Note that since all modifications are done by the journal thread we can assume no race between
+  // faccessat() and renameat(), but if races were possible we could use renameat2() (new feature
+  // in Linux 3.15).
+retryAccess:
+  if (faccessat(mainDirFd, finalName.begin(), F_OK, 0) != 0) {
+    int error = errno;
+    if (error == EINTR) {
+      goto retryAccess;
+    } else if (error == ENOENT) {
+      // Old file no longer exists. Delete the replacement immediately. No need for death row since
+      // no new children can be created while the parent doesn't exist anyway.
+    retryUnlink:
+      if (unlinkat(stagingDirFd, stagingName.begin(), 0) != 0) {
+        int error = errno;
+        if (error == EINTR) {
+          goto retryUnlink;
+        } else if (error == ENOENT) {
+          // acceptable; file already deleted by someone else
+        } else {
+          KJ_FAIL_SYSCALL("unlinkat(stagingDirFd, stagingName)", error, stagingName);
+        }
+      }
+      return;
+    } else {
+      KJ_FAIL_SYSCALL("faccessat", error, finalName.begin());
+    }
+  }
+
 retry:
   if (renameat(stagingDirFd, stagingName.begin(), mainDirFd, finalName.begin()) < 0) {
     int error = errno;
@@ -1802,10 +2054,13 @@ retry:
   }
 }
 
-void FilesystemStorage::moveToDeathRowIfExists(ObjectId id) {
+void FilesystemStorage::moveToDeathRowIfExists(ObjectId id, bool notify) {
   auto name = id.filename('o');
+
 retry:
-  if (renameat(mainDirFd, name.begin(), deathRowFd, name.begin()), name.begin() < 0) {
+  if (renameat(mainDirFd, name.begin(), deathRowFd, name.begin()) == 0) {
+    if (notify) deathRow->notifyNewInmates();
+  } else {
     int error = errno;
     switch (error) {
       case EINTR:
