@@ -64,12 +64,16 @@ public:
   virtual kj::Promise<kj::Array<MachineId>> listMachines() KJ_WARN_UNUSED_RESULT = 0;
   // List all machines currently running in the cluster.
 
-  virtual kj::Promise<VatPath::Reader> start(MachineId id,
+  virtual kj::Promise<void> boot(MachineId id) = 0;
+  // Boot the given machine.
+
+  virtual kj::Promise<VatPath::Reader> run(MachineId id,
       VatId::Reader masterVatId, bool requireRestartProcess) KJ_WARN_UNUSED_RESULT = 0;
-  // Start the given machine if it is not already started. If `requireRestartProcess` is true,
-  // then if the machine is already running, all blackrock processes on it should be immediately
-  // terminated and restarted using the latest version. Note that `requireRestartProcess` is often
-  // much faster than stop() followed by start(), but not as reliable.
+  // Run the Blackrock process on the given machine. If `requireRestartProcess` is true,
+  // then all blackrock processes on the machine should be immediately terminated and restarted.
+  // Depending on the driver, this may or may not have the effect of updating the binary to the
+  // latest version. Note that `requireRestartProcess` is often much faster than stop() followed
+  // by boot() and run(), but not as reliable.
 
   virtual kj::Promise<void> stop(MachineId id) KJ_WARN_UNUSED_RESULT = 0;
   // Shut down the given machine.
@@ -85,8 +89,9 @@ public:
 
   SimpleAddress getMasterBindAddress() override;
   kj::Promise<kj::Array<MachineId>> listMachines() override;
-  kj::Promise<VatPath::Reader> start(MachineId id, VatId::Reader masterVatId,
-                                     bool requireRestartProcess) override;
+  kj::Promise<void> boot(MachineId id) override;
+  kj::Promise<VatPath::Reader> run(MachineId id, VatId::Reader masterVatId,
+                                   bool requireRestartProcess) override;
   kj::Promise<void> stop(MachineId id) override;
 
 private:

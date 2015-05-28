@@ -75,11 +75,14 @@ void runMaster(kj::AsyncIoContext& ioContext, ComputeDriver& driver, MasterConfi
 
   KJ_LOG(INFO, "examining currently-running machines...");
 
-  // Shut down any machines that we don't need anymore.
+  // Shut down any machines that we don't need anymore and record which others are started.
+  std::set<ComputeDriver::MachineId> alreadyRunning;
   for (auto& machine: driver.listMachines().wait(ioContext.waitScope)) {
     if (machine.index >= expectedCounts[machine.type]) {
       KJ_LOG(INFO, "STOPPING", machine);
       startupTasks.add(driver.stop(machine));
+    } else {
+      alreadyRunning.insert(machine);
     }
   }
 
@@ -90,8 +93,14 @@ void runMaster(kj::AsyncIoContext& ioContext, ComputeDriver& driver, MasterConfi
     } else {
       KJ_LOG(INFO, "STARTING", id);
     }
-    startupTasks.add(driver.start(id, network.getSelf().getId(), shouldRestartNode)
-        .then([id,&pathSlot](auto path) {
+
+    kj::Promise<void> promise = alreadyRunning.count(id) > 0
+        ? kj::Promise<void>(kj::READY_NOW)
+        : driver.boot(id);
+
+    startupTasks.add(promise.then([id, &network, shouldRestartNode, &driver]() {
+      return driver.run(id, network.getSelf().getId(), shouldRestartNode);
+    }).then([id,&pathSlot](auto path) {
       KJ_LOG(INFO, "READY", id);
       pathSlot = path;
     }));
@@ -314,49 +323,50 @@ auto VagrantDriver::listMachines() -> kj::Promise<kj::Array<MachineId>> {
   });
 }
 
-kj::Promise<VatPath::Reader> VagrantDriver::start(
+kj::Promise<void> VagrantDriver::boot(MachineId id) {
+  return subprocessSet.waitForSuccess({"vagrant", "up", kj::str(id)});
+}
+
+kj::Promise<VatPath::Reader> VagrantDriver::run(
     MachineId id, blackrock::VatId::Reader masterVatId, bool requireRestartProcess) {
-  return subprocessSet.waitForSuccess({"vagrant", "up", kj::str(id)})
-      .then([this,id,requireRestartProcess,masterVatId]() {
-    kj::String name = kj::str(id);
+  kj::String name = kj::str(id);
 
-    int fds[2];
-    KJ_SYSCALL(pipe2(fds, O_CLOEXEC));
-    kj::AutoCloseFd stdinReadEnd(fds[0]);
-    auto stdinWriteEnd = ioProvider.wrapOutputFd(fds[1],
-        kj::LowLevelAsyncIoProvider::Flags::TAKE_OWNERSHIP |
-        kj::LowLevelAsyncIoProvider::Flags::ALREADY_CLOEXEC);
-    KJ_SYSCALL(pipe2(fds, O_CLOEXEC));
-    kj::AutoCloseFd stdoutWriteEnd(fds[1]);
-    auto stdoutReadEnd = ioProvider.wrapInputFd(fds[0],
-        kj::LowLevelAsyncIoProvider::Flags::TAKE_OWNERSHIP |
-        kj::LowLevelAsyncIoProvider::Flags::ALREADY_CLOEXEC);
+  int fds[2];
+  KJ_SYSCALL(pipe2(fds, O_CLOEXEC));
+  kj::AutoCloseFd stdinReadEnd(fds[0]);
+  auto stdinWriteEnd = ioProvider.wrapOutputFd(fds[1],
+      kj::LowLevelAsyncIoProvider::Flags::TAKE_OWNERSHIP |
+      kj::LowLevelAsyncIoProvider::Flags::ALREADY_CLOEXEC);
+  KJ_SYSCALL(pipe2(fds, O_CLOEXEC));
+  kj::AutoCloseFd stdoutWriteEnd(fds[1]);
+  auto stdoutReadEnd = ioProvider.wrapInputFd(fds[0],
+      kj::LowLevelAsyncIoProvider::Flags::TAKE_OWNERSHIP |
+      kj::LowLevelAsyncIoProvider::Flags::ALREADY_CLOEXEC);
 
-    auto addr = kj::str(logSinkAddress, '/', name);
-    kj::Vector<kj::StringPtr> args;
-    args.addAll(kj::ArrayPtr<const kj::StringPtr>({
-        "vagrant", "ssh", name, "--", "sudo", "/vagrant/bin/blackrock",
-        "slave", "--log", addr, "if4:eth1"}));
-    if (requireRestartProcess) args.add("-r");
-    sandstorm::Subprocess::Options options(args.asPtr());
-    options.stdin = stdinReadEnd;
-    options.stdout = stdoutWriteEnd;
-    auto exitPromise = subprocessSet.waitForSuccess(kj::mv(options));
+  auto addr = kj::str(logSinkAddress, '/', name);
+  kj::Vector<kj::StringPtr> args;
+  args.addAll(kj::ArrayPtr<const kj::StringPtr>({
+      "vagrant", "ssh", name, "--", "sudo", "/vagrant/bin/blackrock",
+      "slave", "--log", addr, "if4:eth1"}));
+  if (requireRestartProcess) args.add("-r");
+  sandstorm::Subprocess::Options options(args.asPtr());
+  options.stdin = stdinReadEnd;
+  options.stdout = stdoutWriteEnd;
+  auto exitPromise = subprocessSet.waitForSuccess(kj::mv(options));
 
-    auto message = kj::heap<capnp::MallocMessageBuilder>(masterVatId.totalSize().wordCount + 4);
-    message->setRoot(masterVatId);
+  auto message = kj::heap<capnp::MallocMessageBuilder>(masterVatId.totalSize().wordCount + 4);
+  message->setRoot(masterVatId);
 
-    auto& stdoutReadEndRef = *stdoutReadEnd;
-    return capnp::writeMessage(*stdinWriteEnd, *message)
-        .attach(kj::mv(stdinWriteEnd), kj::mv(message))
-        .then([&stdoutReadEndRef]() {
-      return capnp::readMessage(stdoutReadEndRef);
-    }).then([this,id,KJ_MVCAP(exitPromise),KJ_MVCAP(stdoutReadEnd)](
-        kj::Own<capnp::MessageReader> reader) mutable {
-      auto path = reader->getRoot<VatPath>();
-      vatPaths[id] = kj::mv(reader);
-      return exitPromise.then([path]() { return path; });
-    });
+  auto& stdoutReadEndRef = *stdoutReadEnd;
+  return capnp::writeMessage(*stdinWriteEnd, *message)
+      .attach(kj::mv(stdinWriteEnd), kj::mv(message))
+      .then([&stdoutReadEndRef]() {
+    return capnp::readMessage(stdoutReadEndRef);
+  }).then([this,id,KJ_MVCAP(exitPromise),KJ_MVCAP(stdoutReadEnd)](
+      kj::Own<capnp::MessageReader> reader) mutable {
+    auto path = reader->getRoot<VatPath>();
+    vatPaths[id] = kj::mv(reader);
+    return exitPromise.then([path]() { return path; });
   });
 }
 
