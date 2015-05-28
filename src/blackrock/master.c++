@@ -346,7 +346,7 @@ kj::Promise<VatPath::Reader> VagrantDriver::run(
   auto addr = kj::str(logSinkAddress, '/', name);
   kj::Vector<kj::StringPtr> args;
   args.addAll(kj::ArrayPtr<const kj::StringPtr>({
-      "vagrant", "ssh", name, "--", "sudo", "/vagrant/bin/blackrock",
+      "vagrant", "ssh", name, "--", "sudo", "/blackrock/bin/blackrock",
       "slave", "--log", addr, "if4:eth1"}));
   if (requireRestartProcess) args.add("-r");
   sandstorm::Subprocess::Options options(args.asPtr());
