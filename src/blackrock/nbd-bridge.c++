@@ -35,10 +35,8 @@ constexpr uint64_t VOLUME_SIZE = 1ull << 40;
 // wants us to tell it a size, so we'll claim 1TB. We will actually create a much smaller
 // filesystem in this space, only growing it if needed.
 
-constexpr uint MAX_NBDS = 17;
+constexpr uint MAX_NBDS = 4093;
 // Maximum number of NBD devices. Prime so that a random probing interval will hit all slots.
-//
-// TODO(someday): Can we jack this up to, say, 65521?
 
 constexpr uint MAX_RPC_BLOCKS = 512;
 // Maximum number of blocks we'll transfer in a single Volume RPC.
