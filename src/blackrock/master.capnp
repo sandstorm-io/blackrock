@@ -15,7 +15,7 @@ struct MasterConfig {
 }
 
 const testConfig :MasterConfig = (
-  workerCount = 1,
+  workerCount = 2,
   frontendConfig = (
     baseUrl = "http://localrock.sandstorm.io:6080",
     wildcardHost = "*.localrock.sandstorm.io:6080",
