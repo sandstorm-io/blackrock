@@ -114,10 +114,18 @@ kj::Promise<void> GceDriver::boot(MachineId id) {
       { "gcloud", "compute", "instances", "create", idStr,
         "--zone", zone, "--image", imageName, "-q" });
   switch (id.type) {
-    case ComputeDriver::MachineType::STORAGE:
+    case ComputeDriver::MachineType::STORAGE: {
+      // Attach necessary disk.
+      auto param = kj::str("name=", id, "-data,mode=rw,device-name=blackrock-storage");
+      scratch.add(kj::mv(param));
+      args.add("--disk");
+      args.add(param);
+      break;
+    }
+
     case ComputeDriver::MachineType::MONGO: {
       // Attach necessary disk.
-      auto param = kj::str("name=", id, "-data,mode=rw,device-name=blackrock-disk");
+      auto param = kj::str("name=", id, "-data,mode=rw,device-name=blackrock-mongo");
       scratch.add(kj::mv(param));
       args.add("--disk");
       args.add(param);
