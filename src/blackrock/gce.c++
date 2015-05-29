@@ -29,12 +29,21 @@ kj::Promise<kj::String> readAllAsync(kj::AsyncInputStream& input,
   });
 }
 
+static kj::String getImageName() {
+  char buffer[256];
+  ssize_t n;
+  KJ_SYSCALL(n = readlink("/proc/self/exe", buffer, sizeof(buffer) - 1));
+  buffer[n] = '\0';
+  kj::StringPtr exeName(buffer);
+  return sandstorm::trim(exeName.slice(KJ_ASSERT_NONNULL(exeName.findLast('/')) + 1));
+}
+
 }  // namespace
 
 GceDriver::GceDriver(sandstorm::SubprocessSet& subprocessSet,
                      kj::LowLevelAsyncIoProvider& ioProvider,
-                     kj::StringPtr imageName, kj::StringPtr zone)
-    : subprocessSet(subprocessSet), ioProvider(ioProvider), imageName(imageName), zone(zone),
+                     GceConfig::Reader config)
+    : subprocessSet(subprocessSet), ioProvider(ioProvider), config(config), image(getImageName()),
       masterBindAddress(SimpleAddress::getInterfaceAddress(AF_INET, "eth0")),
       logSink(nullptr), logTask(nullptr), logSinkAddress(masterBindAddress) {
   // Create socket for the log sink acceptor.
@@ -78,10 +87,8 @@ auto GceDriver::listMachines() -> kj::Promise<kj::Array<MachineId>> {
       kj::LowLevelAsyncIoProvider::Flags::ALREADY_CLOEXEC);
 
   // TODO(cleanup): Use `--format json` here (but then we need a json parser).
-  sandstorm::Subprocess::Options options({
-      "gcloud", "compute", "instances", "list", "--format", "text", "-q"});
-  options.stdout = writeEnd;
-  auto exitPromise = subprocessSet.waitForSuccess(kj::mv(options));
+  auto exitPromise = gceCommand({"instances", "list", "--format", "text", "-q"},
+                                STDIN_FILENO, writeEnd);
 
   auto outputPromise = readAllAsync(*input);
   return outputPromise.attach(kj::mv(input))
@@ -96,7 +103,12 @@ auto GceDriver::listMachines() -> kj::Promise<kj::Array<MachineId>> {
 
       // Look for "name:" lines, which are instance names. Ignore everything else.
       if (text.startsWith("name:")) {
-        result.add(MachineId(sandstorm::trim(text.slice(strlen("name:"), eol))));
+        auto name = sandstorm::trim(text.slice(strlen("name:"), eol));
+        if (!name.startsWith("master") &&
+            !name.startsWith("build") &&
+            !name.startsWith("nginx")) {
+          result.add(MachineId(name));
+        }
       }
 
       text = text.slice(eol + 1);
@@ -111,24 +123,22 @@ kj::Promise<void> GceDriver::boot(MachineId id) {
   kj::Vector<kj::String> scratch;
   auto idStr = kj::str(id);
   args.addAll(std::initializer_list<const kj::StringPtr>
-      { "gcloud", "compute", "instances", "create", idStr,
-        "--zone", zone, "--image", imageName, "-q" });
+      { "instances", "create", idStr,
+        "--zone", config.getZone(), "--image", image, "--no-scopes", "-q" });
   switch (id.type) {
     case ComputeDriver::MachineType::STORAGE: {
       // Attach necessary disk.
-      auto param = kj::str("name=", id, "-data,mode=rw,device-name=blackrock-storage");
-      scratch.add(kj::mv(param));
-      args.add("--disk");
+      auto param = kj::str("--disk=name=", id, "-data,mode=rw,device-name=blackrock-storage");
       args.add(param);
+      scratch.add(kj::mv(param));
       break;
     }
 
     case ComputeDriver::MachineType::MONGO: {
       // Attach necessary disk.
-      auto param = kj::str("name=", id, "-data,mode=rw,device-name=blackrock-mongo");
-      scratch.add(kj::mv(param));
-      args.add("--disk");
+      auto param = kj::str("--disk=name=", id, "-data,mode=rw,device-name=blackrock-mongo");
       args.add(param);
+      scratch.add(kj::mv(param));
       break;
     }
 
@@ -142,7 +152,7 @@ kj::Promise<void> GceDriver::boot(MachineId id) {
       break;
   }
 
-  return subprocessSet.waitForSuccess(sandstorm::Subprocess::Options(args.asPtr()));
+  return gceCommand(args);
 }
 
 kj::Promise<VatPath::Reader> GceDriver::run(
@@ -162,15 +172,14 @@ kj::Promise<VatPath::Reader> GceDriver::run(
       kj::LowLevelAsyncIoProvider::Flags::ALREADY_CLOEXEC);
 
   auto addr = kj::str(logSinkAddress, '/', name);
+  auto target = kj::str("root@", name);
   kj::Vector<kj::StringPtr> args;
+  auto command = kj::str("/blackrock/bin/blackrock slave --log ", addr, " if4:eth0");
   args.addAll(kj::ArrayPtr<const kj::StringPtr>({
-      "gcloud", "compute", "ssh", kj::str("root@", name), "--", "/blackrock/bin/blackrock",
-      "slave", "--log", addr, "if4:eth0", "-q"}));
+      "ssh", target, "--command", command, "-q"}));
   if (requireRestartProcess) args.add("-r");
-  sandstorm::Subprocess::Options options(args.asPtr());
-  options.stdin = stdinReadEnd;
-  options.stdout = stdoutWriteEnd;
-  auto exitPromise = subprocessSet.waitForSuccess(kj::mv(options));
+
+  auto exitPromise = gceCommand(args, stdinReadEnd, stdoutWriteEnd);
 
   auto message = kj::heap<capnp::MallocMessageBuilder>(masterVatId.totalSize().wordCount + 4);
   message->setRoot(masterVatId);
@@ -189,8 +198,34 @@ kj::Promise<VatPath::Reader> GceDriver::run(
 }
 
 kj::Promise<void> GceDriver::stop(MachineId id) {
-  return subprocessSet.waitForSuccess({
-      "gcloud", "compute", "instances", "delete", kj::str(id), "-q"});
+  return gceCommand({"instances", "delete", kj::str(id), "-q"});
+}
+
+kj::Promise<void> GceDriver::gceCommand(kj::ArrayPtr<const kj::StringPtr> args,
+                                        int stdin, int stdout) {
+  auto fullArgs = kj::heapArrayBuilder<const kj::StringPtr>(args.size() + 4);
+  fullArgs.add("gcloud");
+  fullArgs.add("--project");
+  fullArgs.add(config.getProject());
+  fullArgs.add("compute");
+  fullArgs.addAll(args);
+
+  kj::Vector<kj::StringPtr> env;
+  auto newEnv = kj::str("CLOUDSDK_COMPUTE_ZONE=", config.getZone());
+  env.add(newEnv);
+  for (char** envp = environ; *envp != nullptr; ++envp) {
+    kj::StringPtr e = *envp;
+    if (!e.startsWith("CLOUDSDK_COMPUTE_ZONE=")) {
+      env.add(e);
+    }
+  }
+
+  sandstorm::Subprocess::Options options(fullArgs.finish());
+  KJ_DBG(kj::strArray(options.argv, " "));
+  options.stdin = stdin;
+  options.stdout = stdout;
+  options.environment = kj::ArrayPtr<const kj::StringPtr>(env);
+  return subprocessSet.waitForSuccess(kj::mv(options));
 }
 
 } // namespace blackrock

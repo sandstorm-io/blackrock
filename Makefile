@@ -47,9 +47,9 @@ update-deps:
 
 blackrock.tar.xz: bundle
 	@$(call color,compress release bundle)
-	@tar c --transform="s,^,blackrock/," bin/blackrock bundle | xz -c -9e > blackrock.tar.xz
+	@tar c --transform="s,^,blackrock/,S" bin/blackrock bundle | xz -c -9e > blackrock.tar.xz
 
 blackrock-fast.tar.xz: bundle
 	@$(call color,compress fast bundle)
-	@tar c --transform="s,^,blackrock/," bin/blackrock bundle | xz -c -0 > blackrock-fast.tar.xz
+	@tar c --transform="s,^,blackrock/,S" bin/blackrock bundle | xz -c -0 > blackrock-fast.tar.xz
 

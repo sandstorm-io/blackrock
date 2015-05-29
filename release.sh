@@ -101,5 +101,4 @@ doit gce disks delete -q build
 
 # also upload to master
 doit gce copy-files bin/blackrock root@master:/blackrock/bin/blackrock-$BUILDSTAMP
-doit gce ssh root@master --command "cd /blackrock && ln -sfT bin/blackrock-$BUILDSTAMP latest.next && mv latest.next latest && service blackrock reload"
 

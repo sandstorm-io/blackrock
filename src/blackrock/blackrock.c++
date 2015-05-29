@@ -30,6 +30,7 @@
 #include "local-persistent-registry.h"
 #include <stdio.h>
 #include "nbd-bridge.h"
+#include "gce.h"
 
 namespace blackrock {
 
@@ -485,12 +486,21 @@ private:
   bool runMaster(kj::StringPtr configFile) {
     capnp::StreamFdMessageReader configReader(
         sandstorm::raiiOpen(configFile, O_RDONLY | O_CLOEXEC));
+    auto config = configReader.getRoot<MasterConfig>();
 
     auto ioContext = kj::setupAsyncIo();
     sandstorm::SubprocessSet subprocessSet(ioContext.unixEventPort);
-    VagrantDriver driver(subprocessSet, *ioContext.lowLevelProvider);
-    blackrock::runMaster(ioContext, driver, configReader.getRoot<MasterConfig>(),
-                         shouldRestart, machinesToRestart);
+
+    kj::Own<ComputeDriver> driver;
+    switch (config.which()) {
+      case MasterConfig::VAGRANT:
+        driver = kj::heap<VagrantDriver>(subprocessSet, *ioContext.lowLevelProvider);
+        break;
+      case MasterConfig::GCE:
+        driver = kj::heap<GceDriver>(subprocessSet, *ioContext.lowLevelProvider, config.getGce());
+        break;
+    }
+    blackrock::runMaster(ioContext, *driver, config, shouldRestart, machinesToRestart);
     KJ_UNREACHABLE;
   }
 
