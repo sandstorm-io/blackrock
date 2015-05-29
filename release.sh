@@ -21,6 +21,21 @@ case $1 in
     # We always do a Blackrock prod release shortly after a Sandstorm release.
     BUILD=$(curl -s https://install.sandstorm.io/dev)
     BUILDSTAMP=$BUILD
+
+    if (grep -r KJ_DBG src/* | egrep -v '/(debug(-test)?|exception)[.]'); then
+      echo '*** Error:  There are instances of KJ_DBG in the code.' >&2
+      exit 1
+    fi
+
+    if egrep -r 'TODO\(now\)' src/*; then
+      echo '*** Error:  There are release-blocking TODOs in the code.' >&2
+      exit 1
+    fi
+
+    if [ "$CONFIRM_EACH" == "no" ] && [ "x$(git status --porcelain)" != "x" ]; then
+      echo "Please commit changes to git before releasing." >&2
+      exit 1
+    fi
     ;;
   * )
     echo "no such target: $1" >&2
@@ -73,23 +88,7 @@ doit() {
   fi
 }
 
-if (grep -r KJ_DBG src/* | egrep -v '/debug(-test)?[.]'); then
-  echo '*** Error:  There are instances of KJ_DBG in the code.' >&2
-  exit 1
-fi
-
-if egrep -r 'TODO\(now\)' src/*; then
-  echo '*** Error:  There are release-blocking TODOs in the code.' >&2
-  exit 1
-fi
-
 doit make clean BUILD=$BUILD
-
-if [ "$CONFIRM_EACH" == "no" ] && [ "x$(git status --porcelain)" != "x" ]; then
-  echo "Please commit changes to git before releasing." >&2
-  exit 1
-fi
-
 doit make BUILD=$BUILD
 
 # Create a new image.
