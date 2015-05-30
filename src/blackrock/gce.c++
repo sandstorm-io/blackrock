@@ -124,41 +124,52 @@ kj::Promise<void> GceDriver::boot(MachineId id) {
   auto idStr = kj::str(id);
   args.addAll(std::initializer_list<const kj::StringPtr>
       { "instances", "create", idStr, "--image", image, "--no-scopes", "-q" });
-  kj::String startupScript;
+  kj::StringPtr startupScript;
+  kj::StringPtr instanceType;
   switch (id.type) {
     case ComputeDriver::MachineType::STORAGE: {
+      instanceType = config.getInstanceTypes().getStorage();
+
       // Attach necessary disk.
       auto param = kj::str("--disk=name=", id, "-data,mode=rw,device-name=blackrock");
       args.add(param);
       scratch.add(kj::mv(param));
-      startupScript = kj::str(
+      startupScript =
           "#! /bin/sh\n"
           "mkdir -p /var/blackrock/bundle/storage\n"
-          "mount /dev/disk/by-id/google-blackrock /var/blackrock/bundle/storage\n");
-      break;
-    }
-
-    case ComputeDriver::MachineType::MONGO: {
-      // Attach necessary disk.
-      auto param = kj::str("--disk=name=", id, "-data,mode=rw,device-name=blackrock");
-      args.add(param);
-      scratch.add(kj::mv(param));
-      startupScript = kj::str(
-          "#! /bin/sh\n"
-          "mkdir -p /var/blackrock/bundle/mongo\n"
-          "mount /dev/disk/by-id/google-blackrock /var/blackrock/bundle/mongo\n");
+          "mount /dev/disk/by-id/google-blackrock /var/blackrock/bundle/storage\n";
       break;
     }
 
     case ComputeDriver::MachineType::WORKER:
-      // Workers need the RAM.
-      args.add("--machine-type");
-      args.add("n1-highmem-2");
+      instanceType = config.getInstanceTypes().getWorker();
       break;
 
-    default:
+    case ComputeDriver::MachineType::COORDINATOR:
+      instanceType = config.getInstanceTypes().getCoordinator();
       break;
+
+    case ComputeDriver::MachineType::FRONTEND:
+      instanceType = config.getInstanceTypes().getFrontend();
+      break;
+
+    case ComputeDriver::MachineType::MONGO: {
+      instanceType = config.getInstanceTypes().getMongo();
+
+      // Attach necessary disk.
+      auto param = kj::str("--disk=name=", id, "-data,mode=rw,device-name=blackrock");
+      args.add(param);
+      scratch.add(kj::mv(param));
+      startupScript =
+          "#! /bin/sh\n"
+          "mkdir -p /var/blackrock/bundle/mongo\n"
+          "mount /dev/disk/by-id/google-blackrock /var/blackrock/bundle/mongo\n";
+      break;
+    }
   }
+
+  args.add("--machine-type");
+  args.add(instanceType);
 
   if (startupScript == nullptr) {
     return gceCommand(args);

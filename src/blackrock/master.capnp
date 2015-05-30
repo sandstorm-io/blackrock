@@ -24,6 +24,13 @@ struct VagrantConfig {}
 struct GceConfig {
   project @0 :Text;
   zone @1 :Text;
+  instanceTypes :group {
+    storage @2 :Text = "n1-standard-1";
+    worker @3 :Text = "n1-highmem-2";
+    coordinator @4 :Text = "n1-standard-1";
+    frontend @5 :Text = "n1-standard-1";
+    mongo @6 :Text = "n1-standard-1";
+  }
 }
 
 const vagrantConfig :MasterConfig = (
@@ -47,6 +54,13 @@ const gceTestConfig :MasterConfig = (
   ),
   gce = (
     project = "sandstorm-blackrock-testing",
-    zone = "us-central1-f"
+    zone = "us-central1-f",
+    instanceTypes = (
+      storage = "g1-small",
+      worker = "n1-standard-1",
+      coordinator = "g1-small",
+      frontend = "g1-small",
+      mongo = "g1-small"
+    )
   )
 );
