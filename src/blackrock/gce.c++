@@ -123,22 +123,30 @@ kj::Promise<void> GceDriver::boot(MachineId id) {
   kj::Vector<kj::String> scratch;
   auto idStr = kj::str(id);
   args.addAll(std::initializer_list<const kj::StringPtr>
-      { "instances", "create", idStr,
-        "--zone", config.getZone(), "--image", image, "--no-scopes", "-q" });
+      { "instances", "create", idStr, "--image", image, "--no-scopes", "-q" });
+  kj::String startupScript;
   switch (id.type) {
     case ComputeDriver::MachineType::STORAGE: {
       // Attach necessary disk.
-      auto param = kj::str("--disk=name=", id, "-data,mode=rw,device-name=blackrock-storage");
+      auto param = kj::str("--disk=name=", id, "-data,mode=rw,device-name=blackrock");
       args.add(param);
       scratch.add(kj::mv(param));
+      startupScript = kj::str(
+          "#! /bin/sh\n"
+          "mkdir -p /var/blackrock/bundle/storage\n"
+          "mount /dev/disk/by-id/google-blackrock /var/blackrock/bundle/storage\n");
       break;
     }
 
     case ComputeDriver::MachineType::MONGO: {
       // Attach necessary disk.
-      auto param = kj::str("--disk=name=", id, "-data,mode=rw,device-name=blackrock-mongo");
+      auto param = kj::str("--disk=name=", id, "-data,mode=rw,device-name=blackrock");
       args.add(param);
       scratch.add(kj::mv(param));
+      startupScript = kj::str(
+          "#! /bin/sh\n"
+          "mkdir -p /var/blackrock/bundle/mongo\n"
+          "mount /dev/disk/by-id/google-blackrock /var/blackrock/bundle/mongo\n");
       break;
     }
 
@@ -152,7 +160,20 @@ kj::Promise<void> GceDriver::boot(MachineId id) {
       break;
   }
 
-  return gceCommand(args);
+  if (startupScript == nullptr) {
+    return gceCommand(args);
+  } else {
+    // We'll pass the startup script via stdin.
+    args.add("--metadata-from-file=startup-script=/dev/stdin");
+
+    // No need for async pipe since the startup script almost certainly won't fill the pipe buffer
+    // anyhow, and even if it did, the tool immediately reads it before doing other stuff.
+    auto pipe = sandstorm::Pipe::make();
+    auto promise = gceCommand(args, pipe.readEnd);
+    pipe.readEnd = nullptr;
+    kj::FdOutputStream(kj::mv(pipe.writeEnd)).write(startupScript.begin(), startupScript.size());
+    return kj::mv(promise);
+  }
 }
 
 kj::Promise<VatPath::Reader> GceDriver::run(
