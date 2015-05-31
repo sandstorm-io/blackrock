@@ -17,7 +17,7 @@ case $1 in
   prod )
     GCE_PROJECT=sandstorm-blackrock
     export CLOUDSDK_COMPUTE_ZONE=us-central1-f
-    
+
     # We always do a Blackrock prod release shortly after a Sandstorm release.
     BUILD=$(curl -s https://install.sandstorm.io/dev)
     BUILDSTAMP=$BUILD
@@ -91,6 +91,10 @@ doit() {
 doit make clean BUILD=$BUILD
 doit make BUILD=$BUILD
 
+# Keep unstripped binary for debugging.
+mkdir -p dbg
+cp bin/blackrock.unstripped dbg/blackrock-$BUILDSTAMP
+
 # Create a new image.
 doit gce instances create build --image debian-7-backports
 doit gce copy-files blackrock.tar.xz root@build:/
@@ -99,6 +103,5 @@ doit gce instances delete build -q --keep-disks boot
 doit gce images create blackrock-$BUILDSTAMP --source-disk build
 doit gce disks delete -q build
 
-# also upload to master
+# Also upload to master.
 doit gce copy-files bin/blackrock root@master:/blackrock/bin/blackrock-$BUILDSTAMP
-

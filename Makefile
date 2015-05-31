@@ -4,7 +4,7 @@
 # your config.
 CC=clang
 CXX=clang++
-CFLAGS=-O2 -Wall
+CFLAGS=-O2 -g -Wall
 CXXFLAGS=$(CFLAGS)
 BUILD=0
 PARALLEL=$(shell nproc)
@@ -45,11 +45,17 @@ update-deps:
 	@$(call color,updating sandstorm)
 	@cd deps/sandstorm && echo "pulling sandstorm..." && git pull && make update-deps
 
-blackrock.tar.xz: bundle
+bin/blackrock.unstripped: bundle
+	# TODO(cleanup): This is ugly.
+	@$(call color,strip binaries)
+	@cp bin/blackrock bin/blackrock.unstripped
+	@strip bin/blackrock
+
+blackrock.tar.xz: bundle bin/blackrock.unstripped
 	@$(call color,compress release bundle)
 	@tar c --transform="s,^,blackrock/,S" bin/blackrock bundle | xz -c -9e > blackrock.tar.xz
 
-blackrock-fast.tar.xz: bundle
+blackrock-fast.tar.xz: bundle bin/blackrock.unstripped
 	@$(call color,compress fast bundle)
 	@tar c --transform="s,^,blackrock/,S" bin/blackrock bundle | xz -c -0 > blackrock-fast.tar.xz
 
