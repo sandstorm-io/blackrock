@@ -688,10 +688,7 @@ kj::MainBuilder::Validity MetaSupervisorMain::run() {
   NbdBinding binding(device, kj::AutoCloseFd(4), NbdAccessType::READ_WRITE);
 
   if (isNew) {
-    // Experimentally, filesystem overhead (count of non-zero blocks after initialization) for
-    // ext4 seems to be 12 blocks plus 1 for every 2GiB of space. At 8GiB we use 16 blocks, aka
-    // 64KiB, which seems reasonable.
-    device.format(8192);
+    device.format();
   }
 
   Mount mount(device.getPath(), "/mnt", 0, nullptr);
@@ -806,7 +803,7 @@ kj::MainBuilder::Validity UnpackMain::run() {
   // We'll mount our package on /mnt because it's our own mount namespace so why not?
   NbdDevice device;
   NbdBinding binding(device, kj::AutoCloseFd(3), NbdAccessType::READ_WRITE);
-  device.format(8192);
+  device.format();
   Mount mount(device.getPath(), "/mnt", 0, nullptr);
   KJ_SYSCALL(mkdir("/mnt/spk", 0755));
 

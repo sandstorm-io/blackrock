@@ -1,0 +1,37 @@
+#! /bin/sh
+
+set -eu
+
+echo findProvider canonical:blackrock/sparse-data
+read MKSPARSE
+
+echo newOutput blackrock/blank-ext4.o
+read OUTPUT
+
+# Put temp file in /var/tmp because tmpfs doesn't handle sparse files well.
+TMPFILE=/var/tmp/blackrock-blank-ext4
+
+# Start with an 8GB sparse file.
+# Experimentally, filesystem overhead (count of non-zero blocks after initialization) for
+# ext4 seems to be 12 blocks plus 1 for every 2GiB of space. At 8GiB we use 16 blocks, aka
+# 64KiB, which seems reasonable.
+rm -f $TMPFILE
+truncate -s 8589934592 $TMPFILE
+
+# Format as ext4.
+# TODO(someday): Figure out if we can make this deterministic. It seems there's more randomness
+#   than just the UUID.
+/sbin/mkfs.ext4 -q -b 4096 -U 00000000-0000-0000-0000-000000000000 -m 0 -O sparse_super2 \
+    -E num_backup_sb=0,resize=4294967295 $TMPFILE
+$MKSPARSE $TMPFILE > $TMPFILE.cp
+rm $TMPFILE
+
+# Embed in an object file.
+(cd $(dirname $TMPFILE) && ld -r -b binary -o $(basename $TMPFILE).o $(basename $TMPFILE).cp)
+rm $TMPFILE.cp
+
+cp $TMPFILE.o $OUTPUT
+rm $TMPFILE.o
+echo provide $OUTPUT c++symbol:_binary_blackrock_blank_ext4_cp_start
+echo provide $OUTPUT c++symbol:_binary_blackrock_blank_ext4_cp_end
+echo provide $OUTPUT c++symbol:_binary_blackrock_blank_ext4_cp_size

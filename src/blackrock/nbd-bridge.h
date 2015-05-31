@@ -75,9 +75,10 @@ public:
 
   int getFd() { return fd; }
 
-  void format(uint megabytes);
-  // Format the device as an ext4 filesystem with the given maximum size in megabytes. Does not
-  // write to stdout.
+  void format();
+  // Format the device as an ext4 filesystem with an initial size of 8GB. This is accomplished by
+  // simply writing a template image directly to the disk, so format() will result in exactly the
+  // same disk image every time.
 
   static void resetAll();
   // Iterate through all the nbd devices and reset them, in order to un-block processes wedged

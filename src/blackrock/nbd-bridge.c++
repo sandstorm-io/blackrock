@@ -14,6 +14,8 @@
 #include <sys/file.h>
 #include <unistd.h>
 #include <sodium/randombytes.h>
+#include <capnp/message.h>
+#include <blackrock/sparse-data.capnp.h>
 
 #include <sys/mount.h>
 #undef BLOCK_SIZE  // #defined in mount.h, ugh
@@ -340,17 +342,29 @@ NbdDevice::NbdDevice(uint number)
   KJ_SYSCALL(flock(fd, LOCK_EX | LOCK_NB), "requested nbd device is already in-use", path);
 }
 
-void NbdDevice::format(uint megabytes) {
-  auto size = kj::str(megabytes, 'M');
-  sandstorm::Subprocess::Options options({
-      "mkfs.ext4", "-q", "-b", "4096", "-m", "0",
-      // Use sparse_super2 and num_backup_sb=0 to disable superblock backups so that the initial
-      // filesystem overhead is minimal.
-      "-O", "sparse_super2", "-E", "num_backup_sb=0,resize=4294967295",
-      path, size});
-  auto devnull = sandstorm::raiiOpen("/dev/null", O_WRONLY | O_CLOEXEC);
-  options.stdout = devnull;
-  sandstorm::Subprocess(kj::mv(options)).waitForSuccess();
+extern "C" {
+  extern capnp::word _binary_blackrock_blank_ext4_cp_start[];
+  // Embedded data produced by blank-ext4.ekam-rule.
+}
+
+static void pwriteAll(int fd, const void* data, size_t size, off_t offset) {
+  while (size > 0) {
+    ssize_t n;
+    KJ_SYSCALL(n = pwrite(fd, data, size, offset));
+    KJ_ASSERT(n != 0, "zero-sized write?");
+    data = reinterpret_cast<const byte*>(data) + n;
+    size -= n;
+    offset += n;
+  }
+}
+
+void NbdDevice::format() {
+  auto sparse = capnp::readMessageUnchecked<SparseData>(_binary_blackrock_blank_ext4_cp_start);
+
+  for (auto chunk: sparse.getChunks()) {
+    auto data = chunk.getData();
+    pwriteAll(fd, data.begin(), data.size(), chunk.getOffset());
+  }
 }
 
 void NbdDevice::resetAll() {

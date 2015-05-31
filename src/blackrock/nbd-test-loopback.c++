@@ -140,7 +140,7 @@ private:
 
     if (isNew) {
       context.warning("formatting...");
-      device.format(256);
+      device.format();
     }
 
     context.warning("mounting...");
