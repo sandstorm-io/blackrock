@@ -136,8 +136,8 @@ kj::Promise<void> GceDriver::boot(MachineId id) {
       scratch.add(kj::mv(param));
       startupScript =
           "#! /bin/sh\n"
-          "mkdir -p /var/blackrock/bundle/storage\n"
-          "mount /dev/disk/by-id/google-blackrock /var/blackrock/bundle/storage\n";
+          "mkdir -p /var/blackrock/storage\n"
+          "mount /dev/disk/by-id/google-blackrock /var/blackrock/storage\n";
       break;
     }
 
@@ -162,8 +162,8 @@ kj::Promise<void> GceDriver::boot(MachineId id) {
       scratch.add(kj::mv(param));
       startupScript =
           "#! /bin/sh\n"
-          "mkdir -p /var/blackrock/bundle/mongo\n"
-          "mount /dev/disk/by-id/google-blackrock /var/blackrock/bundle/mongo\n";
+          "mkdir -p /var/blackrock/bundle\n"
+          "mount /dev/disk/by-id/google-blackrock /var/blackrock/bundle\n";
       break;
     }
   }
