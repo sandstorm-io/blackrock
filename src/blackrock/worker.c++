@@ -246,6 +246,11 @@ WorkerImpl::WorkerImpl(kj::AsyncIoContext& ioContext, sandstorm::SubprocessSet& 
     : ioProvider(*ioContext.lowLevelProvider), subprocessSet(subprocessSet),
       persistentRegistry(persistentRegistry), packageMountSet(ioContext), tasks(*this) {
   NbdDevice::loadKernelModule();
+  KJ_IF_MAYBE(fd, sandstorm::raiiOpenIfExists(
+      "/proc/sys/kernel/unprivileged_userns_clone", O_WRONLY | O_TRUNC | O_CLOEXEC)) {
+    // This system may need to be configured to enable user namespaces.
+    kj::FdOutputStream(fd->get()).write("1\n", 2);
+  }
 }
 WorkerImpl::~WorkerImpl() noexcept(false) {}
 
