@@ -759,9 +759,12 @@ kj::Promise<kj::String> MongoImpl::initializeMongo() {
       return mongoCommand(kj::str(
           "rs.initiate({_id: 'ssrs', members: [{_id: 0, host: '", bindAddress, "'}]})"));
     } else {
-      // It's possible that the bind address has changed, so reconfig the repl set.
+      // It's possible that the bind address has changed, so reconfig the repl set. We have to set
+      // {force: true} because if the address changed then Mongo will think it doesn't have a
+      // majority (because it can't reach the old address) and will refuse to update the config.
       return mongoCommand(kj::str(
-          "rs.reconfig({_id: 'ssrs', members: [{_id: 0, host: '", bindAddress, "'}]})"));
+          "rs.reconfig({_id: 'ssrs', members: [{_id: 0, host: '", bindAddress, "'}]}, "
+                      "{force: true})"));
     }
   }).then([this]() {
     // We have to wait a few seconds for Mongo to elect itself master of the repl set. Mongo does
