@@ -73,6 +73,70 @@ private:
   BackendSetBase base;
 };
 
+// =======================================================================================
+
+class BackendSetFeederBase: private kj::TaskSet::ErrorHandler {
+public:
+  explicit BackendSetFeederBase(uint minCount): minCount(minCount), tasks(*this) {}
+  KJ_DISALLOW_COPY(BackendSetFeederBase);
+
+  class Registration {
+  public:
+    virtual ~Registration() noexcept(false);
+  };
+
+  kj::Own<Registration> addBackend(capnp::Capability::Client cap);
+  kj::Own<Registration> addConsumer(BackendSet<>::Client set);
+
+private:
+  class BackendRegistration;
+  class ConsumerRegistration;
+
+  uint minCount;
+  bool ready = minCount == 0;  // Becomes true when minCount backends are first available.
+  uint64_t backendCount = 0;
+  uint64_t nextId = 0;
+  BackendRegistration* backendsHead = nullptr;
+  BackendRegistration** backendsTail = &backendsHead;
+  ConsumerRegistration* consumersHead = nullptr;
+  ConsumerRegistration** consumersTail = &consumersHead;
+  kj::TaskSet tasks;
+
+  void taskFailed(kj::Exception&& exception) override;
+};
+
+template <typename T>
+class BackendSetFeeder final: public BackendSetFeederBase {
+  // Manages the process of maintaining BackendSets.
+  //
+  // A BackendSetFeeder is created by the master machine for each kind of load-balanced set. For
+  // example, there is a BackendSetFeeder for StorageRoots. Each StorageRoot capability is added
+  // using addBackend(), then each BackendSet which needs to be populated by StorageRoots (e.g.
+  // the front-end) is added using addConsumer().
+
+public:
+  explicit BackendSetFeeder(uint minCount)
+      : BackendSetFeederBase(minCount) {}
+  // The feeder will wait until at least minBackendCount backends have been added before it
+  // initializes any consumers. This prevents flooding the first machine in a set with traffic
+  // while the others are still coming online.
+
+  using BackendSetFeederBase::Registration;
+
+  kj::Own<Registration> addBackend(typename T::Client cap) KJ_WARN_UNUSED_RESULT {
+    // Inserts this capability into all consumer sets. When the returned Backend is dropped
+    // (indicating that the back-end has disconnected), removes the capability from all consumer
+    // sets.
+    return BackendSetFeederBase::addBackend(kj::mv(cap));
+  }
+
+  kj::Own<Registration> addConsumer(typename BackendSet<T>::Client set) KJ_WARN_UNUSED_RESULT {
+    // Inserts all backends into this consumer. When the returned Consumer is dropped (indicating
+    // that it has disconnected), stops updating it.
+    return BackendSetFeederBase::addConsumer(set.template asGeneric<>());
+  }
+};
+
 } // namespace blackrock
 
 #endif // BLACKROCK_BACKEND_SET_H_

@@ -11,6 +11,7 @@
 #include <signal.h>
 #include <sandstorm/util.h>
 #include <capnp/serialize-async.h>
+#include "backend-set.h"
 
 namespace blackrock {
 
@@ -43,6 +44,136 @@ kj::Promise<kj::String> readAllAsync(kj::AsyncInputStream& input,
   });
 }
 
+// TODO(cleanup): Here we have a little hack so that registrationArray(...) returns an array built
+//   from its parameters. Unfortunately std::initializer_list doesn't work for us because of its
+//   constness. But, we should perhaps put this utility code into KJ.
+typedef kj::Array<kj::Own<BackendSetFeederBase::Registration>> RegistrationArray;
+RegistrationArray addEach(kj::ArrayBuilder<kj::Own<BackendSetFeederBase::Registration>>& builder) {
+  return builder.finish();
+}
+template <typename First, typename... Rest>
+RegistrationArray addEach(kj::ArrayBuilder<kj::Own<BackendSetFeederBase::Registration>>& builder,
+                          First&& first, Rest&&... rest) {
+  builder.add(kj::fwd<First>(first));
+  return addEach(builder, kj::fwd<Rest>(rest)...);
+}
+template <typename... Params>
+RegistrationArray registrationArray(Params&&... params) {
+  auto builder = kj::heapArrayBuilder<kj::Own<BackendSetFeederBase::Registration>>(
+      sizeof...(params));
+  return addEach(builder, kj::fwd<Params>(params)...);
+}
+
+class MachineHarness {
+  // Runs one machine, booting it and automatically restarting it as needed. A callback is provided
+  // which is called each time a connection to the machine is established in order to add it to
+  // the right load-balacing sets.
+
+public:
+  MachineHarness(kj::Timer& timer, capnp::RpcSystem<VatPath>& rpcSystem, VatId::Reader self,
+                 ComputeDriver& driver, ComputeDriver::MachineId id,
+                 bool alreadyBooted, bool requireRestartProcess,
+                 kj::Function<RegistrationArray(Machine::Client)> setup)
+      : timer(timer), rpcSystem(rpcSystem), self(self), driver(driver), id(id),
+        setup(kj::mv(setup)), booted(alreadyBooted),
+        runTask(run(requireRestartProcess ? RESTART : RECONNECT)
+            .eagerlyEvaluate([](kj::Exception&& exception) {
+          // Shouldn't happen! Don't let cluster end up in broken state.
+          KJ_LOG(FATAL, "MachineHarness run task failed", exception);
+          abort();
+        })) {}
+
+private:
+  kj::Timer& timer;
+  capnp::RpcSystem<VatPath>& rpcSystem;
+  VatId::Reader self;
+  ComputeDriver& driver;
+  ComputeDriver::MachineId id;
+  kj::Function<RegistrationArray(Machine::Client)> setup;
+  bool booted;
+  kj::Promise<void> runTask;
+
+  enum RetryStage {
+    RECONNECT,  // Reconnect to already-running process (or restart it if it died).
+    RESTART,    // Kill running process and restart.
+    REBOOT      // Reboot machine.
+  };
+
+  kj::Promise<void> run(RetryStage retryStage) {
+    if (booted) {
+      // Already booted. Should we reboot?
+      if (retryStage == REBOOT) {
+        return driver.stop(id).then([this]() {
+          booted = false;
+          // Since we're not booted, the stage we pass to run() here is irrelevant.
+          return run(RECONNECT);
+        });
+      }
+    } else {
+      return driver.boot(id).then([this]() {
+        booted = true;
+        // Since we just booted, RECONNECT vs. RESTART are equivalent.
+        return run(RECONNECT);
+      });
+    }
+
+    return driver.run(id, self, retryStage == RESTART)
+        .then([this,retryStage](VatPath::Reader path) {
+      auto machine = rpcSystem.bootstrap(path).castAs<Machine>();
+
+      // Try to send a ping, giving up after 2 seconds.
+      auto initialPing = machine.pingRequest().send().then([](auto&&) {});
+      return timer.timeoutAfter(10 * kj::SECONDS, kj::mv(initialPing))
+          .then([this,KJ_MVCAP(machine)]() mutable {
+        // Successfully pinged. The machine is up.
+
+        // Call the setup function.
+        auto registrations = setup(machine);
+
+        // Arrange a hanging ping and periodic quick pings to detect machine failure.
+        auto req = machine.pingRequest();
+        req.setHang(true);
+        return req.send().then([](auto&&) {})
+            .exclusiveJoin(pingLoop(machine))
+            .attach(kj::mv(registrations))
+            .then([this]() {
+          KJ_LOG(ERROR, "monitoring for machine returned without error? reconnecting", id);
+        }, [this](kj::Exception&& exception) {
+          KJ_LOG(ERROR, "lost connection to machine; reconnecting", id, exception);
+        }).then([this]() {
+          return run(RECONNECT);
+        });
+      }, [this,retryStage](kj::Exception&& exception) {
+        // If we only tried to reconnect, now try to restart the process, otherwise try to reboot
+        // the machine. For worker machines, we skip straight to reboot as restarting can be
+        // dirty.
+        if (retryStage == RECONNECT && id.type != ComputeDriver::MachineType::WORKER) {
+          KJ_LOG(ERROR, "initial ping to machine failed; restarting process", id, exception);
+          return run(RESTART);
+        } else {
+          KJ_LOG(ERROR, "initial ping to machine failed; rebooting machine", id, exception);
+          return run(REBOOT);
+        }
+      });
+    }, [this](kj::Exception&& exception) {
+      // run() failed.
+      KJ_LOG(ERROR, "couldn't connect to machine; rebooting it", id, exception);
+      return run(REBOOT);
+    });
+  }
+
+  kj::Promise<void> pingLoop(Machine::Client machine) {
+    return timer.afterDelay(10 * kj::SECONDS)
+        .then([this,KJ_MVCAP(machine)]() mutable {
+      auto ping = machine.pingRequest().send().then([](auto&&) {});
+      return timer.timeoutAfter(10 * kj::SECONDS, kj::mv(ping))
+          .then([this,KJ_MVCAP(machine)]() mutable {
+        return pingLoop(kj::mv(machine));
+      });
+    });
+  }
+};
+
 }  // namespace
 
 void runMaster(kj::AsyncIoContext& ioContext, ComputeDriver& driver, MasterConfig::Reader config,
@@ -58,15 +189,38 @@ void runMaster(kj::AsyncIoContext& ioContext, ComputeDriver& driver, MasterConfi
                      driver.getMasterBindAddress());
   auto rpcSystem = capnp::makeRpcClient(network);
 
-  kj::Vector<kj::Promise<void>> startupTasks;
+  kj::Vector<kj::Own<MachineHarness>> harnesses;
+  ErrorLogger logger;
+  kj::TaskSet tasks(logger);
 
+  uint storageCount = 1;
   uint workerCount = config.getWorkerCount();
+  uint frontendCount = 1;
+  uint mongoCount = 1;
+  uint coordinatorCount = 0;
+  uint gatewayCount = 0;
+
+  // Storage feeders.
+  BackendSetFeeder<StorageSibling> storageSiblingFeeder(storageCount);
+  BackendSetFeeder<Restorer<SturdyRef::Hosted>> hostedRestorerForStorageFeeder(coordinatorCount);
+  BackendSetFeeder<Restorer<SturdyRef::External>> gatewayRestorerForStorageFeeder(gatewayCount);
+
+  // Frontend feeders.
+  BackendSetFeeder<Restorer<SturdyRef::Stored>> storageRestorerForFrontendFeeder(storageCount);
+  BackendSetFeeder<Restorer<SturdyRef::Hosted>> hostedRestorerForFrontendFeeder(coordinatorCount);
+
+  // Non-specific feeders.
+  BackendSetFeeder<Worker> workerFeeder(workerCount);
+  BackendSetFeeder<StorageRootSet> storageRootFeeder(storageCount);
+  BackendSetFeeder<StorageFactory> storageFactoryFeeder(storageCount);
+  BackendSetFeeder<Frontend> frontendFeeder(frontendCount);
+  BackendSetFeeder<Mongo> mongoFeeder(mongoCount);
 
   std::map<ComputeDriver::MachineType, uint> expectedCounts;
-  expectedCounts[ComputeDriver::MachineType::STORAGE] = 1;
+  expectedCounts[ComputeDriver::MachineType::STORAGE] = storageCount;
   expectedCounts[ComputeDriver::MachineType::WORKER] = workerCount;
-  expectedCounts[ComputeDriver::MachineType::FRONTEND] = 1;
-  expectedCounts[ComputeDriver::MachineType::MONGO] = 1;
+  expectedCounts[ComputeDriver::MachineType::FRONTEND] = frontendCount;
+  expectedCounts[ComputeDriver::MachineType::MONGO] = mongoCount;
 
   VatPath::Reader storagePath;
   auto workerPaths = kj::heapArray<VatPath::Reader>(config.getWorkerCount());
@@ -80,13 +234,14 @@ void runMaster(kj::AsyncIoContext& ioContext, ComputeDriver& driver, MasterConfi
   for (auto& machine: driver.listMachines().wait(ioContext.waitScope)) {
     if (machine.index >= expectedCounts[machine.type]) {
       KJ_LOG(INFO, "STOPPING", machine);
-      startupTasks.add(driver.stop(machine));
+      tasks.add(driver.stop(machine));
     } else {
       alreadyRunning.insert(machine);
     }
   }
 
-  auto start = [&](ComputeDriver::MachineId id, VatPath::Reader& pathSlot) {
+  auto start = [&](ComputeDriver::MachineId id,
+                   kj::Function<RegistrationArray(Machine::Client)> setup) {
     bool shouldRestartNode = shouldRestart || restartSet.count(id) > 0;
     if (shouldRestartNode) {
       KJ_LOG(INFO, "RESTARTING", id);
@@ -94,98 +249,63 @@ void runMaster(kj::AsyncIoContext& ioContext, ComputeDriver& driver, MasterConfi
       KJ_LOG(INFO, "STARTING", id);
     }
 
-    kj::Promise<void> promise = alreadyRunning.count(id) > 0
-        ? kj::Promise<void>(kj::READY_NOW)
-        : driver.boot(id);
-
-    startupTasks.add(promise.then([id, &network, shouldRestartNode, &driver]() {
-      return driver.run(id, network.getSelf().getId(), shouldRestartNode);
-    }).then([id,&pathSlot](auto path) {
-      KJ_LOG(INFO, "READY", id);
-      pathSlot = path;
-    }));
+    harnesses.add(kj::heap<MachineHarness>(
+        ioContext.provider->getTimer(), rpcSystem, network.getSelf().getId(),
+        driver, id, alreadyRunning.count(id) > 0, shouldRestartNode,
+        kj::mv(setup)));
   };
 
-  start({ ComputeDriver::MachineType::STORAGE, 0 }, storagePath);
-
-  {
-    for (uint i = 0; i < workerCount; i++) {
-      start({ ComputeDriver::MachineType::WORKER, i }, workerPaths[i]);
-    }
-  }
-
-  start({ ComputeDriver::MachineType::FRONTEND, 0 }, frontendPath);
-  start({ ComputeDriver::MachineType::MONGO, 0 }, mongoPath);
-
-  KJ_LOG(INFO, "waiting for startup tasks...");
-  kj::joinPromises(startupTasks.releaseAsArray()).wait(ioContext.waitScope);
-
-  // -------------------------------------------------------------------------------------
-
-  ErrorLogger logger;
-  kj::TaskSet tasks(logger);
-
   // Start storage.
-  auto storage = rpcSystem.bootstrap(storagePath).castAs<Machine>()
-      .becomeStorageRequest().send();
+  start({ ComputeDriver::MachineType::STORAGE, 0 }, [&](Machine::Client&& machine) {
+    auto storage = machine.becomeStorageRequest().send();
 
-  // For now, tell the storage that it has no back-ends.
-  tasks.add(storage.getSiblingSet().resetRequest().send().then([](auto){}));
-  tasks.add(storage.getHostedRestorerSet().resetRequest().send().then([](auto){}));
-  tasks.add(storage.getGatewayRestorerSet().resetRequest().send().then([](auto){}));
+    return registrationArray(
+        storageSiblingFeeder.addBackend(storage.getSibling()),
+        storageRootFeeder.addBackend(storage.getRootSet()),
+        ({
+          auto req = storage.getStorageRestorer().getForOwnerRequest();
+          req.initDomain().setFrontend();
+          storageRestorerForFrontendFeeder.addBackend(req.send().getAttenuated());
+        }),
+        storageFactoryFeeder.addBackend(storage.getStorageFactory()),
+        storageSiblingFeeder.addConsumer(storage.getSiblingSet()),
+        hostedRestorerForStorageFeeder.addConsumer(storage.getHostedRestorerSet()),
+        gatewayRestorerForStorageFeeder.addConsumer(storage.getGatewayRestorerSet()));
+  });
 
-  // Start workers (the ones that are booted, anyway).
-  kj::Vector<Worker::Client> workers;
-  for (auto& workerPath: workerPaths) {
-    workers.add(rpcSystem.bootstrap(workerPath).castAs<Machine>()
-        .becomeWorkerRequest().send().getWorker());
+  // Start workers.
+  for (uint i = 0; i < workerCount; i++) {
+    start({ ComputeDriver::MachineType::WORKER, i }, [&](Machine::Client&& machine) {
+      return registrationArray(
+          workerFeeder.addBackend(machine.becomeWorkerRequest().send().getWorker()));
+    });
   }
 
   // Start front-end.
-  auto mongo = rpcSystem.bootstrap(mongoPath).castAs<Machine>().becomeMongoRequest().send();
-  auto frontend = ({
-    auto req = rpcSystem.bootstrap(frontendPath).castAs<Machine>().becomeFrontendRequest();
-    req.setConfig(config.getFrontendConfig());
-    req.send();
+  start({ ComputeDriver::MachineType::FRONTEND, 0 }, [&](Machine::Client&& machine) {
+    auto frontend = ({
+      auto req = machine.becomeFrontendRequest();
+      req.setConfig(config.getFrontendConfig());
+      req.send();
+    });
+
+    return registrationArray(
+        frontendFeeder.addBackend(frontend.getFrontend()),
+        storageRestorerForFrontendFeeder.addConsumer(frontend.getStorageRestorerSet()),
+        storageRootFeeder.addConsumer(frontend.getStorageRootSet()),
+        storageFactoryFeeder.addConsumer(frontend.getStorageFactorySet()),
+        hostedRestorerForFrontendFeeder.addConsumer(frontend.getHostedRestorerSet()),
+        workerFeeder.addConsumer(frontend.getWorkerSet()),
+        mongoFeeder.addConsumer(frontend.getMongoSet()));
   });
 
-  // Set up backends for frontend.
-  tasks.add(frontend.getStorageRestorerSet().resetRequest().send().then([](auto){}));
-  {
-    auto req = frontend.getStorageRootSet().resetRequest();
-    auto backend = req.initBackends(1)[0];
-    backend.setId(0);
-    backend.setBackend(storage.getRootSet());
-    tasks.add(req.send().then([](auto){}));
-  }
-  {
-    auto req = frontend.getStorageFactorySet().resetRequest();
-    auto backend = req.initBackends(1)[0];
-    backend.setId(0);
-    backend.setBackend(storage.getStorageFactory());
-    tasks.add(req.send().then([](auto){}));
-  }
-  tasks.add(frontend.getHostedRestorerSet().resetRequest().send().then([](auto){}));
-  {
-    auto req = frontend.getWorkerSet().resetRequest();
-    auto list = req.initBackends(workers.size());
-    for (auto i: kj::indices(workers)) {
-      auto backend = list[i];
-      backend.setId(i);
-      backend.setBackend(workers[i]);
-    }
-    tasks.add(req.send().then([](auto){}));
-  }
-  {
-    auto req = frontend.getMongoSet().resetRequest();
-    auto backend = req.initBackends(1)[0];
-    backend.setId(0);
-    backend.setBackend(mongo.getMongo());
-    tasks.add(req.send().then([](auto){}));
-  }
+  // Start mongo.
+  start({ ComputeDriver::MachineType::MONGO, 0 }, [&](Machine::Client&& machine) {
+    return registrationArray(
+        mongoFeeder.addBackend(machine.becomeMongoRequest().send().getMongo()));
+  });
 
   // Loop forever handling messages.
-  KJ_LOG(INFO, "Blackrock READY");
   kj::NEVER_DONE.wait(ioContext.waitScope);
   KJ_UNREACHABLE;
 }

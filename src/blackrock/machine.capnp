@@ -93,4 +93,10 @@ interface Machine {
   shutdown @5 ();
   # Do whatever is necessary to prepare this machine for safe shutdown. Do not return until it's
   # safe.
+
+  ping @7 (hang :Bool = false);
+  # Returns immediately if `hang` is false, or never returns if `hang` is true. The master uses
+  # both modes to detect machine death: a hanging ping() should throw an exception the moment the
+  # connection dies, but periodic non-hanging ping()s are also used to verify that the connection
+  # hasn't silently failed.
 }

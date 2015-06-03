@@ -119,6 +119,14 @@ public:
   }
 
   kj::Promise<void> becomeWorker(BecomeWorkerContext context) override {
+    mkdir("/var", 0755);
+    mkdir("/var/blackrock", 0755);
+
+    // Mark this machine as "dirty", which means we will refuse to start back up after a crash
+    // except with -r (which the master never uses on workers except when running a dev build
+    // locally). We do this because if we crash then NBD devices could be left in a bad state.
+    sandstorm::raiiOpen("/var/blackrock/dirty", O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC);
+
     Worker::Client client = nullptr;
     KJ_IF_MAYBE(w, worker) {
       KJ_LOG(INFO, "rebecome worker...");
@@ -178,6 +186,14 @@ public:
 
     context.getResults().setMongo(kj::mv(client));
     return kj::READY_NOW;
+  }
+
+  kj::Promise<void> ping(PingContext context) override {
+    if (context.getParams().getHang()) {
+      return kj::NEVER_DONE;
+    } else {
+      return kj::READY_NOW;
+    }
   }
 
 private:
@@ -505,6 +521,12 @@ private:
   }
 
   bool runSlave() {
+    if (!killedExisting) {
+      if (access("/var/blackrock/dirty", F_OK) == 0) {
+        context.exitError("worker dirty; needs reboot");
+      }
+    }
+
     auto pidfile = sandstorm::raiiOpen("/var/run/blackrock-slave",
         O_RDWR | O_CREAT | O_CLOEXEC, 0600);
     int l;
