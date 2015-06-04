@@ -355,7 +355,7 @@ VagrantDriver::VagrantDriver(sandstorm::SubprocessSet& subprocessSet,
                              kj::LowLevelAsyncIoProvider& ioProvider)
     : subprocessSet(subprocessSet), ioProvider(ioProvider),
       masterBindAddress(SimpleAddress::getInterfaceAddress(AF_INET, "vboxnet0")),
-      logSink(nullptr), logTask(nullptr), logSinkAddress(masterBindAddress) {
+      logTask(nullptr), logSinkAddress(masterBindAddress) {
   // Create socket for the log sink acceptor.
   int sock;
   KJ_SYSCALL(sock = socket(masterBindAddress.family(),

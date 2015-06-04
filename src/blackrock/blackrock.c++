@@ -283,6 +283,7 @@ public:
     return kj::MainBuilder(context, "Sandstorm Blackrock version " SANDSTORM_VERSION,
                            "Starts Blackrock.")
         .addSubCommand("master", KJ_BIND_METHOD(*this, getMasterMain), "run as master node")
+        .addSubCommand("start", KJ_BIND_METHOD(*this, getStartMain), "start master as daemon")
         .addSubCommand("slave", KJ_BIND_METHOD(*this, getSlaveMain), "run as slave node")
         .addSubCommand("grain", KJ_BIND_METHOD(*this, getMetaSupervisorMain),
             "(internal) run a grain meta-supervisor")
@@ -296,12 +297,19 @@ public:
 
   kj::MainFunc getMasterMain() {
     return kj::MainBuilder(context, "Sandstorm Blackrock version " SANDSTORM_VERSION,
-                           "Starts Blackrock master.")
+                           "Runs Blackrock master in foreground, logging to stdout.")
         .addOption({'r', "restart"}, KJ_BIND_METHOD(*this, setRestart),
             "Restarts Blackrock processes on all slave machines if already running.")
         .addOptionWithArg({'R', "restart-one"}, KJ_BIND_METHOD(*this, addRestart), "<machine>",
             "Restarts Blackrock process on the given machine if already running.")
         .expectArg("<master-config>", KJ_BIND_METHOD(*this, runMaster))
+        .build();
+  }
+
+  kj::MainFunc getStartMain() {
+    return kj::MainBuilder(context, "Sandstorm Blackrock version " SANDSTORM_VERSION,
+                           "Starts Blackrock master as daemon, logging to log directory.")
+        .expectArg("<master-config>", KJ_BIND_METHOD(*this, runMasterDaemon))
         .build();
   }
 
@@ -518,6 +526,40 @@ private:
     }
     blackrock::runMaster(ioContext, *driver, config, shouldRestart, machinesToRestart);
     KJ_UNREACHABLE;
+  }
+
+  bool runMasterDaemon(kj::StringPtr configFile) {
+    sandstorm::Subprocess([&]() -> int {
+      // Detach from controlling terminal and make ourselves session leader.
+      KJ_SYSCALL(setsid());
+
+      // Repeatedly re-run forever.
+      for (;;) {
+        KJ_IF_MAYBE(exception, kj::runCatchingExceptions([&]() {
+          auto logPipe = sandstorm::Pipe::make();
+
+          // Fork again so that we are no longer session leader (which prevents us from picking up
+          // a controlling terminal by merely opening one).
+          sandstorm::Subprocess subprocess2([&]() -> int {
+            KJ_SYSCALL(dup2(logPipe.writeEnd, STDOUT_FILENO));
+            KJ_SYSCALL(dup2(logPipe.writeEnd, STDERR_FILENO));
+            logPipe.readEnd = nullptr;
+            logPipe.writeEnd = nullptr;
+            return runMaster(configFile) ? 0 : 1;
+          });
+
+          // Parent records logs.
+          logPipe.writeEnd = nullptr;
+          sandstorm::recursivelyCreateParent("/var/blackrock/log/dummy");
+          auto logDirFd = sandstorm::raiiOpen(
+              "/var/blackrock/log", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+          rotateLogs(logPipe.readEnd, logDirFd);
+          subprocess2.waitForSuccess();
+        }));
+      }
+    }).detach();
+
+    context.exitInfo("Blackrock started");
   }
 
   bool runSlave() {

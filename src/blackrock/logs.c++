@@ -9,6 +9,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/sendfile.h>
+#include <stdio.h>
 
 namespace blackrock {
 
@@ -130,9 +131,7 @@ private:
   }
 };
 
-LogSink::LogSink(kj::Maybe<int> logDirFd)
-    : logDirFd(logDirFd),
-      tasks(*this) {}
+LogSink::LogSink(): tasks(*this) {}
 
 kj::Promise<void> LogSink::acceptLoop(kj::Own<kj::ConnectionReceiver> receiver) {
   auto promise = receiver->accept();
@@ -154,39 +153,48 @@ void LogSink::write(kj::ArrayPtr<const char> part1, kj::ArrayPtr<const char> par
 
   kj::StringPtr timestamp(timestampBuf, n);
 
-  size_t bytesToAdd = timestamp.size() + part1.size() + part2.size();
-
-  int fd;
-  kj::AutoCloseFd ownFd;
-
-  KJ_IF_MAYBE(dir, logDirFd) {
-    KJ_IF_MAYBE(file, currentFile) {
-      fd = file->fd;
-      file->size += bytesToAdd;
-      if (file->size > (1 << 20)) {
-        // File is more than 1MB. Start a new one next time.
-        ownFd = kj::mv(file->fd);
-        currentFile = nullptr;
-      }
-    } else {
-      // No file open. Start a new one. Notice if the file already exists, indicating that we wrote
-      // an entire file and tried to start a new one in the space of a second, then we actually
-      // just end up appending to the existing file.
-      auto newFd = sandstorm::raiiOpenAt(*dir, timestamp, O_WRONLY | O_CREAT | O_APPEND, 0600);
-      fd = newFd;
-      currentFile = LogFile { kj::mv(newFd), bytesToAdd };
-    }
-  } else {
-    // Not logging to files.
-    fd = STDOUT_FILENO;
-  }
-
   kj::ArrayPtr<const byte> pieces[3] = { timestamp.asBytes(), part1.asBytes(), part2.asBytes() };
-  kj::FdOutputStream(fd).write(pieces);
+  kj::FdOutputStream(STDOUT_FILENO).write(pieces);
 }
 
 void LogSink::taskFailed(kj::Exception&& exception) {
   KJ_LOG(ERROR, "exception in log sink read loop", exception);
+}
+
+// =======================================================================================
+
+void rotateLogs(int input, int logDirFd) {
+  char buffer [8192];
+
+  size_t fileSize = 0;
+  kj::AutoCloseFd output;
+  for (;;) {
+    ssize_t n;
+    KJ_SYSCALL(n = read(input, buffer, sizeof(buffer)));
+    if (n == 0) break;
+
+    if (output == nullptr) {
+      output = sandstorm::raiiOpenAt(logDirFd, "blackrock.current", O_WRONLY | O_CREAT | O_APPEND);
+
+      struct stat stats;
+      KJ_SYSCALL(fstat(output, &stats));
+      fileSize = stats.st_size;
+    }
+
+    kj::FdOutputStream(output.get()).write(buffer, n);
+    fileSize += n;
+    if (fileSize > (1 << 20) && buffer[n-1] == '\n') {
+      // File is more than 1MB and we just saw a line break. Start a new file.
+      output = nullptr;
+
+      char timestamp[128];
+      time_t now = time(nullptr);
+      struct tm local;
+      KJ_ASSERT(gmtime_r(&now, &local) != nullptr);
+      strftime(timestamp, sizeof(timestamp), "blackrock.%Y-%m-%d.%H-%M-%S.log", &local);
+      KJ_SYSCALL(renameat(logDirFd, "blackrock.current", logDirFd, timestamp));
+    }
+  }
 }
 
 // =======================================================================================

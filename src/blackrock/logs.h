@@ -19,21 +19,12 @@ class SimpleAddress;
 
 class LogSink: private kj::TaskSet::ErrorHandler {
 public:
-  explicit LogSink(kj::Maybe<int> logDirFd);
+  LogSink();
 
   kj::Promise<void> acceptLoop(kj::Own<kj::ConnectionReceiver> receiver);
 
 private:
   class ClientHandler;
-
-  kj::Maybe<int> logDirFd;
-
-  struct LogFile {
-    kj::AutoCloseFd fd;
-    size_t size;
-  };
-
-  kj::Maybe<LogFile> currentFile;
 
   std::set<kj::String> namesSeen;
 
@@ -44,6 +35,10 @@ private:
 
   void taskFailed(kj::Exception&& exception) override;
 };
+
+void rotateLogs(int input, int logDirFd);
+// Read logs on `input` and write them to files in `logDirFd`, rotated to avoid any file becoming
+// overly large.
 
 void runLogClient(kj::StringPtr name, kj::StringPtr logAddressFile, kj::StringPtr backlogDir);
 // Reads logs from standard input and upload them to the log sink server, reconnecting to the

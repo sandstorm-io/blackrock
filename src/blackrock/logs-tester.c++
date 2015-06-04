@@ -4,6 +4,7 @@
 
 #include "logs.h"
 #include <kj/main.h>
+#include <kj/thread.h>
 #include <sandstorm/util.h>
 #include "cluster-rpc.h"
 
@@ -68,7 +69,24 @@ private:
 
   bool runServer() {
     auto io = kj::setupAsyncIo();
-    LogSink sink(logDir.map([](auto& fd) { return fd.get(); }));
+    sandstorm::SubprocessSet subprocessSet(io.unixEventPort);
+
+    kj::Own<kj::Thread> rotater;
+    KJ_IF_MAYBE(l, logDir) {
+      auto logPipe = sandstorm::Pipe::make();
+      auto readEnd = kj::mv(logPipe.readEnd);
+      int logDirFd = *l;
+      rotater = kj::heap<kj::Thread>([KJ_MVCAP(readEnd),logDirFd]() {
+        rotateLogs(readEnd, logDirFd);
+      });
+
+      KJ_SYSCALL(dup2(logPipe.writeEnd, STDOUT_FILENO));
+    }
+
+    // Close log pipe on scope exit, so that thread stops.
+    KJ_DEFER(KJ_SYSCALL(dup2(STDERR_FILENO, STDOUT_FILENO)));
+
+    LogSink sink;
     sink.acceptLoop(listen(io.provider->getNetwork())).wait(io.waitScope);
     return true;
   }

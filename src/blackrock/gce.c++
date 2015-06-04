@@ -45,7 +45,7 @@ GceDriver::GceDriver(sandstorm::SubprocessSet& subprocessSet,
                      GceConfig::Reader config)
     : subprocessSet(subprocessSet), ioProvider(ioProvider), config(config), image(getImageName()),
       masterBindAddress(SimpleAddress::getInterfaceAddress(AF_INET, "eth0")),
-      logSink(nullptr), logTask(nullptr), logSinkAddress(masterBindAddress) {
+      logTask(nullptr), logSinkAddress(masterBindAddress) {
   // Create socket for the log sink acceptor.
   int sock;
   KJ_SYSCALL(sock = socket(masterBindAddress.family(),
