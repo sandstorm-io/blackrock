@@ -789,7 +789,7 @@ kj::Promise<kj::String> MongoImpl::initializeMongo() {
 
       // Create the mongo user.
       auto command = kj::str(
-        "db.addUser({user: \"sandstorm\", pwd: \"", passwdStr, "\", "
+        "db.createUser({user: \"sandstorm\", pwd: \"", passwdStr, "\", "
         "roles: [\"readWriteAnyDatabase\",\"userAdminAnyDatabase\",\"dbAdminAnyDatabase\","
                 "\"clusterAdmin\"]})");
       return mongoCommand(kj::mv(command), "admin").then([KJ_MVCAP(passwdStr)]() mutable {
