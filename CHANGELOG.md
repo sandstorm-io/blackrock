@@ -1,1 +1,1 @@
-../sandstorm/CHANGELOG.md
+deps/sandstorm/CHANGELOG.md
