@@ -1304,6 +1304,9 @@ protected:
   kj::Promise<void> setReadOnly() {
     if (xattr.readOnly) {
       return kj::READY_NOW;
+    } else if (state != COMMITTED) {
+      xattr.readOnly = true;
+      return kj::READY_NOW;
     } else {
       Journal::Transaction txn(journal);
       xattr.readOnly = true;
@@ -1524,6 +1527,7 @@ public:
   void init(capnp::Data::Reader data) {
     int fd = openRaw();
     pwriteAll(fd, data.begin(), data.size(), 0);
+    updateSize((data.size() + Volume::BLOCK_SIZE - 1) / Volume::BLOCK_SIZE);
     setReadOnly();
   }
 
@@ -1646,6 +1650,12 @@ private:
       }
 
       pwriteAll(object.openRaw(), data.begin(), data.size(), currentOffset);
+
+      // Update accounting for every megabyte uploaded.
+      if ((currentOffset >> 20) != (newOffset >> 20)) {
+        object.updateSize((newOffset + Volume::BLOCK_SIZE - 1) / Volume::BLOCK_SIZE);
+      }
+
       currentOffset = newOffset;
 
       KJ_IF_MAYBE(n, nextData) {

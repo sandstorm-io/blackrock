@@ -278,6 +278,39 @@ KJ_TEST("blob") {
   KJ_EXPECT(kj::heapString(stream->content.asPtr().asChars()) == "foobar");
   KJ_EXPECT(stream->gotDone);
   KJ_EXPECT(KJ_ASSERT_NONNULL(stream->expectedSize) == 6);
+
+  uint64_t size = blob.getStorageUsageRequest().send().wait(env.io.waitScope).getTotalBytes();
+  KJ_EXPECT(size == 4096, size);
+
+  {
+    auto req = env.storage.setRequest<Blob>();
+    req.setName("blob");
+    req.setObject(kj::mv(blob));
+    req.send().wait(env.io.waitScope);
+  }
+}
+
+KJ_TEST("blob load") {
+  StorageTestFixture env;
+
+  auto blob = ({
+    auto req = env.storage.getRequest<Assignable<TestStoredObject>>();
+    req.setName("blob");
+    req.send().getObject().castAs<OwnedBlob>();
+  });
+
+  uint64_t size = blob.getStorageUsageRequest().send().wait(env.io.waitScope).getTotalBytes();
+  KJ_EXPECT(size == 4096, size);
+
+  auto stream = kj::refcounted<TestByteStream>();
+  {
+    auto req = blob.writeToRequest();
+    req.setStream(kj::addRef(*stream));
+    req.send().wait(env.io.waitScope);
+  }
+  KJ_EXPECT(kj::heapString(stream->content.asPtr().asChars()) == "foobar");
+  KJ_EXPECT(stream->gotDone);
+  KJ_EXPECT(KJ_ASSERT_NONNULL(stream->expectedSize) == 6);
 }
 
 KJ_TEST("blob partial download") {
@@ -323,6 +356,9 @@ KJ_TEST("blob streaming initialization") {
 
   KJ_EXPECT(blob.getSizeRequest().send().wait(env.io.waitScope).getSize() == 6);
 
+  uint64_t size = blob.getStorageUsageRequest().send().wait(env.io.waitScope).getTotalBytes();
+  KJ_EXPECT(size == 4096, size);
+
   auto stream = kj::refcounted<TestByteStream>();
   {
     auto req = blob.writeToRequest();
@@ -367,6 +403,9 @@ KJ_TEST("blob interleaved initialization") {
   }
   upStream.doneRequest().send().wait(env.io.waitScope);
   blobInit.wait(env.io.waitScope);
+
+  uint64_t size = blob.getStorageUsageRequest().send().wait(env.io.waitScope).getTotalBytes();
+  KJ_EXPECT(size == 4096, size);
 
   KJ_EXPECT(blob.getSizeRequest().send().wait(env.io.waitScope).getSize() == 6);
 
@@ -414,6 +453,9 @@ KJ_TEST("blob interleaved initialization with expected size") {
   upStream.doneRequest().send().wait(env.io.waitScope);
   blobInit.wait(env.io.waitScope);
 
+  uint64_t size = blob.getStorageUsageRequest().send().wait(env.io.waitScope).getTotalBytes();
+  KJ_EXPECT(size == 4096, size);
+
   KJ_EXPECT(blob.getSizeRequest().send().wait(env.io.waitScope).getSize() == 6);
 
   KJ_EXPECT(kj::heapString(stream->content.asPtr().asChars()) == "foobar");
@@ -455,6 +497,9 @@ KJ_TEST("blob interleaved initialization partial download") {
   }
   upStream.doneRequest().send().wait(env.io.waitScope);
   blobInit.wait(env.io.waitScope);
+
+  uint64_t size = blob.getStorageUsageRequest().send().wait(env.io.waitScope).getTotalBytes();
+  KJ_EXPECT(size == 4096, size);
 
   KJ_EXPECT(blob.getSizeRequest().send().wait(env.io.waitScope).getSize() == 6);
 
@@ -502,6 +547,9 @@ KJ_TEST("blob interleaved initialization partial download with expected size") {
   }
   upStream.doneRequest().send().wait(env.io.waitScope);
   blobInit.wait(env.io.waitScope);
+
+  uint64_t size = blob.getStorageUsageRequest().send().wait(env.io.waitScope).getTotalBytes();
+  KJ_EXPECT(size == 4096, size);
 
   KJ_EXPECT(blob.getSizeRequest().send().wait(env.io.waitScope).getSize() == 6);
 
