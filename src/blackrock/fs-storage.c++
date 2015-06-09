@@ -191,7 +191,10 @@ struct FilesystemStorage::Xattr {
   Type type;
 
   bool readOnly;
-  // For volumes, prevents the volume from being modified. Once set this can never be unset.
+  // For volumes, prevents the volume from being modified. For Blobs, indicates that initialization
+  // has completed with a `done()` call, indicating the entire stream was received (otherwise,
+  // either the stream is still uploading, or it failed to fully upload). Once set this
+  // can never be unset.
 
   byte reserved[2];
   // Must be zero.
@@ -1327,7 +1330,7 @@ protected:
     }
   }
 
-  uint64_t getSizeImpl() {
+  uint64_t getStorageUsageImpl() {
     return xattr.transitiveBlockCount * Volume::BLOCK_SIZE;
   }
 
@@ -1455,8 +1458,8 @@ public:
   using ObjectBase::setStoredObject;
   // Make public for Assignable so that StorageFactory can call this to initialize it.
 
-  kj::Promise<void> getSize(GetSizeContext context) override {
-    context.getResults().setTotalBytes(getSizeImpl());
+  kj::Promise<void> getStorageUsage(GetStorageUsageContext context) override {
+    context.getResults().setTotalBytes(getStorageUsageImpl());
     return kj::READY_NOW;
   }
 
@@ -1513,6 +1516,265 @@ constexpr FilesystemStorage::Type FilesystemStorage::AssignableImpl::TYPE;
 
 // =======================================================================================
 
+class FilesystemStorage::BlobImpl: public OwnedBlob::Server, public ObjectBase {
+public:
+  static constexpr Type TYPE = Type::BLOB;
+  using ObjectBase::ObjectBase;
+
+  void init(capnp::Data::Reader data) {
+    int fd = openRaw();
+    pwriteAll(fd, data.begin(), data.size(), 0);
+    setReadOnly();
+  }
+
+  sandstorm::ByteStream::Client init() {
+    openRaw();
+    auto result = kj::heap<Initializer>(*this, thisCap());
+    return kj::mv(result);
+  }
+
+  kj::Promise<void> getStorageUsage(GetStorageUsageContext context) override {
+    context.getResults().setTotalBytes(getStorageUsageImpl());
+    return kj::READY_NOW;
+  }
+
+  kj::Promise<void> getSize(GetSizeContext context) override {
+    context.releaseParams();
+    auto& xattr = getXattrRef();
+    if (xattr.readOnly) {
+      int fd = openRaw();
+      context.getResults(capnp::MessageSize {4, 0}).setSize(getFileSize(fd));
+      return kj::READY_NOW;
+    } else KJ_IF_MAYBE(i, currentInitializer) {
+      return i->getSize().then([context](size_t s) mutable {
+        context.getResults(capnp::MessageSize {4, 0}).setSize(s);
+      });
+    } else {
+      return KJ_EXCEPTION(FAILED, "blob was not fully uploaded");
+    }
+  }
+
+  kj::Promise<void> writeTo(WriteToContext context) override {
+    auto params = context.getParams();
+    auto target = params.getStream();
+    auto offset = params.getStartAtOffset();
+    context.releaseParams();
+
+    int fd = openRaw();
+    uint64_t currentSize = getFileSize(fd);
+
+    kj::Maybe<uint64_t> expectedSize;
+    auto& xattr = getXattrRef();
+    if (xattr.readOnly) {
+      expectedSize = currentSize;
+    } else KJ_IF_MAYBE(i, currentInitializer) {
+      expectedSize = i->getSizeIfKnown();
+    }
+
+    KJ_IF_MAYBE(s, expectedSize) {
+      // We know the expected size, so send the expected size hint.
+      KJ_REQUIRE(offset <= *s, "starting offset out-of-range");
+
+      auto req = target.expectSizeRequest();
+      req.setSize(*s - offset);
+      auto sizeHintPromise = req.send()
+          .then([](auto&&) -> kj::Promise<void> {
+        // Allow write() loop to complete.
+        return kj::NEVER_DONE;
+      }, [](kj::Exception&& e) -> kj::Promise<void> {
+        if (e.getType() == kj::Exception::Type::UNIMPLEMENTED) {
+          // Don't care if it's unimplemented. Allow write() loop to complete.
+          return kj::NEVER_DONE;
+        } else {
+          return kj::mv(e);
+        }
+      });
+
+      return sizeHintPromise.exclusiveJoin(writeLoop(offset, kj::mv(target)));
+    } else {
+      return writeLoop(offset, kj::mv(target));
+    }
+  }
+
+private:
+  class Initializer: public sandstorm::ByteStream::Server {
+  public:
+    Initializer(BlobImpl& object, capnp::Capability::Client client)
+        : object(object), client(kj::mv(client)) {
+      KJ_REQUIRE(object.currentInitializer == nullptr);
+      object.currentInitializer = *this;
+    }
+    ~Initializer() noexcept(false) {
+      object.currentInitializer = nullptr;
+    }
+
+    kj::Promise<uint64_t> getSize() {
+      KJ_IF_MAYBE(s, expectedSize) {
+        return *s;
+      } else {
+        KJ_IF_MAYBE(e, eventualSize) {
+          return e->promise.addBranch();
+        } else {
+          return eventualSize.emplace().promise.addBranch();
+        }
+      }
+    }
+
+    kj::Maybe<uint64_t> getSizeIfKnown() {
+      return expectedSize;
+    }
+
+    kj::Promise<void> onNextData() {
+      if (isDone) return kj::READY_NOW;
+      KJ_IF_MAYBE(n, nextData) {
+        return n->promise.addBranch();
+      } else {
+        return nextData.emplace().promise.addBranch();
+      }
+    }
+
+    kj::Promise<void> write(WriteContext context) override {
+      KJ_REQUIRE(!isDone, "can't call write() after done()");
+
+      auto data = context.getParams().getData();
+      uint64_t newOffset = currentOffset + data.size();
+      KJ_IF_MAYBE(s, expectedSize) {
+        if (newOffset > *s) {
+          currentOffset = *s + 1;  // don't accept any more input
+          KJ_REQUIRE(currentOffset + data.size() <= *s, "written data exceeded expected size");
+        }
+      }
+
+      pwriteAll(object.openRaw(), data.begin(), data.size(), currentOffset);
+      currentOffset = newOffset;
+
+      KJ_IF_MAYBE(n, nextData) {
+        n->fulfiller->fulfill();
+        nextData = nullptr;
+      }
+
+      return kj::READY_NOW;
+    }
+
+    kj::Promise<void> done(DoneContext context) override {
+      KJ_REQUIRE(!isDone, "can't call done() twice");
+      isDone = true;
+
+      KJ_IF_MAYBE(e, expectedSize) {
+        KJ_REQUIRE(currentOffset == *e,
+            "actual bytes written to stream didn't match hint given with expectedSize()");
+      } else {
+        expectedSize = currentOffset;
+        KJ_IF_MAYBE(e, eventualSize) {
+          e->fulfiller->fulfill(kj::cp(currentOffset));
+          eventualSize = nullptr;
+        }
+      }
+
+      KJ_IF_MAYBE(n, nextData) {
+        n->fulfiller->fulfill();
+        nextData = nullptr;
+      }
+
+      int fd = object.openRaw();
+      KJ_SYSCALL(fdatasync(fd));
+      object.updateSize((currentOffset + Volume::BLOCK_SIZE - 1) / Volume::BLOCK_SIZE);
+      return object.setReadOnly();
+    }
+
+    kj::Promise<void> expectSize(ExpectSizeContext context) override {
+      KJ_REQUIRE(!isDone, "can't call expectSize() after done()");
+
+      uint64_t newExpectedSize = context.getParams().getSize() + currentOffset;
+      context.releaseParams();
+
+      KJ_IF_MAYBE(oldExpectedSize, expectedSize) {
+        KJ_ASSERT(newExpectedSize == *oldExpectedSize,
+            "expectSize() called twice with mismatching inputs");
+      } else {
+        expectedSize = newExpectedSize;
+        KJ_IF_MAYBE(e, eventualSize) {
+          e->fulfiller->fulfill(kj::cp(newExpectedSize));
+          eventualSize = nullptr;
+        }
+      }
+
+      return kj::READY_NOW;
+    }
+
+  private:
+    BlobImpl& object;
+    capnp::Capability::Client client;  // prevent GC
+    uint64_t currentOffset = 0;
+    kj::Maybe<uint64_t> expectedSize;
+    bool isDone = false;
+
+    template <typename T>
+    struct ForkedPromiseAndFulfiller {
+      kj::ForkedPromise<T> promise;
+      kj::Own<kj::PromiseFulfiller<T>> fulfiller;
+
+      ForkedPromiseAndFulfiller(kj::PromiseFulfillerPair<T> paf = kj::newPromiseAndFulfiller<T>())
+          : promise(paf.promise.fork()), fulfiller(kj::mv(paf.fulfiller)) {}
+    };
+    kj::Maybe<ForkedPromiseAndFulfiller<uint64_t>> eventualSize;  // fulfilled when size is known
+    kj::Maybe<ForkedPromiseAndFulfiller<void>> nextData;  // fulfilled when data is received
+
+    void expectAdditionalBytes(uint64_t amount) {
+      uint64_t total = currentOffset + amount;
+      KJ_IF_MAYBE(f, eventualSize) {
+        f->fulfiller->fulfill(kj::cp(total));
+        eventualSize = nullptr;
+      }
+      expectedSize = total;
+    }
+  };
+
+  kj::Maybe<Initializer&> currentInitializer;
+
+  kj::Promise<void> writeLoop(uint64_t offset, sandstorm::ByteStream::Client target) {
+    int fd = openRaw();
+
+    auto req = target.writeRequest(capnp::MessageSize { 2052, 0 });
+    auto orphan =
+        capnp::Orphanage::getForMessageContaining(sandstorm::ByteStream::WriteParams::Builder(req))
+        .newOrphan<capnp::Data>(8192);
+    auto buffer = orphan.get();
+    ssize_t n;
+    KJ_SYSCALL(n = pread(fd, buffer.begin(), buffer.size(), offset));
+    if (n > 0) {
+      if (n < buffer.size()) {
+        orphan.truncate(n);
+      }
+      req.adoptData(kj::mv(orphan));
+      offset += n;
+      // TODO(perf): flow control / parallel writes
+      return req.send().then([this,offset,KJ_MVCAP(target)](auto&&) mutable {
+        return writeLoop(offset, kj::mv(target));
+      });
+    } else if (getXattrRef().readOnly) {
+      // EOF, and file is finalized.
+      return target.doneRequest().send().then([](auto&&) {});
+    } else KJ_IF_MAYBE(i, currentInitializer) {
+      // Still uploading. Wait for more data to be available.
+      //
+      // Note that we don't set up to directly copy data from the initializer capability to the
+      // output stream because if the output stream backs up we don't want to buffer data
+      // in-memory. Doing so could lead to DoS, etc.
+      return i->onNextData().then([this,offset,KJ_MVCAP(target)]() mutable {
+        return writeLoop(offset, kj::mv(target));
+      });
+    } else {
+      // Blob is incomplete and no longer being initialized.
+      return KJ_EXCEPTION(FAILED, "blob was not fully uploaded");
+    }
+  }
+};
+
+constexpr FilesystemStorage::Type FilesystemStorage::BlobImpl::TYPE;
+
+// =======================================================================================
+
 class FilesystemStorage::VolumeImpl: public OwnedVolume::Server, public ObjectBase {
 public:
   static constexpr Type TYPE = Type::VOLUME;
@@ -1522,8 +1784,8 @@ public:
     openRaw();
   }
 
-  kj::Promise<void> getSize(GetSizeContext context) override {
-    context.getResults().setTotalBytes(getSizeImpl());
+  kj::Promise<void> getStorageUsage(GetStorageUsageContext context) override {
+    context.getResults().setTotalBytes(getStorageUsageImpl());
     return kj::READY_NOW;
   }
 
@@ -1663,17 +1925,32 @@ public:
   StorageFactoryImpl(ObjectFactory& factory, capnp::Capability::Client storage)
       : factory(factory), storage(kj::mv(storage)) {}
 
+  kj::Promise<void> newBlob(NewBlobContext context) override {
+    auto result = factory.newObject<BlobImpl>();
+    result.object.init(context.getParams().getContent());
+    context.getResults(capnp::MessageSize { 4, 1 }).setBlob(kj::mv(result.client));
+    return kj::READY_NOW;
+  }
+
+  kj::Promise<void> uploadBlob(UploadBlobContext context) override {
+    auto factoryResult = factory.newObject<BlobImpl>();
+    auto results = context.getResults(capnp::MessageSize { 4, 2 });
+    results.setBlob(kj::mv(factoryResult.client));
+    results.setStream(factoryResult.object.init());
+    return kj::READY_NOW;
+  }
+
   kj::Promise<void> newVolume(NewVolumeContext context) override {
     auto result = factory.newObject<VolumeImpl>();
     result.object.init();
-    context.getResults().setVolume(kj::mv(result.client));
+    context.getResults(capnp::MessageSize { 4, 1 }).setVolume(kj::mv(result.client));
     return kj::READY_NOW;
   }
 
   kj::Promise<void> newAssignable(NewAssignableContext context) override {
     auto result = factory.newObject<AssignableImpl>();
     auto promise = result.object.setStoredObject(context.getParams().getInitialValue());
-    context.getResults().setAssignable(kj::mv(result.client));
+    context.getResults(capnp::MessageSize { 4, 1 }).setAssignable(kj::mv(result.client));
     return kj::mv(promise);
   }
 
@@ -1711,7 +1988,7 @@ auto FilesystemStorage::ObjectFactory::openObject(ObjectKey key)
 #define HANDLE_TYPE(tag, type) \
     case Type::tag: \
       return registerObject(kj::heap<type>(journal, kj::addRef(*this), key, id, xattr, kj::mv(fd)))
-//    HANDLE_TYPE(BLOB, BlobImpl);
+    HANDLE_TYPE(BLOB, BlobImpl);
     HANDLE_TYPE(VOLUME, VolumeImpl);
 //    HANDLE_TYPE(IMMUTABLE, ImmutableImpl);
     HANDLE_TYPE(ASSIGNABLE, AssignableImpl);

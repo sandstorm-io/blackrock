@@ -30,8 +30,8 @@ interface Blob {
   # Get the total size of the blob. May block if the blob is still being uploaded and the size is
   # not yet known.
 
-  writeTo @1 (sink :ByteStream, startAtOffset :UInt64 = 0) -> (handle :Util.Handle);
-  # Write the contents of the blob to `sink`.
+  writeTo @1 (stream :ByteStream, startAtOffset :UInt64 = 0) -> (handle :Util.Handle);
+  # Write the contents of the blob to `stream`.
 
   getSlice @2 (offset :UInt64, size :UInt32) -> (data :Data);
   # Read a slice of the blob starting at the given offset. `size` cannot be greater than Cap'n
@@ -241,7 +241,7 @@ interface OwnedStorage(T) {
   #
   # TODO(someday): Let caller store some petname on this?
 
-  getSize @1 () -> (totalBytes :UInt64);
+  getStorageUsage @1 () -> (totalBytes :UInt64);
   # Get the total storage space consumed by this object, including owned sub-objects.
 
   # TODO(someday): Observe the total size of this object (including children). Use cases:
@@ -268,8 +268,8 @@ interface StorageFactory {
   newBlob @0 (content :Data) -> (blob :OwnedBlob);
   # Create a new blob from some bytes.
 
-  uploadBlob @1 () -> (blob :OwnedBlob, sink :ByteStream);
-  # Begin uploading a large blob. The content should be written to `sink`. The blob is returned
+  uploadBlob @1 () -> (blob :OwnedBlob, stream :ByteStream);
+  # Begin uploading a large blob. The content should be written to `stream`. The blob is returned
   # immediately, but any attempt to read from it will block waiting for bytes to be uploaded.
   # If an error later occurs during upload, the blob will be left broken, and attempts to read it
   # may throw exceptions.

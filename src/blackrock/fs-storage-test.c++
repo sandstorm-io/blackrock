@@ -105,7 +105,7 @@ KJ_TEST("basic assignables") {
     auto response = root.getRequest().send().wait(env.io.waitScope);
     KJ_EXPECT(response.getValue().getText() == "foo");
 
-    KJ_EXPECT(root.getSizeRequest().send().wait(env.io.waitScope).getTotalBytes() == 4096);
+    KJ_EXPECT(root.getStorageUsageRequest().send().wait(env.io.waitScope).getTotalBytes() == 4096);
 
     // Modify the value.
     auto req = response.getSetter().setRequest();
@@ -127,7 +127,7 @@ KJ_TEST("basic assignables") {
     auto subResponse2 = readback.getSub2().getRequest().send().wait(env.io.waitScope);
     KJ_EXPECT(subResponse2.getValue().getText() == "qux");
 
-    KJ_EXPECT(root.getSizeRequest().send().wait(env.io.waitScope).getTotalBytes() == 4096 * 4);
+    KJ_EXPECT(root.getStorageUsageRequest().send().wait(env.io.waitScope).getTotalBytes()==4096*4);
 
     promise.wait(env.io.waitScope);
   }
@@ -171,7 +171,7 @@ KJ_TEST("use after reload") {
       .getRequest().send().wait(env.io.waitScope);
   KJ_EXPECT(subSubResponse.getValue().getText() == "corge");
 
-  KJ_EXPECT(root.getSizeRequest().send().wait(env.io.waitScope).getTotalBytes() == 4096 * 4);
+  KJ_EXPECT(root.getStorageUsageRequest().send().wait(env.io.waitScope).getTotalBytes() == 4096*4);
 }
 
 // Current state of storage:
@@ -202,7 +202,7 @@ KJ_TEST("delete some children") {
     // don't set sub2
     req.send().wait(env.io.waitScope);
 
-    uint64_t size = root.getSizeRequest().send().wait(env.io.waitScope).getTotalBytes();
+    uint64_t size = root.getStorageUsageRequest().send().wait(env.io.waitScope).getTotalBytes();
     KJ_EXPECT(size == 4096 * 2, size);
 
     response.getValue().getSub2();
@@ -230,7 +230,284 @@ KJ_TEST("delete some children") {
   KJ_EXPECT(sandstorm::listDirectoryFd(deathRow).size() == 0);
 
   // Expect parent's size wasn't unexpectedly modified.
-  KJ_EXPECT(root.getSizeRequest().send().wait(env.io.waitScope).getTotalBytes() == 4096 * 2);
+  KJ_EXPECT(root.getStorageUsageRequest().send().wait(env.io.waitScope).getTotalBytes() == 4096*2);
+}
+
+struct TestByteStream final: public sandstorm::ByteStream::Server, public kj::Refcounted {
+  kj::Promise<void> write(WriteContext context) override {
+    KJ_ASSERT(!gotDone);
+    content.addAll(context.getParams().getData());
+    return kj::READY_NOW;
+  }
+
+  kj::Promise<void> done(DoneContext context) override {
+    KJ_ASSERT(!gotDone);
+    gotDone = true;
+    return kj::READY_NOW;
+  }
+
+  kj::Promise<void> expectSize(ExpectSizeContext context) override {
+    KJ_ASSERT(!gotDone);
+    KJ_ASSERT(expectedSize == nullptr);
+    expectedSize = context.getParams().getSize();
+    return kj::READY_NOW;
+  }
+
+  kj::Vector<byte> content;
+  bool gotDone = false;
+  kj::Maybe<uint64_t> expectedSize;
+};
+
+KJ_TEST("blob") {
+  StorageTestFixture env;
+
+  auto blob = ({
+    auto req = env.factory.newBlobRequest();
+    req.setContent(kj::StringPtr("foobar").asBytes());
+    req.send().getBlob();
+  });
+
+  KJ_EXPECT(blob.getSizeRequest().send().wait(env.io.waitScope).getSize() == 6);
+
+  auto stream = kj::refcounted<TestByteStream>();
+  {
+    auto req = blob.writeToRequest();
+    req.setStream(kj::addRef(*stream));
+    req.send().wait(env.io.waitScope);
+  }
+  KJ_EXPECT(kj::heapString(stream->content.asPtr().asChars()) == "foobar");
+  KJ_EXPECT(stream->gotDone);
+  KJ_EXPECT(KJ_ASSERT_NONNULL(stream->expectedSize) == 6);
+}
+
+KJ_TEST("blob partial download") {
+  StorageTestFixture env;
+
+  auto blob = ({
+    auto req = env.factory.newBlobRequest();
+    req.setContent(kj::StringPtr("foobar").asBytes());
+    req.send().getBlob();
+  });
+
+  KJ_EXPECT(blob.getSizeRequest().send().wait(env.io.waitScope).getSize() == 6);
+
+  auto stream = kj::refcounted<TestByteStream>();
+  {
+    auto req = blob.writeToRequest();
+    req.setStartAtOffset(3);
+    req.setStream(kj::addRef(*stream));
+    req.send().wait(env.io.waitScope);
+  }
+  KJ_EXPECT(kj::heapString(stream->content.asPtr().asChars()) == "bar");
+  KJ_EXPECT(stream->gotDone);
+  KJ_EXPECT(KJ_ASSERT_NONNULL(stream->expectedSize) == 3);
+}
+
+KJ_TEST("blob streaming initialization") {
+  StorageTestFixture env;
+
+  auto blobInit = env.factory.uploadBlobRequest().send();
+
+  auto blob = blobInit.getBlob();
+
+  {
+    auto upStream = blobInit.getStream();
+    {
+      auto req = upStream.writeRequest();
+      req.setData(kj::StringPtr("foobar").asBytes());
+      req.send().wait(env.io.waitScope);
+    }
+    upStream.doneRequest().send().wait(env.io.waitScope);
+  }
+  blobInit.wait(env.io.waitScope);
+
+  KJ_EXPECT(blob.getSizeRequest().send().wait(env.io.waitScope).getSize() == 6);
+
+  auto stream = kj::refcounted<TestByteStream>();
+  {
+    auto req = blob.writeToRequest();
+    req.setStream(kj::addRef(*stream));
+    req.send().wait(env.io.waitScope);
+  }
+  KJ_EXPECT(kj::heapString(stream->content.asPtr().asChars()) == "foobar");
+  KJ_EXPECT(stream->gotDone);
+  KJ_EXPECT(KJ_ASSERT_NONNULL(stream->expectedSize) == 6);
+}
+
+KJ_TEST("blob interleaved initialization") {
+  StorageTestFixture env;
+
+  auto blobInit = env.factory.uploadBlobRequest().send();
+
+  auto blob = blobInit.getBlob();
+
+  auto upStream = blobInit.getStream();
+  {
+    auto req = upStream.writeRequest();
+    req.setData(kj::StringPtr("foo").asBytes());
+    req.send().wait(env.io.waitScope);
+  }
+
+  auto stream = kj::refcounted<TestByteStream>();
+  auto download = ({
+    auto req = blob.writeToRequest();
+    req.setStream(kj::addRef(*stream));
+    req.send();
+  });
+
+  env.io.provider->getTimer().afterDelay(10 * kj::MILLISECONDS).wait(env.io.waitScope);
+  KJ_EXPECT(kj::heapString(stream->content.asPtr().asChars()) == "foo");
+  KJ_EXPECT(!stream->gotDone);
+  KJ_EXPECT(stream->expectedSize == nullptr);
+
+  {
+    auto req = upStream.writeRequest();
+    req.setData(kj::StringPtr("bar").asBytes());
+    req.send().wait(env.io.waitScope);
+  }
+  upStream.doneRequest().send().wait(env.io.waitScope);
+  blobInit.wait(env.io.waitScope);
+
+  KJ_EXPECT(blob.getSizeRequest().send().wait(env.io.waitScope).getSize() == 6);
+
+  KJ_EXPECT(kj::heapString(stream->content.asPtr().asChars()) == "foobar");
+  KJ_EXPECT(stream->gotDone);
+  KJ_EXPECT(stream->expectedSize == nullptr);
+}
+
+KJ_TEST("blob interleaved initialization with expected size") {
+  StorageTestFixture env;
+
+  auto blobInit = env.factory.uploadBlobRequest().send();
+
+  auto blob = blobInit.getBlob();
+
+  auto upStream = blobInit.getStream();
+  {
+    auto req = upStream.expectSizeRequest();
+    req.setSize(6);
+    req.send().wait(env.io.waitScope);
+  }
+  {
+    auto req = upStream.writeRequest();
+    req.setData(kj::StringPtr("foo").asBytes());
+    req.send().wait(env.io.waitScope);
+  }
+
+  auto stream = kj::refcounted<TestByteStream>();
+  auto download = ({
+    auto req = blob.writeToRequest();
+    req.setStream(kj::addRef(*stream));
+    req.send();
+  });
+
+  env.io.provider->getTimer().afterDelay(10 * kj::MILLISECONDS).wait(env.io.waitScope);
+  KJ_EXPECT(kj::heapString(stream->content.asPtr().asChars()) == "foo");
+  KJ_EXPECT(!stream->gotDone);
+  KJ_EXPECT(KJ_ASSERT_NONNULL(stream->expectedSize) == 6);
+
+  {
+    auto req = upStream.writeRequest();
+    req.setData(kj::StringPtr("bar").asBytes());
+    req.send().wait(env.io.waitScope);
+  }
+  upStream.doneRequest().send().wait(env.io.waitScope);
+  blobInit.wait(env.io.waitScope);
+
+  KJ_EXPECT(blob.getSizeRequest().send().wait(env.io.waitScope).getSize() == 6);
+
+  KJ_EXPECT(kj::heapString(stream->content.asPtr().asChars()) == "foobar");
+  KJ_EXPECT(stream->gotDone);
+  KJ_EXPECT(KJ_ASSERT_NONNULL(stream->expectedSize) == 6);
+}
+
+KJ_TEST("blob interleaved initialization partial download") {
+  StorageTestFixture env;
+
+  auto blobInit = env.factory.uploadBlobRequest().send();
+
+  auto blob = blobInit.getBlob();
+
+  auto upStream = blobInit.getStream();
+  {
+    auto req = upStream.writeRequest();
+    req.setData(kj::StringPtr("foo").asBytes());
+    req.send().wait(env.io.waitScope);
+  }
+
+  auto stream = kj::refcounted<TestByteStream>();
+  auto download = ({
+    auto req = blob.writeToRequest();
+    req.setStartAtOffset(4);
+    req.setStream(kj::addRef(*stream));
+    req.send();
+  });
+
+  env.io.provider->getTimer().afterDelay(10 * kj::MILLISECONDS).wait(env.io.waitScope);
+  KJ_EXPECT(stream->content.size() == 0);
+  KJ_EXPECT(!stream->gotDone);
+  KJ_EXPECT(stream->expectedSize == nullptr);
+
+  {
+    auto req = upStream.writeRequest();
+    req.setData(kj::StringPtr("bar").asBytes());
+    req.send().wait(env.io.waitScope);
+  }
+  upStream.doneRequest().send().wait(env.io.waitScope);
+  blobInit.wait(env.io.waitScope);
+
+  KJ_EXPECT(blob.getSizeRequest().send().wait(env.io.waitScope).getSize() == 6);
+
+  KJ_EXPECT(kj::heapString(stream->content.asPtr().asChars()) == "ar");
+  KJ_EXPECT(stream->gotDone);
+  KJ_EXPECT(stream->expectedSize == nullptr);
+}
+
+KJ_TEST("blob interleaved initialization partial download with expected size") {
+  StorageTestFixture env;
+
+  auto blobInit = env.factory.uploadBlobRequest().send();
+
+  auto blob = blobInit.getBlob();
+
+  auto upStream = blobInit.getStream();
+  {
+    auto req = upStream.expectSizeRequest();
+    req.setSize(6);
+    req.send().wait(env.io.waitScope);
+  }
+  {
+    auto req = upStream.writeRequest();
+    req.setData(kj::StringPtr("foo").asBytes());
+    req.send().wait(env.io.waitScope);
+  }
+
+  auto stream = kj::refcounted<TestByteStream>();
+  auto download = ({
+    auto req = blob.writeToRequest();
+    req.setStartAtOffset(4);
+    req.setStream(kj::addRef(*stream));
+    req.send();
+  });
+
+  env.io.provider->getTimer().afterDelay(10 * kj::MILLISECONDS).wait(env.io.waitScope);
+  KJ_EXPECT(stream->content.size() == 0);
+  KJ_EXPECT(!stream->gotDone);
+  KJ_EXPECT(KJ_ASSERT_NONNULL(stream->expectedSize) == 2);
+
+  {
+    auto req = upStream.writeRequest();
+    req.setData(kj::StringPtr("bar").asBytes());
+    req.send().wait(env.io.waitScope);
+  }
+  upStream.doneRequest().send().wait(env.io.waitScope);
+  blobInit.wait(env.io.waitScope);
+
+  KJ_EXPECT(blob.getSizeRequest().send().wait(env.io.waitScope).getSize() == 6);
+
+  KJ_EXPECT(kj::heapString(stream->content.asPtr().asChars()) == "ar");
+  KJ_EXPECT(stream->gotDone);
+  KJ_EXPECT(KJ_ASSERT_NONNULL(stream->expectedSize) == 2);
 }
 
 // TODO(test): journal recovery
