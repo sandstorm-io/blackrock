@@ -60,9 +60,9 @@ interface Worker {
   }
 
   unpackBackup @3 (data :Storage.Blob, storage :Storage.StorageFactory)
-               -> (volume :Storage.Volume, metadata :Grain.GrainInfo);
+               -> (volume :Storage.OwnedVolume, metadata :Grain.GrainInfo);
   packBackup @4 (volume :Storage.Volume, metadata :Grain.GrainInfo, storage :Storage.StorageFactory)
-             -> (data :Storage.Blob);
+             -> (data :Storage.OwnedBlob);
 
   # TODO(someday): Enumerate grains.
   # TODO(someday): Resource usage stats.

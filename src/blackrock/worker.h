@@ -108,6 +108,8 @@ protected:
   kj::Promise<void> newGrain(NewGrainContext context) override;
   kj::Promise<void> restoreGrain(RestoreGrainContext context) override;
   kj::Promise<void> unpackPackage(UnpackPackageContext context) override;
+  kj::Promise<void> unpackBackup(UnpackBackupContext context) override;
+  kj::Promise<void> packBackup(PackBackupContext context) override;
 
 private:
   class RunningGrain;
@@ -176,6 +178,21 @@ public:
 
 private:
   kj::ProcessContext& context;
+};
+
+class BackupMain: public sandstorm::AbstractMain {
+  // Thin wrapper around backup/restore functionality for use by Blackrock worker.
+
+public:
+  BackupMain(kj::ProcessContext& context): context(context) {}
+
+  kj::MainFunc getMain() override;
+
+  kj::MainBuilder::Validity run(kj::StringPtr filename);
+
+private:
+  kj::ProcessContext& context;
+  bool restore = false;
 };
 
 }  // namespace blackrock

@@ -31,6 +31,7 @@
 #include <stdio.h>
 #include "nbd-bridge.h"
 #include "gce.h"
+#include <sandstorm/backup.h>
 
 namespace blackrock {
 
@@ -291,6 +292,10 @@ public:
             "(internal) run a grain supervisor")
         .addSubCommand("unpack", KJ_BIND_METHOD(*this, getUnpackMain),
             "(internal) unpack an spk into a network volume")
+        .addSubCommand("meta-backup", KJ_BIND_METHOD(*this, getMetaBackupMain),
+            "(internal) backup/restore grain data from/to volume")
+        .addSubCommand("backup", KJ_BIND_METHOD(*this, getBackupMain),
+            "(internal) backup/restore grain data from/to directory")
         .addSubCommand("log", KJ_BIND_METHOD(*this, getLogMain), "run log client")
         .build();
   }
@@ -346,6 +351,16 @@ public:
 
   kj::MainFunc getUnpackMain() {
     alternateMain = kj::heap<UnpackMain>(context);
+    return alternateMain->getMain();
+  }
+
+  kj::MainFunc getBackupMain() {
+    alternateMain = kj::heap<sandstorm::BackupMain>(context);
+    return alternateMain->getMain();
+  }
+
+  kj::MainFunc getMetaBackupMain() {
+    alternateMain = kj::heap<BackupMain>(context);
     return alternateMain->getMain();
   }
 

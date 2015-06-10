@@ -38,8 +38,6 @@ protected:
       req.send().getObject().castAs<OwnedVolume>();
     });
 
-    // TODO(security): make `packageVolume` read-only somehow
-
     // Get the owner user data.
     auto owner = ({
       auto userObjectName = kj::str("user-", params.getOwnerId());
@@ -70,30 +68,7 @@ protected:
       auto grainId = params.getGrainId();
 
       // Update owner.
-      return ownerGet.then([KJ_MVCAP(grainState),grainId](auto&& getResults) mutable {
-        auto userInfo = getResults.getValue();
-
-        // Ugh, extending a list in Cap'n Proto is kind of a pain...
-        // We copy the user info to a temporary, and then we use Orphan::truncate() to extend the
-        // list by one, and then we fill in the new slot.
-        capnp::MallocMessageBuilder temp;
-        temp.setRoot(userInfo);
-        auto userInfoCopy = temp.getRoot<AccountStorage>();
-        auto grainsOrphan = userInfoCopy.disownGrains();
-        grainsOrphan.truncate(grainsOrphan.get().size() + 1);
-        auto grains = grainsOrphan.get();
-        auto newGrainInfo = grains[grains.size() - 1];
-        newGrainInfo.setId(grainId);
-        newGrainInfo.setState(kj::mv(grainState));
-        userInfoCopy.adoptGrains(kj::mv(grainsOrphan));
-
-        // Now we can copy the whole thing back into a set request. (We didn't build it there in
-        // the first place because extending a list usually leaves an allocation hole, requiring
-        // a copy to GC.)
-        auto req = getResults.getSetter().setRequest();
-        req.setValue(userInfoCopy);
-        return req.send().then([](auto) {});
-      });
+      return addGrainToUser(kj::mv(ownerGet), grainId, kj::mv(grainState));
     } else {
       return ownerGet.then(
           [this,context,params,packageId,KJ_MVCAP(storageFactory),KJ_MVCAP(packageVolume)]
@@ -214,6 +189,8 @@ protected:
     });
   }
 
+  // ---------------------------------------------------------------------------
+
   kj::Promise<void> installPackage(InstallPackageContext context) override {
     Worker::Client worker = frontend.workers->chooseOne();
     StorageRootSet::Client storage = frontend.storageRoots->chooseOne();
@@ -242,6 +219,133 @@ protected:
     req.setName(kj::str("package-", context.getParams().getPackageId()));
     context.releaseParams();
     return req.send().then([](auto) {});
+  }
+
+  // ---------------------------------------------------------------------------
+
+  kj::Promise<void> backupGrain(BackupGrainContext context) override {
+    auto params = context.getParams();
+
+    Worker::Client worker = frontend.workers->chooseOne();
+    StorageRootSet::Client storage = frontend.storageRoots->chooseOne();
+    StorageFactory::Client storageFactory = storage.getFactoryRequest().send().getFactory();
+
+    auto req = storage.getOrCreateAssignableRequest<AccountStorage>();
+    req.setName(kj::str("user-", params.getOwnerId()));
+    req.initDefaultValue();
+    return req.send().getObject().getRequest().send().then(
+        [this,context,params,KJ_MVCAP(worker),KJ_MVCAP(storage),KJ_MVCAP(storageFactory)]
+        (auto&& getResults) mutable {
+      auto grainId = params.getGrainId();
+      for (auto grainInfo: getResults.getValue().getGrains()) {
+        if (grainInfo.getId() == grainId) {
+          // This is the grain we're looking for!
+
+          // TODO(integrity): Use a "frozen" version of the volume.
+          auto volume = grainInfo.getState().getRequest().send().getValue().getVolume();
+
+          // Make request to the Worker to pack this backup.
+          auto metadata = params.getInfo();
+          auto sizeHint = metadata.totalSize();
+          sizeHint.wordCount += 8;
+          sizeHint.capCount += 2;
+          auto req = worker.packBackupRequest(sizeHint);
+          req.setVolume(kj::mv(volume));
+          req.setMetadata(metadata);
+          req.setStorage(kj::mv(storageFactory));
+          return req.send().then([this,params,KJ_MVCAP(storage)](auto&& response) mutable {
+            auto req2 = storage.setRequest<Blob>(capnp::MessageSize {4, 1});
+            req2.setName(kj::str("backup-", params.getBackupId()));
+            req2.setObject(response.getData());
+            return req2.send().then([](auto&&) {});
+          });
+        }
+      }
+      KJ_FAIL_REQUIRE("no such grain", grainId);
+    });
+  }
+
+  kj::Promise<void> restoreGrain(RestoreGrainContext context) override {
+    auto params = context.getParams();
+
+    Worker::Client worker = frontend.workers->chooseOne();
+    StorageRootSet::Client storage = frontend.storageRoots->chooseOne();
+    StorageFactory::Client storageFactory = storage.getFactoryRequest().send().getFactory();
+
+    auto blob = ({
+      auto req = storage.getRequest<Blob>();
+      req.setName(kj::str("backup-", params.getBackupId()));
+      req.send().getObject().castAs<Blob>();
+    });
+
+    auto req = worker.unpackBackupRequest();
+    req.setData(kj::mv(blob));
+    req.setStorage(storageFactory);
+
+    return req.send().then([this,context,params,KJ_MVCAP(storage),KJ_MVCAP(storageFactory)]
+                           (auto&& response) mutable {
+      auto grainState = ({
+        auto req = storageFactory.newAssignableRequest<GrainState>();
+        auto state = req.initInitialValue();
+        state.setInactive();
+        state.setVolume(response.getVolume());
+        req.send().getAssignable();
+      });
+
+      auto ownerGet = ({
+        auto req = storage.getOrCreateAssignableRequest<AccountStorage>();
+        req.setName(kj::str("user-", params.getOwnerId()));
+        req.initDefaultValue();
+        req.send().getObject().getRequest().send();
+      });
+
+      auto metadata = response.getMetadata();
+      auto sizeHint = metadata.totalSize();
+      sizeHint.wordCount += 4;
+      context.getResults(sizeHint).setInfo(metadata);
+
+      return addGrainToUser(kj::mv(ownerGet), params.getGrainId(), kj::mv(grainState));
+    });
+  }
+
+  kj::Promise<void> uploadBackup(UploadBackupContext context) override {
+    StorageRootSet::Client storage = frontend.storageRoots->chooseOne();
+    StorageFactory::Client storageFactory = storage.getFactoryRequest().send().getFactory();
+
+    auto upload = storageFactory.uploadBlobRequest().send();
+
+    auto req = storage.setRequest<Blob>();
+    req.setName(kj::str("backup-", context.getParams().getBackupId()));
+    req.setObject(upload.getBlob());
+    context.releaseParams();
+
+    // TODO(perf): Pipelining could be improved here by wrapping the returned stream such that
+    //   it only requires the StorageRoot.set() request to complete when done() is called. Probably
+    //   not worth the effort, though.
+    context.getResults(capnp::MessageSize {4,1}).setStream(upload.getStream());
+    return req.send().then([](auto&&) {});
+  }
+
+  kj::Promise<void> downloadBackup(DownloadBackupContext context) override {
+    auto params = context.getParams();
+    auto stream = params.getStream();
+
+    StorageRootSet::Client storage = frontend.storageRoots->chooseOne();
+
+    auto req = storage.getRequest<Blob>();
+    req.setName(kj::str("backup-", params.getBackupId()));
+    context.releaseParams();
+
+    auto req2 = req.send().getObject().castAs<Blob>().writeToRequest();
+    req2.setStream(kj::mv(stream));
+    return req2.send().then([](auto&&) {});
+  }
+
+  kj::Promise<void> deleteBackup(DeleteBackupContext context) override {
+    auto req = frontend.storageRoots->chooseOne().removeRequest();
+    req.setName(kj::str("backup-", context.getParams().getBackupId()));
+    context.releaseParams();
+    return req.send().then([](auto&&) {});
   }
 
 private:
@@ -300,6 +404,37 @@ private:
     StorageRootSet::Client storage;
     Worker::PackageUploadStream::Client inner;
   };
+
+  kj::Promise<void> addGrainToUser(
+      capnp::RemotePromise<sandstorm::Assignable<AccountStorage>::GetResults> ownerGet,
+      capnp::Text::Reader grainId, OwnedAssignable<GrainState>::Client grainState) {
+    // Add a new grain to a user account's grain list.
+
+    return ownerGet.then([KJ_MVCAP(grainState),grainId](auto&& getResults) mutable {
+      auto userInfo = getResults.getValue();
+
+      // Ugh, extending a list in Cap'n Proto is kind of a pain...
+      // We copy the user info to a temporary, and then we use Orphan::truncate() to extend the
+      // list by one, and then we fill in the new slot.
+      capnp::MallocMessageBuilder temp;
+      temp.setRoot(userInfo);
+      auto userInfoCopy = temp.getRoot<AccountStorage>();
+      auto grainsOrphan = userInfoCopy.disownGrains();
+      grainsOrphan.truncate(grainsOrphan.get().size() + 1);
+      auto grains = grainsOrphan.get();
+      auto newGrainInfo = grains[grains.size() - 1];
+      newGrainInfo.setId(grainId);
+      newGrainInfo.setState(kj::mv(grainState));
+      userInfoCopy.adoptGrains(kj::mv(grainsOrphan));
+
+      // Now we can copy the whole thing back into a set request. (We didn't build it there in
+      // the first place because extending a list usually leaves an allocation hole, requiring
+      // a copy to GC.)
+      auto req = getResults.getSetter().setRequest();
+      req.setValue(userInfoCopy);
+      return req.send().then([](auto) {});
+    });
+  }
 
   struct ContinueParams {
     sandstorm::Assignable<GrainState>::Client grainAssignable;

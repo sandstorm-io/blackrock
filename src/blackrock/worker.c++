@@ -18,8 +18,143 @@
 #include <signal.h>
 #include <sys/wait.h>
 #include <errno.h>
+#include <sandstorm/backup.h>
 
 namespace blackrock {
+
+namespace {
+
+class BlobDownloadStreamImpl: public sandstorm::ByteStream::Server {
+public:
+  BlobDownloadStreamImpl(kj::AutoCloseFd fd): target(kj::mv(fd)) {}
+
+  void requireDone() {
+    KJ_REQUIRE(isDone, "done() not called on ByteStream");
+  }
+
+  kj::Promise<void> write(WriteContext context) override {
+    KJ_REQUIRE(!isDone);
+
+    auto data = context.getParams().getData();
+    target.write(data.begin(), data.size());
+
+    return kj::READY_NOW;
+  }
+
+  kj::Promise<void> done(DoneContext context) override {
+    isDone = true;
+    return kj::READY_NOW;
+  }
+
+private:
+  kj::FdOutputStream target;
+  bool isDone = false;
+};
+
+kj::Promise<void> uploadBlob(kj::AutoCloseFd fd, sandstorm::ByteStream::Client stream) {
+  auto req = stream.writeRequest(capnp::MessageSize {2052, 0});
+  auto orphanage = capnp::Orphanage::getForMessageContaining(
+      kj::implicitCast<sandstorm::ByteStream::WriteParams::Builder>(req));
+
+  auto orphan = orphanage.newOrphan<capnp::Data>(8192);
+  auto buffer = orphan.get();
+  ssize_t n;
+  KJ_SYSCALL(n = read(fd, buffer.begin(), buffer.size()));
+  if (n < buffer.size()) {
+    if (n == 0) {
+      return stream.doneRequest().send().then([](auto&&) {});
+    }
+    orphan.truncate(n);
+  }
+
+  req.adoptData(kj::mv(orphan));
+
+  return req.send().then([KJ_MVCAP(fd),KJ_MVCAP(stream)](auto&&) mutable {
+    return uploadBlob(kj::mv(fd), kj::mv(stream));
+  });
+}
+
+class TemporaryFile {
+  // Creates a temporary file with an on-disk path, then deletes it in the destructor.
+
+public:
+  TemporaryFile() {
+    char name[] = "/var/tmp/blackrock-temp.XXXXXX";
+    int fd_;
+    KJ_SYSCALL(fd_ = mkostemp(name, O_CLOEXEC));
+    fd = kj::AutoCloseFd(fd_);
+    filename = kj::heapString(name);
+  }
+
+  ~TemporaryFile() noexcept(false) {
+    KJ_SYSCALL(unlink(filename.cStr())) { break; }
+  }
+
+  kj::AutoCloseFd releaseFd() {
+    return kj::mv(fd);
+  }
+
+  kj::StringPtr getFilename() {
+    return filename;
+  }
+
+private:
+  kj::String filename;
+  kj::AutoCloseFd fd;
+};
+
+struct AsyncOutSyncInPipe {
+  kj::AutoCloseFd readEnd;
+  kj::Own<kj::AsyncOutputStream> writeEnd;
+
+  static AsyncOutSyncInPipe make(kj::LowLevelAsyncIoProvider& ioProvider) {
+    int fds[2];
+    KJ_SYSCALL(pipe2(fds, O_CLOEXEC));
+    return {
+      kj::AutoCloseFd(fds[0]),
+      ioProvider.wrapOutputFd(fds[1],
+          kj::LowLevelAsyncIoProvider::TAKE_OWNERSHIP |
+          kj::LowLevelAsyncIoProvider::ALREADY_CLOEXEC)
+    };
+  }
+};
+
+struct AsyncInSyncOutPipe {
+  kj::Own<kj::AsyncInputStream> readEnd;
+  kj::AutoCloseFd writeEnd;
+
+  static AsyncInSyncOutPipe make(kj::LowLevelAsyncIoProvider& ioProvider) {
+    int fds[2];
+    KJ_SYSCALL(pipe2(fds, O_CLOEXEC));
+    return {
+      ioProvider.wrapInputFd(fds[0],
+          kj::LowLevelAsyncIoProvider::TAKE_OWNERSHIP |
+          kj::LowLevelAsyncIoProvider::ALREADY_CLOEXEC),
+      kj::AutoCloseFd(fds[1])
+    };
+  }
+};
+
+struct NbdSocketPair {
+  kj::Own<kj::AsyncIoStream> userEnd;
+  kj::AutoCloseFd kernelEnd;
+
+  static NbdSocketPair make(kj::LowLevelAsyncIoProvider& ioProvider) {
+    int fds[2];
+    KJ_SYSCALL(socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC | SOCK_NONBLOCK, 0, fds));
+    return {
+      ioProvider.wrapSocketFd(fds[0],
+          kj::LowLevelAsyncIoProvider::TAKE_OWNERSHIP |
+          kj::LowLevelAsyncIoProvider::ALREADY_CLOEXEC |
+          kj::LowLevelAsyncIoProvider::ALREADY_NONBLOCK),
+      kj::AutoCloseFd(fds[1])
+    };
+  }
+};
+
+}  // namespace
+
+// =======================================================================================
 
 byte PackageMountSet::dummyByte = 0;
 
@@ -552,6 +687,123 @@ kj::Promise<void> WorkerImpl::unpackPackage(UnpackPackageContext context) {
   return kj::READY_NOW;
 }
 
+// -----------------------------------------------------------------------------
+
+kj::Promise<void> WorkerImpl::unpackBackup(UnpackBackupContext context) {
+  auto params = context.getParams();
+  auto blob = params.getData();
+  auto storage = params.getStorage();
+  context.releaseParams();
+
+  // Create temporary file.
+  auto tmpfile = kj::heap<TemporaryFile>();
+  auto& tmpfileRef = *tmpfile;
+
+  // Create the new volume.
+  auto volume = storage.newVolumeRequest().send().getVolume();
+
+  // We have two lambdas below that both want to capture `volume`. Due to clang bug #22354, if we
+  // try to use the copy constructor to capture `volume` "by value" rather than by move, we run
+  // into problems, so manually make a copy here. https://llvm.org/bugs/show_bug.cgi?id=22354
+  // TODO(cleanup): Remove this hack when Clang is fixed.
+  auto volume2 = volume;
+
+  // Arrange to download the blob.
+  auto stream = kj::heap<BlobDownloadStreamImpl>(tmpfile->releaseFd());
+  auto& streamRef = *stream;
+  sandstorm::ByteStream::Client streamCap = kj::mv(stream);
+  auto req = blob.writeToRequest();
+  req.setStream(streamCap);
+  return req.send()
+      .then([this,KJ_MVCAP(volume),&tmpfileRef,KJ_MVCAP(streamCap),&streamRef](auto&&) mutable {
+    streamRef.requireDone();
+
+    // Setup NBD.
+    auto nbdSocketPair = NbdSocketPair::make(ioProvider);
+    auto nbdVolume = kj::heap<NbdVolumeAdapter>(
+        kj::mv(nbdSocketPair.userEnd), volume, NbdAccessType::READ_WRITE);
+    auto volumeRunTask = nbdVolume->run().attach(kj::mv(nbdVolume));
+
+    // Run backup process.
+    sandstorm::Subprocess::Options options({
+        "blackrock", "meta-backup", "-r", tmpfileRef.getFilename()});
+    options.executable = "/proc/self/exe";
+    int moreFds[1] = { nbdSocketPair.kernelEnd };
+    auto stdoutPipe = AsyncInSyncOutPipe::make(ioProvider);
+    options.stdout = stdoutPipe.writeEnd;
+    options.moreFds = moreFds;
+    auto process = subprocessSet.waitForSuccess(kj::mv(options));
+
+    // Read the grain info from the process's stdout.
+    auto readTask = capnp::readMessage(*stdoutPipe.readEnd).attach(kj::mv(stdoutPipe.readEnd));
+
+    // It's most important to use that volumeRunTask has a chance to complete successfully. It's
+    // also important to us that we don't kill the subprocess since it needs to unmount stuff.
+    // Comparatively, there's not much harm in cancelling readTask if these fail. Thus, instead
+    // of joining the promises, we chain them.
+    return volumeRunTask.then([KJ_MVCAP(process)]() mutable {
+      return kj::mv(process);
+    }).then([KJ_MVCAP(readTask)]() mutable {
+      return kj::mv(readTask);
+    });
+  }).attach(kj::mv(tmpfile))
+    .then([context,KJ_MVCAP(volume2)](kj::Own<capnp::MessageReader>&& grainInfoReader) mutable {
+    auto grainInfo = grainInfoReader->getRoot<sandstorm::GrainInfo>();
+    auto sizeHint = grainInfo.totalSize();
+    sizeHint.wordCount += 4;
+    sizeHint.capCount += 1;
+    auto results = context.getResults(sizeHint);
+    results.setVolume(volume2);
+    results.setMetadata(grainInfo);
+  });
+}
+
+kj::Promise<void> WorkerImpl::packBackup(PackBackupContext context) {
+  auto params = context.getParams();
+  auto volume = params.getVolume();
+  auto metadata = params.getMetadata();
+  auto storage = params.getStorage();
+
+  auto tmpfile = kj::heap<TemporaryFile>();
+
+  // Setup NBD.
+  auto nbdSocketPair = NbdSocketPair::make(ioProvider);
+  auto nbdVolume = kj::heap<NbdVolumeAdapter>(
+      kj::mv(nbdSocketPair.userEnd), volume, NbdAccessType::READ_ONLY);
+  auto volumeRunTask = nbdVolume->run().attach(kj::mv(nbdVolume));
+
+  // Run backup process.
+  sandstorm::Subprocess::Options options({
+      "blackrock", "meta-backup", tmpfile->getFilename()});
+  options.executable = "/proc/self/exe";
+  int moreFds[1] = { nbdSocketPair.kernelEnd };
+  auto stdinPipe = AsyncOutSyncInPipe::make(ioProvider);
+  options.stdin = stdinPipe.readEnd;
+  options.moreFds = moreFds;
+  auto process = subprocessSet.waitForSuccess(kj::mv(options));
+
+  // Write the grain info to the process's stdin.
+  auto grainInfoMessage = kj::heap<capnp::MallocMessageBuilder>(metadata.totalSize().wordCount + 4);
+  grainInfoMessage->setRoot(metadata);
+  auto writeTask = capnp::writeMessage(*stdinPipe.writeEnd, *grainInfoMessage)
+      .attach(kj::mv(grainInfoMessage), kj::mv(stdinPipe.writeEnd));
+
+  // It's most important to use that volumeRunTask has a chance to complete successfully. It's
+  // also important to us that we don't kill the subprocess since it needs to unmount stuff.
+  // Comparatively, there's not much harm in cancelling readTask if these fail. Thus, instead
+  // of joining the promises, we chain them.
+  return volumeRunTask.then([KJ_MVCAP(process)]() mutable {
+    return kj::mv(process);
+  }).then([KJ_MVCAP(writeTask)]() mutable {
+    return kj::mv(writeTask);
+  }).then([context,KJ_MVCAP(tmpfile),KJ_MVCAP(storage)]() mutable {
+    context.releaseParams();
+    auto upload = storage.uploadBlobRequest().send();
+    context.getResults(capnp::MessageSize {4, 1}).setData(upload.getBlob());
+    return uploadBlob(tmpfile->releaseFd(), upload.getStream());
+  });
+}
+
 // =======================================================================================
 
 class SupervisorMain::SystemConnectorImpl: public sandstorm::SupervisorMain::SystemConnector {
@@ -709,11 +961,6 @@ kj::MainBuilder::Validity MetaSupervisorMain::run() {
   // In order to ensure we get a chance to clean up after the supervisor exits, we run it in a
   // fork.
   sandstorm::Subprocess child([this]() -> int {
-    // Change signal mask back to empty.
-    sigset_t emptymask;
-    sigemptyset(&emptymask);
-    KJ_SYSCALL(sigprocmask(SIG_SETMASK, &emptymask, nullptr));
-
     // Unfortunately, we are still root here. Drop privs.
     KJ_SYSCALL(setgroups(0, nullptr));
     KJ_SYSCALL(setresgid(1000, 1000, 1000));
@@ -829,6 +1076,75 @@ kj::MainBuilder::Validity UnpackMain::run() {
   root.setAppId(appId);
   root.setManifest(reader.getRoot<sandstorm::spk::Manifest>());
   capnp::writeMessageToFd(STDOUT_FILENO, message);
+
+  return true;
+}
+
+// =======================================================================================
+
+kj::MainFunc BackupMain::getMain() {
+  return kj::MainBuilder(context, "Blackrock version " SANDSTORM_VERSION,
+                         "Backs up or restores a grain. FD 3 is expected to be an NBD socket, "
+                         "which will be mounted as the grain data directory.\n"
+                         "\n"
+                         "NOT FOR HUMAN CONSUMPTION: Given the FD requirements, you obviously "
+                         "can't run this directly from the command-line. It is intended to be "
+                         "invoked by the Blackrock worker.")
+      .addOption({'r', "restore"}, [this]() { restore = true; return true; },
+                 "Restore a backup, rather than create a backup.")
+      .expectArg("<file>", KJ_BIND_METHOD(*this, run))
+      .build();
+}
+
+kj::MainBuilder::Validity BackupMain::run(kj::StringPtr filename) {
+  // Enter mount namespace!
+  KJ_SYSCALL(unshare(CLONE_NEWNS));
+
+  // We'll mount our grain on /mnt because it's our own mount namespace so why not?
+  NbdDevice device;
+  NbdBinding binding(device, kj::AutoCloseFd(3),
+      restore ? NbdAccessType::READ_WRITE : NbdAccessType::READ_ONLY);
+  if (restore) {
+    device.format();
+  }
+  Mount mount(device.getPath(), "/mnt", restore ? 0 : MS_RDONLY, nullptr);
+
+  KJ_SYSCALL(chmod(filename.cStr(), 644));
+  if (restore) {
+    KJ_SYSCALL(chown("/mnt", 1000, 1000));
+    KJ_SYSCALL(mkdir("/mnt/grain", 0755));
+    KJ_SYSCALL(chown("/mnt/grain", 1000, 1000));
+  }
+
+  sandstorm::Subprocess([&]() -> int {
+    // Unfortunately, we are still root here. Drop privs.
+    KJ_SYSCALL(setgroups(0, nullptr));
+    KJ_SYSCALL(setresgid(1000, 1000, 1000));
+    KJ_SYSCALL(setresuid(1000, 1000, 1000));
+
+    // More unfortunately, the ownership of /proc/self/uid_map and similar special files are set
+    // on exec() and do not change until the next exec() (fork()s inherit the current permissions
+    // of the parent's file). Therefore, now that we've changed our uid, we *must* exec() before
+    // we can set up a sandbox. Otherwise, we'd just call sandstorm::BackupMain directly here.
+
+    const char* subArgs[8];
+    int pos = 0;
+    subArgs[pos++] = "blackrock";
+    subArgs[pos++] = "backup";
+    if (restore) {
+      subArgs[pos++] = "-r";
+    }
+    subArgs[pos++] = "--root";
+    subArgs[pos++] = "/blackrock/bundle";
+    subArgs[pos++] = filename.cStr();
+    subArgs[pos++] = "/mnt/grain";
+    subArgs[pos++] = nullptr;
+    KJ_ASSERT(pos <= kj::size(subArgs));
+
+    auto subArgv = const_cast<char* const*>(subArgs);  // execv() is not const-correct. :(
+    KJ_SYSCALL(execv("/proc/self/exe", subArgv));
+    KJ_UNREACHABLE;
+  }).waitForSuccess();
 
   return true;
 }
