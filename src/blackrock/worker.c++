@@ -10,7 +10,6 @@
 #include <capnp/serialize.h>
 #include <capnp/serialize-async.h>
 #include <sandstorm/version.h>
-#include <sys/mount.h>
 #include <grp.h>
 #include <sandstorm/spk.h>
 #include <sys/syscall.h>
@@ -19,6 +18,9 @@
 #include <sys/wait.h>
 #include <errno.h>
 #include <sandstorm/backup.h>
+
+#include <sys/mount.h>
+#undef BLOCK_SIZE // grr, mount.h
 
 namespace blackrock {
 
@@ -150,6 +152,92 @@ struct NbdSocketPair {
       kj::AutoCloseFd(fds[1])
     };
   }
+};
+
+class CowVolume: public Volume::Server {
+  // Wraps a read-only Volume adding an in-memory copy-on-write overlay so that the volume can
+  // be written.
+  //
+  // The main use case for this is to allow a dirty read-only ext4 FS to be mounted; the ext4
+  // driver will play back the journal resulting in writes to the overlay.
+
+public:
+  CowVolume(Volume::Client inner): inner(kj::mv(inner)) {}
+
+protected:
+  kj::Promise<void> read(ReadContext context) override {
+    auto params = context.getParams();
+    uint32_t start = params.getBlockNum();
+    uint32_t count = params.getCount();
+    context.releaseParams();
+
+    // TODO(perf): Currently we issue the whole read to the backend and then replace the blocks
+    //   that have been overwritten locally. In theory we should not request blocks from the
+    //   backend that we're going to overwrite anyway, but in practice we probably won't get any
+    //   such requests since the kernel should already be caching any data it recently wrote.
+
+    auto req = inner.readRequest();
+    req.setBlockNum(start);
+    req.setCount(count);
+    return req.send().then([this,start,count,context](auto&& results) mutable {
+      context.setResults(results);
+      auto data = context.getResults().getData();
+      KJ_ASSERT(data.size() == count * Volume::BLOCK_SIZE);
+      for (uint32_t i = 0; i < count; i++) {
+        auto iter = overlay.find(start + i);
+        if (iter != overlay.end()) {
+          if (iter->second == nullptr) {
+            memset(data.begin() + i * Volume::BLOCK_SIZE, 0, Volume::BLOCK_SIZE);
+          } else {
+            memcpy(data.begin() + i * Volume::BLOCK_SIZE, iter->second.begin(), Volume::BLOCK_SIZE);
+          }
+        }
+      }
+    });
+  }
+
+  kj::Promise<void> write(WriteContext context) override {
+    auto params = context.getParams();
+    uint32_t start = params.getBlockNum();
+    auto data = params.getData();
+
+    uint32_t count = data.size() / Volume::BLOCK_SIZE;
+    KJ_ASSERT(data.size() % Volume::BLOCK_SIZE == 0);
+
+    for (uint32_t i = 0; i < count; i++) {
+      auto& slot = overlay[start + i];
+      if (slot == nullptr) {
+        slot = kj::heapArray<byte>(Volume::BLOCK_SIZE);
+      }
+      memcpy(slot.begin(), data.begin() + i * Volume::BLOCK_SIZE, Volume::BLOCK_SIZE);
+    }
+
+    return kj::READY_NOW;
+  }
+
+  kj::Promise<void> zero(ZeroContext context) override {
+    auto params = context.getParams();
+    uint32_t start = params.getBlockNum();
+    uint32_t count = params.getCount();
+    context.releaseParams();
+
+    for (uint32_t i = 0; i < count; i++) {
+      overlay[start + i] = nullptr;
+    }
+
+    return kj::READY_NOW;
+  }
+
+  kj::Promise<void> sync(SyncContext context) override {
+    return kj::READY_NOW;
+  }
+
+private:
+  Volume::Client inner;
+
+  std::unordered_map<uint32_t, kj::Array<byte>> overlay;
+  // Maps block index -> block content. All byte arrays are exactly one block in size, unless they
+  // are null, in which case the block is all-zero.
 };
 
 }  // namespace
@@ -766,10 +854,14 @@ kj::Promise<void> WorkerImpl::packBackup(PackBackupContext context) {
 
   auto tmpfile = kj::heap<TemporaryFile>();
 
-  // Setup NBD.
+  // Setup NBD. We don't want packing a backup to modify the underlying disk, but we do need to
+  // mount it read-write because the disk may be in an unclean state which will cause ext4 to want
+  // to perform journal playback. So we apply a copy-on-write overlay (CowVolume).
   auto nbdSocketPair = NbdSocketPair::make(ioProvider);
   auto nbdVolume = kj::heap<NbdVolumeAdapter>(
-      kj::mv(nbdSocketPair.userEnd), volume, NbdAccessType::READ_ONLY);
+      kj::mv(nbdSocketPair.userEnd),
+      kj::heap<CowVolume>(kj::mv(volume)),
+      NbdAccessType::READ_WRITE);
   auto volumeRunTask = nbdVolume->run().attach(kj::mv(nbdVolume));
 
   // Run backup process.
@@ -786,7 +878,8 @@ kj::Promise<void> WorkerImpl::packBackup(PackBackupContext context) {
   auto grainInfoMessage = kj::heap<capnp::MallocMessageBuilder>(metadata.totalSize().wordCount + 4);
   grainInfoMessage->setRoot(metadata);
   auto writeTask = capnp::writeMessage(*stdinPipe.writeEnd, *grainInfoMessage)
-      .attach(kj::mv(grainInfoMessage), kj::mv(stdinPipe.writeEnd));
+      .attach(kj::mv(grainInfoMessage), kj::mv(stdinPipe.writeEnd))
+      .eagerlyEvaluate(nullptr);  // ensure pipe write end gets closed
 
   // It's most important to use that volumeRunTask has a chance to complete successfully. It's
   // also important to us that we don't kill the subprocess since it needs to unmount stuff.
@@ -1102,14 +1195,13 @@ kj::MainBuilder::Validity BackupMain::run(kj::StringPtr filename) {
 
   // We'll mount our grain on /mnt because it's our own mount namespace so why not?
   NbdDevice device;
-  NbdBinding binding(device, kj::AutoCloseFd(3),
-      restore ? NbdAccessType::READ_WRITE : NbdAccessType::READ_ONLY);
+  NbdBinding binding(device, kj::AutoCloseFd(3), NbdAccessType::READ_WRITE);
   if (restore) {
     device.format();
   }
-  Mount mount(device.getPath(), "/mnt", restore ? 0 : MS_RDONLY, nullptr);
+  Mount mount(device.getPath(), "/mnt", 0, nullptr);
 
-  KJ_SYSCALL(chmod(filename.cStr(), 644));
+  KJ_SYSCALL(chown(filename.cStr(), 1000, 1000));
   if (restore) {
     KJ_SYSCALL(chown("/mnt", 1000, 1000));
     KJ_SYSCALL(mkdir("/mnt/grain", 0755));

@@ -90,6 +90,21 @@ interface Volume {
   #
   # TODO(someday): Arguably freeze() should return a frozen snapshot Volume but not affect the
   #   original, but that would be a lot harder to implement and isn't needed now.
+
+  pause @7 () -> (snapshot :Volume);
+  # Temporarily pause writes to this volume and return a capability to the volume which represents
+  # an atomic snapshot taken when pause() was called. Once `snapshot` is dropped, writes will be
+  # allowed to continue.
+  #
+  # A call to `getExclusive()` may end the pause by disconnecting all snapshots, but
+  # already-existing exclusive capabilities are paused as described above.
+  #
+  # Someday, this may be changed such that writes on the original capability are allowed to
+  # continue immediately with a copy-on-write mechanism until the snapshot is dropped. At that
+  # point, `getExclusive()` will no longer disconnect snapshots.
+  #
+  # The purpose of this routine is to allow generating a consistent backup of the volume content
+  # while it is being actively used.
 }
 
 interface Immutable(T) {
