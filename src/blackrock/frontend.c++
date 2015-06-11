@@ -26,12 +26,14 @@ public:
 protected:
   kj::Promise<void> startGrain(StartGrainContext context) override {
     auto params = context.getParams();
+    auto packageId = params.getPackageId();
+    auto grainId = params.getGrainId();
+    KJ_LOG(INFO, "Backend: startGrain", grainId, packageId);
 
     StorageRootSet::Client storage = frontend.storageRoots->chooseOne();
     StorageFactory::Client storageFactory = storage.getFactoryRequest().send().getFactory();
 
     // Load the package volume.
-    auto packageId = params.getPackageId();
     auto packageVolume = ({
       auto req = storage.getRequest<Assignable<PackageStorage>>();
       req.setName(kj::str("package-", packageId));
@@ -66,15 +68,13 @@ protected:
 
       context.getResults(capnp::MessageSize { 4, 1 }).setSupervisor(promise.getGrain());
       auto grainState = promise.getGrainState();
-      auto grainId = params.getGrainId();
 
       // Update owner.
       return addGrainToUser(kj::mv(ownerGet), grainId, kj::mv(grainState));
     } else {
       return ownerGet.then(
-          [this,context,params,packageId,KJ_MVCAP(storageFactory),KJ_MVCAP(packageVolume)]
+          [this,context,params,packageId,grainId,KJ_MVCAP(storageFactory),KJ_MVCAP(packageVolume)]
           (auto&& getResults) mutable {
-        auto grainId = params.getGrainId();
         for (auto grainInfo: getResults.getValue().getGrains()) {
           if (grainInfo.getId() == grainId) {
             // This is the grain we're looking for.
@@ -97,6 +97,9 @@ protected:
 
   kj::Promise<void> getGrain(GetGrainContext context) override {
     auto params = context.getParams();
+    auto grainId = params.getGrainId();
+    KJ_LOG(INFO, "Backend: getGrain", grainId);
+
     StorageRootSet::Client storage = frontend.storageRoots->chooseOne();
 
     auto owner = ({
@@ -109,8 +112,7 @@ protected:
     });
 
     return owner.getRequest().send()
-        .then([params,context](auto&& getResults) mutable -> kj::Promise<void> {
-      auto grainId = params.getGrainId();
+        .then([params,grainId,context](auto&& getResults) mutable -> kj::Promise<void> {
       auto userInfo = getResults.getValue();
 
       for (auto grain: userInfo.getGrains()) {
@@ -144,6 +146,9 @@ protected:
 
   kj::Promise<void> deleteGrain(DeleteGrainContext context) override {
     auto params = context.getParams();
+    auto grainId = params.getGrainId();
+    KJ_LOG(INFO, "Backend: deleteGrain", grainId);
+
     StorageRootSet::Client storage = frontend.storageRoots->chooseOne();
 
     auto owner = ({
@@ -156,8 +161,7 @@ protected:
     });
 
     return owner.getRequest().send()
-        .then([params](auto&& getResults) -> kj::Promise<void> {
-      auto grainId = params.getGrainId();
+        .then([grainId](auto&& getResults) -> kj::Promise<void> {
       auto userInfo = getResults.getValue();
 
       capnp::MallocMessageBuilder temp;
@@ -193,6 +197,8 @@ protected:
   // ---------------------------------------------------------------------------
 
   kj::Promise<void> installPackage(InstallPackageContext context) override {
+    KJ_LOG(INFO, "Backend: installPackage");
+
     Worker::Client worker = frontend.workers->chooseOne();
     StorageRootSet::Client storage = frontend.storageRoots->chooseOne();
     StorageFactory::Client storageFactory = storage.getFactoryRequest().send().getFactory();
@@ -209,9 +215,12 @@ protected:
   }
 
   kj::Promise<void> tryGetPackage(TryGetPackageContext context) override {
+    auto packageId = context.getParams().getPackageId();
+    KJ_LOG(INFO, "Backend: tryGetPackage", packageId);
+
     StorageRootSet::Client storage = frontend.storageRoots->chooseOne();
     auto req = storage.tryGetRequest<Assignable<PackageStorage>>();
-    req.setName(kj::str("package-", context.getParams().getPackageId()));
+    req.setName(kj::str("package-", packageId));
     context.releaseParams();
 
     return req.send().then([this,context](auto&& outerResult) mutable -> kj::Promise<void> {
@@ -232,9 +241,12 @@ protected:
   }
 
   kj::Promise<void> deletePackage(DeletePackageContext context) override {
+    auto packageId = context.getParams().getPackageId();
+    KJ_LOG(INFO, "Backend: deletePackage", packageId);
+
     StorageRootSet::Client storage = frontend.storageRoots->chooseOne();
     auto req = storage.removeRequest();
-    req.setName(kj::str("package-", context.getParams().getPackageId()));
+    req.setName(kj::str("package-", packageId));
     context.releaseParams();
     return req.send().then([](auto) {});
   }
@@ -243,6 +255,9 @@ protected:
 
   kj::Promise<void> backupGrain(BackupGrainContext context) override {
     auto params = context.getParams();
+    auto grainId = params.getGrainId();
+    auto backupId = params.getBackupId();
+    KJ_LOG(INFO, "Backend: backupGrain", grainId, backupId);
 
     Worker::Client worker = frontend.workers->chooseOne();
     StorageRootSet::Client storage = frontend.storageRoots->chooseOne();
@@ -252,9 +267,9 @@ protected:
     req.setName(kj::str("user-", params.getOwnerId()));
     req.initDefaultValue();
     return req.send().getObject().getRequest().send().then(
-        [this,context,params,KJ_MVCAP(worker),KJ_MVCAP(storage),KJ_MVCAP(storageFactory)]
+        [this,context,params,grainId,backupId,
+         KJ_MVCAP(worker),KJ_MVCAP(storage),KJ_MVCAP(storageFactory)]
         (auto&& getResults) mutable {
-      auto grainId = params.getGrainId();
       for (auto grainInfo: getResults.getValue().getGrains()) {
         if (grainInfo.getId() == grainId) {
           // This is the grain we're looking for!
@@ -272,9 +287,9 @@ protected:
           req.setVolume(kj::mv(volume));
           req.setMetadata(metadata);
           req.setStorage(kj::mv(storageFactory));
-          return req.send().then([this,params,KJ_MVCAP(storage)](auto&& response) mutable {
+          return req.send().then([this,backupId,KJ_MVCAP(storage)](auto&& response) mutable {
             auto req2 = storage.setRequest<Blob>(capnp::MessageSize {4, 1});
-            req2.setName(kj::str("backup-", params.getBackupId()));
+            req2.setName(kj::str("backup-", backupId));
             req2.setObject(response.getData());
             return req2.send().then([](auto&&) {});
           });
@@ -286,6 +301,9 @@ protected:
 
   kj::Promise<void> restoreGrain(RestoreGrainContext context) override {
     auto params = context.getParams();
+    auto grainId = params.getGrainId();
+    auto backupId = params.getBackupId();
+    KJ_LOG(INFO, "Backend: restoreGrain", grainId, backupId);
 
     Worker::Client worker = frontend.workers->chooseOne();
     StorageRootSet::Client storage = frontend.storageRoots->chooseOne();
@@ -293,7 +311,7 @@ protected:
 
     auto blob = ({
       auto req = storage.getRequest<Blob>();
-      req.setName(kj::str("backup-", params.getBackupId()));
+      req.setName(kj::str("backup-", backupId));
       req.send().getObject().castAs<Blob>();
     });
 
@@ -301,7 +319,7 @@ protected:
     req.setData(kj::mv(blob));
     req.setStorage(storageFactory);
 
-    return req.send().then([this,context,params,KJ_MVCAP(storage),KJ_MVCAP(storageFactory)]
+    return req.send().then([this,context,params,grainId,KJ_MVCAP(storage),KJ_MVCAP(storageFactory)]
                            (auto&& response) mutable {
       auto grainState = ({
         auto req = storageFactory.newAssignableRequest<GrainState>();
@@ -323,18 +341,21 @@ protected:
       sizeHint.wordCount += 4;
       context.getResults(sizeHint).setInfo(metadata);
 
-      return addGrainToUser(kj::mv(ownerGet), params.getGrainId(), kj::mv(grainState));
+      return addGrainToUser(kj::mv(ownerGet), grainId, kj::mv(grainState));
     });
   }
 
   kj::Promise<void> uploadBackup(UploadBackupContext context) override {
+    auto backupId = context.getParams().getBackupId();
+    KJ_LOG(INFO, "Backend: uploadBackup", backupId);
+
     StorageRootSet::Client storage = frontend.storageRoots->chooseOne();
     StorageFactory::Client storageFactory = storage.getFactoryRequest().send().getFactory();
 
     auto upload = storageFactory.uploadBlobRequest().send();
 
     auto req = storage.setRequest<Blob>();
-    req.setName(kj::str("backup-", context.getParams().getBackupId()));
+    req.setName(kj::str("backup-", backupId));
     req.setObject(upload.getBlob());
     context.releaseParams();
 
@@ -348,11 +369,13 @@ protected:
   kj::Promise<void> downloadBackup(DownloadBackupContext context) override {
     auto params = context.getParams();
     auto stream = params.getStream();
+    auto backupId = params.getBackupId();
+    KJ_LOG(INFO, "Backend: downloadBackup", backupId);
 
     StorageRootSet::Client storage = frontend.storageRoots->chooseOne();
 
     auto req = storage.getRequest<Blob>();
-    req.setName(kj::str("backup-", params.getBackupId()));
+    req.setName(kj::str("backup-", backupId));
     context.releaseParams();
 
     auto req2 = req.send().getObject().castAs<Blob>().writeToRequest();
@@ -361,8 +384,11 @@ protected:
   }
 
   kj::Promise<void> deleteBackup(DeleteBackupContext context) override {
+    auto backupId = context.getParams().getBackupId();
+    KJ_LOG(INFO, "Backend: deleteBackup", backupId);
+
     auto req = frontend.storageRoots->chooseOne().removeRequest();
-    req.setName(kj::str("backup-", context.getParams().getBackupId()));
+    req.setName(kj::str("backup-", backupId));
     context.releaseParams();
     return req.send().then([](auto&&) {});
   }
