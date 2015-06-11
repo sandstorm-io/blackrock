@@ -370,7 +370,7 @@ void NbdDevice::format() {
 void NbdDevice::resetAll() {
   for (uint i = 0; i < MAX_NBDS; i++) {
     auto devname = kj::str("/dev/nbd", i);
-    KJ_LOG(WARNING, "killing nbd device", devname);
+//    KJ_LOG(WARNING, "killing nbd device", devname);
     auto fd = sandstorm::raiiOpen(devname, O_RDWR | O_CLOEXEC);
     int flockResult;
     KJ_NONBLOCKING_SYSCALL(flockResult = flock(fd, LOCK_EX | LOCK_NB));
@@ -384,7 +384,7 @@ void NbdDevice::resetAll() {
 void NbdDevice::disconnectAll() {
   for (uint i = 0; i < MAX_NBDS; i++) {
     auto devname = kj::str("/dev/nbd", i);
-    KJ_LOG(WARNING, "disconnecting nbd device", devname);
+//    KJ_LOG(WARNING, "disconnecting nbd device", devname);
     auto fd = sandstorm::raiiOpen(devname, O_RDWR | O_CLOEXEC);
 
     // We ignore ioctl() errors on NBD_DISCONNECT because if the device isn't connected then the
