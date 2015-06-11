@@ -33,9 +33,10 @@ protected:
     // Load the package volume.
     auto packageId = params.getPackageId();
     auto packageVolume = ({
-      auto req = storage.getRequest<Volume>();
+      auto req = storage.getRequest<Assignable<PackageStorage>>();
       req.setName(kj::str("package-", packageId));
-      req.send().getObject().castAs<OwnedVolume>();
+      req.send().getObject().castAs<OwnedAssignable<PackageStorage>>()
+          .getRequest().send().getValue().getVolume();
     });
 
     // Get the owner user data.
@@ -208,9 +209,17 @@ protected:
   }
 
   kj::Promise<void> getPackage(GetPackageContext context) override {
-    // TODO(now): We need to actually mount up the volume and read the manifest. Need a new worker
-    //   method for this.
-    KJ_UNIMPLEMENTED("getPackage()");
+    StorageRootSet::Client storage = frontend.storageRoots->chooseOne();
+    auto req = storage.getRequest<Assignable<PackageStorage>>();
+    req.setName(kj::str("package-", context.getParams().getPackageId()));
+    context.releaseParams();
+    return req.send().getObject().castAs<OwnedAssignable<PackageStorage>>()
+        .getRequest().send().then([this,context](auto&& results) mutable {
+      auto value = results.getValue();
+      auto resultBuilder = context.getResults(value.totalSize());
+      resultBuilder.setAppId(value.getAppId());
+      resultBuilder.setManifest(value.getManifest());
+    });
   }
 
   kj::Promise<void> deletePackage(DeletePackageContext context) override {
@@ -384,18 +393,30 @@ private:
       auto req = inner.getResultRequest(capnp::MessageSize { 8, 0 });
       return req.send().then([this,context](auto&& results) mutable {
         auto packageId = context.getParams().getPackageId();
+        auto appId = results.getAppId();
+        auto manifest = results.getManifest();
+
+        auto packageStorage = ({
+          auto req = storage.getFactoryRequest(capnp::MessageSize {4,0}).send().getFactory()
+              .newAssignableRequest<PackageStorage>();
+          auto value = req.initInitialValue();
+          value.setVolume(results.getVolume());
+          value.setAppId(appId);
+          value.setManifest(manifest);
+          req.send().getAssignable();
+        });
 
         auto promise = ({
-          auto req = storage.setRequest<Volume>();
+          auto req = storage.setRequest<Assignable<PackageStorage>>();
           req.setName(kj::str("package-", packageId));
-          req.setObject(results.getVolume());
+          req.setObject(kj::mv(packageStorage));
           req.send();
         });
 
         context.releaseParams();
         auto outerResults = context.getResults();
-        outerResults.setAppId(results.getAppId());
-        outerResults.setManifest(results.getManifest());
+        outerResults.setAppId(appId);
+        outerResults.setManifest(manifest);
 
         return promise.then([](auto&&) {});
       });

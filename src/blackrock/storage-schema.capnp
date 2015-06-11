@@ -11,6 +11,7 @@ using Storage = import "storage.capnp";
 using OwnedAssignable = Storage.OwnedAssignable;
 using OwnedVolume = Storage.OwnedVolume;
 using Supervisor = import "/sandstorm/supervisor.capnp".Supervisor;
+using Package = import "/sandstorm/package.capnp";
 
 struct AccountStorage {
   # TODO(someday):
@@ -32,6 +33,12 @@ struct AccountStorage {
 struct GatewayStorage {
   # TODO(someday):
   # - Incoming and outgoing SturdyRefs.
+}
+
+struct PackageStorage {
+  volume @0 :OwnedVolume;
+  appId @1 :Text;
+  manifest @2 :Package.Manifest;
 }
 
 struct GrainState {
