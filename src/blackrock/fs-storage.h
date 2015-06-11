@@ -27,6 +27,7 @@ public:
 protected:
   kj::Promise<void> set(SetContext context) override;
   kj::Promise<void> get(GetContext context) override;
+  kj::Promise<void> tryGet(TryGetContext context) override;
   kj::Promise<void> getOrCreateAssignable(GetOrCreateAssignableContext context) override;
   kj::Promise<void> remove(RemoveContext context) override;
   kj::Promise<void> getFactory(GetFactoryContext context) override;

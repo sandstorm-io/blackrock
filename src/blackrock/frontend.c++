@@ -208,17 +208,26 @@ protected:
     return kj::READY_NOW;
   }
 
-  kj::Promise<void> getPackage(GetPackageContext context) override {
+  kj::Promise<void> tryGetPackage(TryGetPackageContext context) override {
     StorageRootSet::Client storage = frontend.storageRoots->chooseOne();
-    auto req = storage.getRequest<Assignable<PackageStorage>>();
+    auto req = storage.tryGetRequest<Assignable<PackageStorage>>();
     req.setName(kj::str("package-", context.getParams().getPackageId()));
     context.releaseParams();
-    return req.send().getObject().castAs<OwnedAssignable<PackageStorage>>()
-        .getRequest().send().then([this,context](auto&& results) mutable {
-      auto value = results.getValue();
-      auto resultBuilder = context.getResults(value.totalSize());
-      resultBuilder.setAppId(value.getAppId());
-      resultBuilder.setManifest(value.getManifest());
+
+    return req.send().then([this,context](auto&& outerResult) mutable -> kj::Promise<void> {
+      if (outerResult.hasObject()) {
+        // Yay, the package exists. Extract the metadata.
+        return outerResult.getObject().template castAs<OwnedAssignable<PackageStorage>>()
+            .getRequest().send().then([this,context](auto&& innerResult) mutable {
+          auto value = innerResult.getValue();
+          auto resultBuilder = context.getResults(value.totalSize());
+          resultBuilder.setAppId(value.getAppId());
+          resultBuilder.setManifest(value.getManifest());
+        });
+      } else {
+        // Package doesn't exist. Leave response null.
+        return kj::READY_NOW;
+      }
     });
   }
 

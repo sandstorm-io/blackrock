@@ -2204,6 +2204,16 @@ kj::Promise<void> FilesystemStorage::get(GetContext context) {
   return kj::READY_NOW;
 }
 
+kj::Promise<void> FilesystemStorage::tryGet(TryGetContext context) {
+  KJ_IF_MAYBE(fd, sandstorm::raiiOpenAtIfExists(
+      rootsFd, context.getParams().getName(), O_RDONLY | O_CLOEXEC)) {
+    capnp::StreamFdMessageReader message(kj::mv(*fd));
+    ObjectKey key(message.getRoot<StoredRoot>().getKey());
+    context.getResults().setObject(factory->openObject(key).client.castAs<OwnedStorage<>>());
+  }
+  return kj::READY_NOW;
+}
+
 kj::Promise<void> FilesystemStorage::getOrCreateAssignable(GetOrCreateAssignableContext context) {
   auto params = context.getParams();
   KJ_IF_MAYBE(fd, sandstorm::raiiOpenAtIfExists(
