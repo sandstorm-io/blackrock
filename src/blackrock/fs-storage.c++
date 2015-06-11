@@ -1822,6 +1822,13 @@ public:
   kj::Promise<void> write(WriteContext context) override {
     KJ_REQUIRE(!getXattrRef().readOnly, "attempted to write to a read-only Volume");
 
+    if (snapshotCount > 0) {
+      // Wait for snapshot destruction.
+      return onZeroSnapshots.addBranch().then([this,context]() mutable {
+        return write(context);
+      });
+    }
+
     auto params = context.getParams();
     uint64_t blockNum = params.getBlockNum();
     capnp::Data::Reader data = params.getData();
@@ -1840,6 +1847,13 @@ public:
 
   kj::Promise<void> zero(ZeroContext context) override {
     KJ_REQUIRE(!getXattrRef().readOnly, "attempted to write to a read-only Volume");
+
+    if (snapshotCount > 0) {
+      // Wait for snapshot destruction.
+      return onZeroSnapshots.addBranch().then([this,context]() mutable {
+        return zero(context);
+      });
+    }
 
     auto params = context.getParams();
     uint64_t blockNum = params.getBlockNum();
@@ -1880,17 +1894,28 @@ public:
     return setReadOnly();
   }
 
+  kj::Promise<void> pause(PauseContext context) override {
+    context.getResults(capnp::MessageSize {4, 1}).setSnapshot(
+        capnp::Capability::Client(kj::heap<SnapshotWrapper>(*this)).castAs<Volume>());
+    return kj::READY_NOW;
+  }
+
 private:
   class ExclusiveWrapper: public capnp::Capability::Server {
   public:
-    ExclusiveWrapper(VolumeImpl& inner)
-        : inner(inner.thisCap()), ptr(inner.currentExclusiveWrapper) {
-      ptr = this;
+    explicit ExclusiveWrapper(VolumeImpl& inner)
+        : inner(inner), innerCap(inner.thisCap()),
+          exclusiveNumber(++inner.currentExclusiveNumber) {
+      // All pause() snapshots are disabled by a new getExclusive().
+      if (inner.snapshotCount > 0) {
+        inner.snapshotCount = 0;
+        inner.onZeroSnapshotsFulfiller->fulfill();
+      }
     }
 
     kj::Promise<void> dispatchCall(uint64_t interfaceId, uint16_t methodId,
         capnp::CallContext<capnp::AnyPointer, capnp::AnyPointer> context) override {
-      if (ptr != this) {
+      if (inner.currentExclusiveNumber != exclusiveNumber) {
         return KJ_EXCEPTION(DISCONNECTED, "Volume revoked due to concurrent write");
       }
 
@@ -1899,19 +1924,56 @@ private:
                             interfaceId, methodId);
       }
 
-      auto params = context.getParams();
-      auto req = inner.typelessRequest(interfaceId, methodId, params.targetSize());
-      req.set(params);
-      return context.tailCall(kj::mv(req));
+      return inner.dispatchCall(interfaceId, methodId, context);
     }
 
   private:
-    capnp::Capability::Client inner;
-    ExclusiveWrapper*& ptr;
+    VolumeImpl& inner;
+    capnp::Capability::Client innerCap;  // prevent gc
+    uint32_t exclusiveNumber;
+  };
+
+  class SnapshotWrapper: public Volume::Server {
+  public:
+    explicit SnapshotWrapper(VolumeImpl& inner)
+        : inner(inner), innerCap(inner.thisCap()),
+          exclusiveNumber(inner.currentExclusiveNumber) {
+      if (inner.snapshotCount++ == 0) {
+        auto paf = kj::newPromiseAndFulfiller<void>();
+        inner.onZeroSnapshots = paf.promise.fork();
+        inner.onZeroSnapshotsFulfiller = kj::mv(paf.fulfiller);
+      }
+    }
+
+    ~SnapshotWrapper() noexcept(false) {
+      if (inner.currentExclusiveNumber == exclusiveNumber) {
+        KJ_ASSERT(inner.snapshotCount > 0) { return; }
+        if (--inner.snapshotCount == 0) {
+          inner.onZeroSnapshotsFulfiller->fulfill();
+        }
+      }
+    }
+
+    kj::Promise<void> read(ReadContext context) override {
+      if (inner.currentExclusiveNumber != exclusiveNumber) {
+        return KJ_EXCEPTION(DISCONNECTED,
+            "snapshot Volume revoked due to concurrent getExclusive()");
+      }
+
+      return inner.read(context);
+    }
+
+  private:
+    VolumeImpl& inner;
+    capnp::Capability::Client innerCap;  // prevent gc
+    uint32_t exclusiveNumber;
   };
 
   uint32_t counter = 0;
-  ExclusiveWrapper* currentExclusiveWrapper = nullptr;
+  uint32_t currentExclusiveNumber = 0;
+  uint32_t snapshotCount = 0;
+  kj::ForkedPromise<void> onZeroSnapshots = nullptr;
+  kj::Own<kj::PromiseFulfiller<void>> onZeroSnapshotsFulfiller;
 
   void maybeUpdateSize(uint32_t count) {
     // Periodically update our accounting of the volume size. Called every time some blocks are

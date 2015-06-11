@@ -241,8 +241,9 @@ protected:
         if (grainInfo.getId() == grainId) {
           // This is the grain we're looking for!
 
-          // TODO(integrity): Use a "frozen" version of the volume.
-          auto volume = grainInfo.getState().getRequest().send().getValue().getVolume();
+          // Get a snapshot of the volume for use during the backup process.
+          auto volume = grainInfo.getState().getRequest().send().getValue().getVolume()
+              .pauseRequest().send().getSnapshot();
 
           // Make request to the Worker to pack this backup.
           auto metadata = params.getInfo();
