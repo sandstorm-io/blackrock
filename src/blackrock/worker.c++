@@ -323,7 +323,7 @@ PackageMountSet::PackageMount::PackageMount(PackageMountSet& mountSet,
         // Set up NBD.
         NbdDevice device;
         NbdBinding binding(device, kj::mv(nbdKernelEnd), NbdAccessType::READ_ONLY);
-        Mount mount(device.getPath(), path, MS_RDONLY, nullptr);
+        Mount mount(device.getPath(), path, MS_RDONLY | MS_NOATIME, nullptr);
 
         // Signal setup is complete.
         pipe.write(&dummyByte, 1).wait(waitScope);
@@ -1041,7 +1041,7 @@ kj::MainBuilder::Validity MetaSupervisorMain::run() {
     device.format();
   }
 
-  Mount mount(device.getPath(), "/mnt", 0, nullptr);
+  Mount mount(device.getPath(), "/mnt", MS_NOATIME, nullptr);
   KJ_SYSCALL(chown("/mnt", 1000, 1000));
 
   // Mask SIGCHLD and SIGTERM so that we can handle them later.
@@ -1149,7 +1149,7 @@ kj::MainBuilder::Validity UnpackMain::run() {
   NbdDevice device;
   NbdBinding binding(device, kj::AutoCloseFd(3), NbdAccessType::READ_WRITE);
   device.format();
-  Mount mount(device.getPath(), "/mnt", 0, nullptr);
+  Mount mount(device.getPath(), "/mnt", MS_NOATIME, nullptr);
   KJ_SYSCALL(mkdir("/mnt/spk", 0755));
 
   // We unpack packages with uid 1/gid 1: IDs that are not zero, but are also not used by apps.
@@ -1199,7 +1199,7 @@ kj::MainBuilder::Validity BackupMain::run(kj::StringPtr filename) {
   if (restore) {
     device.format();
   }
-  Mount mount(device.getPath(), "/mnt", 0, nullptr);
+  Mount mount(device.getPath(), "/mnt", MS_NOATIME, nullptr);
 
   KJ_SYSCALL(chown(filename.cStr(), 1000, 1000));
   if (restore) {
