@@ -2225,12 +2225,25 @@ kj::Promise<void> FilesystemStorage::getOrCreateAssignable(GetOrCreateAssignable
 }
 
 kj::Promise<void> FilesystemStorage::remove(RemoveContext context) {
-  capnp::StreamFdMessageReader message(sandstorm::raiiOpenAt(
-      rootsFd, context.getParams().getName(), O_RDONLY | O_CLOEXEC));
-  ObjectKey key(message.getRoot<StoredRoot>().getKey());
-  Journal::Transaction txn(*journal);
-  txn.moveToDeathRow(key);
-  txn.commit();
+  kj::StringPtr name = context.getParams().getName();
+  KJ_IF_MAYBE(file, sandstorm::raiiOpenAtIfExists(
+      rootsFd, name, O_RDONLY | O_CLOEXEC)) {
+    capnp::StreamFdMessageReader message(kj::mv(*file));
+    ObjectKey key(message.getRoot<StoredRoot>().getKey());
+    Journal::Transaction txn(*journal);
+    txn.moveToDeathRow(key);
+    return txn.commit().then([this,name]() {
+      while (unlinkat(rootsFd, name.cStr(), 0) < 0) {
+        int error = errno;
+        if (error == ENOENT) {
+          // fine
+          break;
+        } else if (error != EINTR) {
+          KJ_FAIL_SYSCALL("unlinkat(roots, name)", errno, name);
+        }
+      }
+    });
+  }
   return kj::READY_NOW;
 }
 
