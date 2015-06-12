@@ -523,6 +523,8 @@ private:
   }
 
   bool runMaster(kj::StringPtr configFile) {
+    KJ_LOG(INFO, "*** Starting Blackrock Master ***");
+
     capnp::StreamFdMessageReader configReader(
         sandstorm::raiiOpen(configFile, O_RDONLY | O_CLOEXEC));
     auto config = configReader.getRoot<MasterConfig>();
@@ -544,13 +546,40 @@ private:
   }
 
   bool runMasterDaemon(kj::StringPtr configFile) {
+    sandstorm::recursivelyCreateParent("/var/blackrock/shutdown");
+
+    // Kill the old master.
+    auto existing = findProcesses("blackrock-mstr");
+    if (existing.size() > 0) {
+      sandstorm::raiiOpen("/var/blackrock/shutdown", O_CREAT | O_TRUNC | O_CLOEXEC);
+      for (uint i = 0; existing.size() > 0; i++) {
+        KJ_ASSERT(existing.size() == 1, "multiple blackrock master processes?");
+        if (i == 0) {
+          context.warning("sending SIGTERM to old blackrock master...");
+          KJ_SYSCALL(kill(existing[0], SIGTERM));
+        } else if (i == 15) {
+          context.warning("sending SIGKILL to old blackrock master...");
+          KJ_SYSCALL(kill(existing[0], SIGTERM));
+        } else {
+          context.warning("(waiting for shutdown)");
+        }
+        sleep(1);
+        existing = findProcesses("blackrock-mstr");
+      }
+      context.warning("old master shutdown complete...");
+      sleep(1);
+      KJ_ASSERT(findProcesses("blackrock-mstr").size() == 0,
+                "blackrock master returned from the dead!");
+      KJ_SYSCALL(unlink("/var/blackrock/shutdown"));
+    }
+
     sandstorm::Subprocess([&]() -> int {
       // Detach from controlling terminal and make ourselves session leader.
       KJ_SYSCALL(setsid());
 
-      // Repeatedly re-run forever.
-      for (;;) {
-        KJ_IF_MAYBE(exception, kj::runCatchingExceptions([&]() {
+      // Repeatedly re-run until shutdown file appears.
+      while (access("/var/blackrock/shutdown", F_OK) < 0) {
+        kj::runCatchingExceptions([&]() {
           auto logPipe = sandstorm::Pipe::make();
 
           // Fork again so that we are no longer session leader (which prevents us from picking up
@@ -560,6 +589,7 @@ private:
             KJ_SYSCALL(dup2(logPipe.writeEnd, STDERR_FILENO));
             logPipe.readEnd = nullptr;
             logPipe.writeEnd = nullptr;
+            KJ_SYSCALL(prctl(PR_SET_NAME, "blackrock-mstr", 0, 0, 0));
             return runMaster(configFile) ? 0 : 1;
           });
 
@@ -570,8 +600,10 @@ private:
               "/var/blackrock/log", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
           rotateLogs(logPipe.readEnd, logDirFd);
           subprocess2.waitForSuccess();
-        }));
+        });
       }
+
+      return 0;
     }).detach();
 
     context.exitInfo("Blackrock started");

@@ -92,10 +92,14 @@ auto GceDriver::listMachines() -> kj::Promise<kj::Array<MachineId>> {
 
   auto outputPromise = readAllAsync(*input);
   return outputPromise.attach(kj::mv(input))
-      .then([KJ_MVCAP(exitPromise)](kj::String allText) mutable {
+      .then([this,KJ_MVCAP(exitPromise)](kj::String allText) mutable {
     kj::Vector<MachineId> result;
 
     kj::StringPtr text = allText;
+    kj::Maybe<MachineId> lastSeenMachine;
+    kj::Vector<kj::Promise<void>> promises;
+
+    promises.add(kj::mv(exitPromise));
 
     // Parse lines until there are no more.
     while (text.size() > 0) {
@@ -107,14 +111,34 @@ auto GceDriver::listMachines() -> kj::Promise<kj::Array<MachineId>> {
         if (!name.startsWith("master") &&
             !name.startsWith("build") &&
             !name.startsWith("nginx")) {
-          result.add(MachineId(name));
+          lastSeenMachine = MachineId(name);
+        }
+      } else if (text.startsWith("tags.items[")) {
+        auto name = sandstorm::trim(text.slice(KJ_ASSERT_NONNULL(text.findFirst(':')) + 1, eol));
+        if (name == image) {
+          // Cool, this machine has the right tag, so it checks out.
+          result.add(KJ_ASSERT_NONNULL(lastSeenMachine));
+          lastSeenMachine = nullptr;
+        }
+      } else if (text.startsWith("---")) {
+        KJ_IF_MAYBE(machine, lastSeenMachine) {
+          KJ_LOG(INFO, "shutting down machine running old image", *machine);
+          promises.add(stop(*machine));
+          lastSeenMachine = nullptr;
         }
       }
 
       text = text.slice(eol + 1);
     }
 
-    return exitPromise.then([KJ_MVCAP(result)]() mutable { return result.releaseAsArray(); });
+    KJ_IF_MAYBE(machine, lastSeenMachine) {
+      KJ_LOG(INFO, "shutting down machine running old image", *machine);
+      promises.add(stop(*machine));
+      lastSeenMachine = nullptr;
+    }
+
+    return kj::joinPromises(promises.releaseAsArray())
+        .then([KJ_MVCAP(result)]() mutable { return result.releaseAsArray(); });
   });
 }
 
@@ -122,8 +146,9 @@ kj::Promise<void> GceDriver::boot(MachineId id) {
   kj::Vector<kj::StringPtr> args;
   kj::Vector<kj::String> scratch;
   auto idStr = kj::str(id);
+  auto tagStr = kj::str("--tags=", image);
   args.addAll(std::initializer_list<const kj::StringPtr>
-      { "instances", "create", idStr, "--image", image, "--no-scopes", "-q" });
+      { "instances", "create", idStr, "--image", image, tagStr, "--no-scopes", "-q" });
   kj::StringPtr startupScript;
   kj::StringPtr instanceType;
   switch (id.type) {
@@ -253,7 +278,8 @@ kj::Promise<void> GceDriver::gceCommand(kj::ArrayPtr<const kj::StringPtr> args,
   }
 
   sandstorm::Subprocess::Options options(fullArgs.finish());
-  KJ_DBG(kj::strArray(options.argv, " "));
+  auto command = kj::strArray(options.argv, " ");
+  KJ_LOG(INFO, command);
   options.stdin = stdin;
   options.stdout = stdout;
   options.environment = kj::ArrayPtr<const kj::StringPtr>(env);
