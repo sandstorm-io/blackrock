@@ -10,6 +10,7 @@
 #include <fcntl.h>
 #include <sys/sendfile.h>
 #include <stdio.h>
+#include <errno.h>
 
 namespace blackrock {
 
@@ -163,10 +164,16 @@ void LogSink::taskFailed(kj::Exception&& exception) {
 
 // =======================================================================================
 
+static time_t currentDay() {
+  // Note that POSIX.1-2008 Rationale A.4.15 states that every days is exactly 86400 seconds in
+  // sections-since-Epoch time. Leap seconds don't exist.
+  return time(nullptr) / 86400;
+}
+
 void rotateLogs(int input, int logDirFd) {
   char buffer [8192];
 
-  size_t fileSize = 0;
+  time_t day = currentDay();
   kj::AutoCloseFd output;
   for (;;) {
     ssize_t n;
@@ -174,25 +181,34 @@ void rotateLogs(int input, int logDirFd) {
     if (n == 0) break;
 
     if (output == nullptr) {
-      output = sandstorm::raiiOpenAt(logDirFd, "blackrock.current", O_WRONLY | O_CREAT | O_APPEND);
+      char timestamp[128];
+      time_t now = day * 86400;
+      struct tm local;
+      KJ_ASSERT(gmtime_r(&now, &local) != nullptr);
+      strftime(timestamp, sizeof(timestamp), "blackrock.%Y-%m-%d", &local);
 
-      struct stat stats;
-      KJ_SYSCALL(fstat(output, &stats));
-      fileSize = stats.st_size;
+      output = sandstorm::raiiOpenAt(logDirFd, timestamp, O_WRONLY | O_CREAT | O_APPEND);
+
+      while (unlinkat(logDirFd, "blackrock.current", 0) < 0) {
+        int error = errno;
+        if (error == ENOENT) {
+          // fine
+          break;
+        } else if (error != EINTR) {
+          KJ_FAIL_SYSCALL("unlinkat(logdir, 'blackrock.current')", error);
+        }
+      }
+
+      KJ_SYSCALL(symlinkat(timestamp, logDirFd, "blackrock.current"));
     }
 
     kj::FdOutputStream(output.get()).write(buffer, n);
-    fileSize += n;
-    if (fileSize > (1 << 20) && buffer[n-1] == '\n') {
-      // File is more than 1MB and we just saw a line break. Start a new file.
-      output = nullptr;
 
-      char timestamp[128];
-      time_t now = time(nullptr);
-      struct tm local;
-      KJ_ASSERT(gmtime_r(&now, &local) != nullptr);
-      strftime(timestamp, sizeof(timestamp), "blackrock.%Y-%m-%d.%H-%M-%S.log", &local);
-      KJ_SYSCALL(renameat(logDirFd, "blackrock.current", logDirFd, timestamp));
+    time_t newDay = currentDay();
+    if (newDay > day && buffer[n-1] == '\n') {
+      // A new day just started and we just saw a line break. Start a new file.
+      output = nullptr;
+      day = newDay;
     }
   }
 }
