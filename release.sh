@@ -15,7 +15,7 @@ case $1 in
     BUILDSTAMP=$(date -u +%Y%m%d-%H%M%S)
     ;;
   prod )
-    GCE_PROJECT=sandstorm-blackrock
+    GCE_PROJECT=sandstorm-oasis
     export CLOUDSDK_COMPUTE_ZONE=us-central1-f
 
     # We always do a Blackrock prod release shortly after a Sandstorm release.
@@ -32,7 +32,7 @@ case $1 in
       exit 1
     fi
 
-    if [ "$CONFIRM_EACH" == "no" ] && [ "x$(git status --porcelain)" != "x" ]; then
+    if [ "x$(git status --porcelain)" != "x" ]; then
       echo "Please commit changes to git before releasing." >&2
       exit 1
     fi
