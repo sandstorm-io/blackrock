@@ -525,10 +525,24 @@ private:
     // idempotent modifications. Each change is appended to the journal before being actually
     // performed, so that on system failure we can replay the journal to get up-to-date.
 
-    uint32_t txSize;
-    // Number of entries remaining in this transaction, including this one. Do not start applying
-    // operations unless the full transaction is available and all `txSize` values are correct.
-    // If recovering from a failure, ignore an incomplete transaction at the end of the journal.
+    // Note that the logical "first" fields are `type` and `txSize`, but we put them at the end of
+    // the Entry in order to better-detect when an entry is only partially-written. I'm actually
+    // not sure that such a thing is possible, but being safe is free in this case.
+
+    uint64_t stagingId;
+    // If non-zero, identifies a staging file which should be rename()ed to replace this object.
+    // The xattrs should be written to the file just before it is renamed. If no such staging file
+    // exists, this operation probably already occurred; ignore it.
+    //
+    // If zero, then an existing file should be modified in-place. If there is no existing file
+    // matching the ID, we are probably replaying an operation that was already completed, and some
+    // later operation probably deletes this object; ignore the op.
+
+    ObjectId objectId;
+    // ID of the object to update.
+
+    Xattr xattr;
+    // Updated Xattr structure to write into the file.
 
     enum class Type :uint8_t {
       CREATE_OBJECT,
@@ -557,20 +571,10 @@ private:
 
     byte reserved[3];
 
-    uint64_t stagingId;
-    // If non-zero, identifies a staging file which should be rename()ed to replace this object.
-    // The xattrs should be written to the file just before it is renamed. If no such staging file
-    // exists, this operation probably already occurred; ignore it.
-    //
-    // If zero, then an existing file should be modified in-place. If there is no existing file
-    // matching the ID, we are probably replaying an operation that was already completed, and some
-    // later operation probably deletes this object; ignore the op.
-
-    ObjectId objectId;
-    // ID of the object to update.
-
-    Xattr xattr;
-    // Updated Xattr structure to write into the file.
+    uint32_t txSize;
+    // Number of entries remaining in this transaction, including this one. Do not start applying
+    // operations unless the full transaction is available and all `txSize` values are correct.
+    // If recovering from a failure, ignore an incomplete transaction at the end of the journal.
   };
 
   static_assert(sizeof(Entry) == 64,
@@ -791,8 +795,36 @@ private:
   kj::ArrayPtr<const Entry> validateEntries(
       kj::ArrayPtr<const Entry> entries, bool discardIncompleteTrailing) {
     uint64_t expected = 0;
-    const Entry* end;
+    const Entry* end = entries.begin();
     for (auto& entry: entries) {
+      if (entry.txSize == 0 && discardIncompleteTrailing) {
+        // txSize of zero is illegal, but could be caused by ext4 failure mode in which the file
+        // size was advanced before the content was flushed and then a power failure occurred. In
+        // this case, we expect the entire rest of the contet to be zero.
+        //
+        // Note that we can safely assume that zeros don't begin mid-entry because entries are
+        // always block-aligned and thus atomically written.
+        for (auto b: kj::arrayPtr(reinterpret_cast<const byte*>(&entry),
+                                  entries.asBytes().end())) {
+          if (KJ_UNLIKELY(b != 0)) {
+            KJ_FAIL_ASSERT("journal corrupted");
+          }
+        }
+
+        // Looks like this was indeed a case of ext4 zero-extending our journal.
+        //
+        // Note that in practice `expected` should always be zero here: ext4 only ever zero-extends
+        // a file to the end of the current block, and all entries in the same transaction and same
+        // block are written at the same time atomically.
+        KJ_LOG(ERROR, "detected ext4 zero-extension on journal recovery", expected);
+
+        if (expected == 0) {
+          // The previous transaction completed, though!
+          end = &entry;
+        }
+        return kj::arrayPtr(entries.begin(), end);
+      }
+
       if (expected == 0) {
         // We expect to start a new transaction.
         KJ_ASSERT(entry.txSize != 0, "journal corrupted");
