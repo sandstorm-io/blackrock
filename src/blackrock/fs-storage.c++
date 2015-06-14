@@ -330,7 +330,9 @@ public:
           return kj::mv(*fd);
         }
       }
-      // TODO(now): This assert has been observed firing sometimes when fs-storage-test is run.
+      // TODO(soon): This assert has been observed firing sometimes when fs-storage-test is run.
+      //   However, it's been a while since I last saw it, and I can't reproduce the problem
+      //   anymore, so maybe it was fixed?
       return KJ_ASSERT_NONNULL(storage.openObject(id),
           "object is in cache but file not found on disk?");
     }

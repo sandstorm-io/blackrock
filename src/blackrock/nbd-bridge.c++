@@ -457,7 +457,7 @@ Mount::Mount(kj::StringPtr devPath, kj::StringPtr mountPoint, uint64_t flags, kj
 }
 
 Mount::~Mount() noexcept(false) {
-  // TODO(now): Do we need to handle EBUSY and maybe do a force-unmount? It *should* be the case
+  // TODO(soon): Do we need to handle EBUSY and maybe do a force-unmount? It *should* be the case
   //   that the app has been killed off by this point and therefore there should be no open files.
   //   A force-unmount is presumably no better than killing off the mount namespace.
   KJ_SYSCALL(umount(mountPoint.cStr())) { break; };
