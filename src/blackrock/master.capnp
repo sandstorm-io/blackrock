@@ -64,3 +64,18 @@ const gceTestConfig :MasterConfig = (
     )
   )
 );
+
+const gceOasisConfig :MasterConfig = (
+  workerCount = 2,
+  frontendConfig = (
+    baseUrl = "https://oasis.sandstorm.io",
+    wildcardHost = "*.oasis.sandstorm.io",
+    ddpUrl = "https://ddp.oasis.sandstorm.io",
+    allowDemoAccounts = false,
+    isTesting = false
+  ),
+  gce = (
+    project = "sandstorm-oasis",
+    zone = "us-central1-f"
+  )
+);
