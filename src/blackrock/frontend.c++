@@ -274,9 +274,27 @@ protected:
         if (grainInfo.getId() == grainId) {
           // This is the grain we're looking for!
 
-          // Get a snapshot of the volume for use during the backup process.
-          auto volume = grainInfo.getState().getRequest().send().getValue().getVolume()
-              .pauseRequest().send().getSnapshot();
+          // Get a snapshot of the volume for use during the backup process. If the grain is
+          // running then we'll make sure to tell it to sync first.
+          Volume::Client volume = grainInfo.getState().getRequest().send()
+              .then([](auto&& results) -> kj::Promise<Volume::Client> {
+            auto state = results.getValue();
+            auto getVolume = [KJ_MVCAP(results),state]() {
+              return state.getVolume().pauseRequest().send().getSnapshot();
+            };
+
+            if (state.isActive()) {
+              // Grain is running. Sync its storage to improve the backup reliability.
+              return state.getActive().syncStorageRequest().send()
+                  .then([](auto&&) {
+                // Success, continue on.
+              }, [](kj::Exception&& exception) {
+                KJ_LOG(ERROR, "syncStorage failed", exception);
+              }).then(kj::mv(getVolume));
+            } else {
+              return getVolume();
+            }
+          });
 
           // Make request to the Worker to pack this backup.
           auto metadata = params.getInfo();
