@@ -5,6 +5,8 @@
 @0xfc40bcbedafbe11c;
 # An implementation of the Storage interfaces based on a standard filesystem.
 #
+# TODO(doc): The following is outdated!
+#
 # All objects are stored in a massive directory with filenames like:
 #     o<objectId>: object content
 #     c<objectId>: list of object IDs that should be deleted if this object is deleted. This list

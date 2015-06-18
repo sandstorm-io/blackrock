@@ -32,7 +32,7 @@ protected:
   kj::Promise<void> remove(RemoveContext context) override;
   kj::Promise<void> getFactory(GetFactoryContext context) override;
 
-private:
+public:
   struct ObjectKey {
     uint64_t key[4];
 
@@ -88,6 +88,7 @@ private:
     kj::FixedArray<char, 24> filename(char prefix) const;
   };
 
+private:
   class ObjectBase;
   class BlobImpl;
   class VolumeImpl;
