@@ -75,7 +75,7 @@ private:
     auto children = KJ_MAP(i, reader.getRoot<StoredChildIds>().getChildren()) {
       return kj::heapString(FilesystemStorage::ObjectId(i).filename('o').begin());
     };
-    KJ_DBG(children);
+    KJ_LOG(WARNING, children);
 
     words = kj::arrayPtr(reader.getEnd(), words.end());
     capnp::FlatArrayMessageReader reader2(words);
@@ -84,10 +84,10 @@ private:
         KJ_MAP(dummy, obj.getCapTable()) -> kj::Maybe<kj::Own<capnp::ClientHook>> {
           return capnp::newBrokenCap("dummy cap");
         });
-    KJ_DBG(capnp::prettyPrint(obj));
+    KJ_LOG(WARNING, capnp::prettyPrint(obj));
 
     auto account = obj.getPayload().getAs<AccountStorage>();
-    KJ_DBG(capnp::prettyPrint(account));
+    KJ_LOG(WARNING, capnp::prettyPrint(account));
     return true;
   }
 
