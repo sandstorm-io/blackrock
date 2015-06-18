@@ -173,7 +173,7 @@ protected:
       bool found = false;
       for (auto i: kj::indices(listBuilder)) {
         if (listBuilder[i].getId().asReader() == grainId) {
-          if (i == listBuilder.size() - 1) {
+          if (i < listBuilder.size() - 1) {
             // Copy the last element in the list over this one.
             listBuilder.setWithCaveats(i, listBuilder[listBuilder.size() - 1]);
           }
