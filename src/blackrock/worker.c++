@@ -1028,7 +1028,16 @@ kj::MainBuilder::Validity MetaSupervisorMain::run() {
     if (path == packageMount) {
       sawSelf = true;
     } else {
-      KJ_SYSCALL(umount(path.cStr()));
+      while (umount(path.cStr()) < 0) {
+        int error = errno;
+        if (error == EINVAL) {
+          // Not a mount point?
+          KJ_LOG(WARNING, "stale package directory", path);
+          break;
+        } else if (error != EINTR) {
+          KJ_FAIL_SYSCALL("unmount", error, path);
+        }
+      }
     }
   }
   KJ_REQUIRE(sawSelf, "package mount not seen in packages dir", packageMount);
