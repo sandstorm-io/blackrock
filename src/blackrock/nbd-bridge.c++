@@ -423,7 +423,7 @@ retry:
       goto retry;
     } else if (error == EBUSY) {
       KJ_LOG(WARNING, "requested disconnect of nbd device that is still mounted; waiting a bit "
-                      "for unmount", delay);
+                      "for unmount", device.getPath(), delay);
       sleep(delay);
       delay = delay * 2;  // exponential backoff
       goto retry;
