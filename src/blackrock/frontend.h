@@ -41,7 +41,7 @@ private:
   sandstorm::SubprocessSet& subprocessSet;
   kj::Own<capnp::MallocMessageBuilder> configMessage;
   FrontendConfig::Reader config;
-  capnp::TwoPartyServer capnpServer;
+  sandstorm::TwoPartyServerWithClientBootstrap capnpServer;
 
   kj::Own<BackendSetImpl<StorageRootSet>> storageRoots;
   kj::Own<BackendSetImpl<StorageFactory>> storageFactories;

@@ -688,8 +688,7 @@ FrontendImpl::FrontendImpl(kj::Network& network, kj::Timer& timer,
       // the front-end.
       tasks.add(execLoop(MongoInfo(mongoInfo)));
 
-      auto promise = capnpServer.listen(*listener);
-      return promise.attach(kj::mv(listener));
+      return capnpServer.listen(kj::mv(listener));
     });
   }));
 }
