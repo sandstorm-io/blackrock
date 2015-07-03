@@ -80,11 +80,11 @@ private:
     words = kj::arrayPtr(reader.getEnd(), words.end());
     capnp::FlatArrayMessageReader reader2(words);
     auto obj = reader2.getRoot<StoredObject>();
-    reader2.initCapTable(
+    capnp::ReaderCapabilityTable capTable(
         KJ_MAP(dummy, obj.getCapTable()) -> kj::Maybe<kj::Own<capnp::ClientHook>> {
           return capnp::newBrokenCap("dummy cap");
         });
-    KJ_LOG(WARNING, capnp::prettyPrint(obj));
+    KJ_LOG(WARNING, capnp::prettyPrint(capTable.imbue(obj)));
 
     auto account = obj.getPayload().getAs<AccountStorage>();
     KJ_LOG(WARNING, capnp::prettyPrint(account));

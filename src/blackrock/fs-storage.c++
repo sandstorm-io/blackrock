@@ -94,9 +94,24 @@ typedef capnp::Persistent<SturdyRef, SturdyRef::Owner> StandardPersistent;
 typedef capnp::CallContext<StandardPersistent::SaveParams, StandardPersistent::SaveResults>
      StandardSaveContext;
 
-class RefcountedMallocMessageBuilder: public capnp::MallocMessageBuilder, public kj::Refcounted {
+class RefcountedMallocMessageBuilder: public kj::Refcounted {
 public:
-  using MallocMessageBuilder::MallocMessageBuilder;
+  template <typename T>
+  inline typename T::Builder getRoot() {
+    return capTable.imbue(message.getRoot<T>());
+  }
+
+  inline kj::ArrayPtr<kj::Maybe<kj::Own<capnp::ClientHook>>> getCapTable() {
+    return capTable.getTable();
+  }
+
+  void writeToFd(int fd) {
+    capnp::writeMessageToFd(fd, message);
+  }
+
+private:
+  capnp::MallocMessageBuilder message;
+  capnp::BuilderCapabilityTable capTable;
 };
 
 template <size_t size>
@@ -1212,7 +1227,7 @@ protected:
       }
 
       // Write the StoredObject part.
-      capnp::writeMessageToFd(newData.fd, *message);
+      message->writeToFd(newData.fd);
       newData.storedObjectWords = getFilePosition(newData.fd) / sizeof(capnp::word) -
                                   newData.storedChildIdsWords;
 
@@ -1302,11 +1317,11 @@ protected:
 
     capnp::StreamFdMessageReader reader(data.fd.get());
     auto root = reader.getRoot<StoredObject>();
-    reader.initCapTable(KJ_MAP(cap, root.getCapTable()) {
+    capnp::ReaderCapabilityTable capTable(KJ_MAP(cap, root.getCapTable()) {
       return restoreCap(cap);
     });
 
-    auto payload = root.getPayload();
+    auto payload = capTable.imbue(root.getPayload());
     auto size = payload.targetSize();
     size.wordCount += capnp::sizeInWords<
         capnp::FromBuilder<kj::Decay<decltype(context.getResults())>>>();

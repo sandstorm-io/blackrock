@@ -856,10 +856,6 @@ private:
       return message.getRoot<capnp::AnyPointer>();
     }
 
-    kj::ArrayPtr<kj::Maybe<kj::Own<capnp::ClientHook>>> getCapTable() override {
-      return message.getCapTable();
-    }
-
     void send() override {
       if (connection.state != AUTHENTICATED) {
         connection.optimisticMessages.add(kj::addRef(*this));
@@ -903,10 +899,6 @@ private:
 
     capnp::AnyPointer::Reader getBody() override {
       return message->getRoot<capnp::AnyPointer>();
-    }
-
-    void initCapTable(kj::Array<kj::Maybe<kj::Own<capnp::ClientHook>>>&& capTable) override {
-      message->initCapTable(kj::mv(capTable));
     }
 
   private:
