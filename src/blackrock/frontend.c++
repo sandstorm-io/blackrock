@@ -411,6 +411,26 @@ protected:
     return req.send().then([](auto&&) {});
   }
 
+  // ---------------------------------------------------------------------------
+
+  kj::Promise<void> getUserStorageUsage(GetUserStorageUsageContext context) override {
+    StorageRootSet::Client storage = frontend.storageRoots->chooseOne();
+
+    auto owner = ({
+      auto userObjectName = kj::str("user-", context.getParams().getUserId());
+      context.releaseParams();
+
+      auto req = storage.getOrCreateAssignableRequest<AccountStorage>();
+      req.setName(userObjectName);
+      req.initDefaultValue();
+      req.send().getObject();
+    });
+
+    return owner.getStorageUsageRequest().send().then([context](auto&& result) mutable {
+      context.getResults(capnp::MessageSize { 4, 0 }).setSize(result.getTotalBytes());
+    });
+  }
+
 private:
   FrontendImpl& frontend;
   kj::Timer& timer;
@@ -857,6 +877,7 @@ kj::Promise<void> FrontendImpl::execLoop(MongoInfo&& mongoInfo) {
           ", \"allowDevAccounts\": false"
           ", \"isTesting\":", config.getIsTesting() ? "true" : "false",
           ", \"wildcardHost\":\"", config.getWildcardHost(), "\"",
+          ", \"quotaEnabled\": true"
           "}}").cStr(), true));
 
       // Execute!
