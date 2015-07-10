@@ -80,6 +80,11 @@ public:
   // simply writing a template image directly to the disk, so format() will result in exactly the
   // same disk image every time.
 
+  void trimJournalIfClean();
+  // Verify that the journal is currently clean, and then TRIM it. Call immediately after a clean
+  // unmount to reduce disk usage. (The journal normally doesn't get TRIMed even when the contents
+  // have already been committed. This seems to be a deficiency in the ext4 driver.)
+
   static void resetAll();
   // Iterate through all the nbd devices and reset them, in order to un-block processes wedged
   // trying to read disconnected devices.
@@ -135,6 +140,7 @@ public:
 
 private:
   kj::String mountPoint;
+  uint64_t flags;
 };
 
 }  // namespace blackrock

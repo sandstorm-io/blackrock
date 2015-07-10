@@ -60,6 +60,8 @@ public:
       size_t n = kj::FdInputStream(fd.get()).tryRead(block, sizeof(block), sizeof(block));
       KJ_ASSERT(n > 0);
 
+      KJ_LOG(INFO, kj::hex((uint64_t)offset / sizeof(block)), sandstorm::hexEncode(block));
+
       for (kj::byte b: block) {
         if (b != 0) {
           // This block has non-zero bytes. We need to add it to the results. Note that we write

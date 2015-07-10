@@ -1050,7 +1050,8 @@ kj::MainBuilder::Validity MetaSupervisorMain::run() {
     device.format();
   }
 
-  Mount mount(device.getPath(), "/mnt", MS_NOATIME, nullptr);
+  KJ_ON_SCOPE_SUCCESS(device.trimJournalIfClean());
+  Mount mount(device.getPath(), "/mnt", MS_NOATIME, "discard");
   KJ_SYSCALL(chown("/mnt", 1000, 1000));
 
   // Mask SIGCHLD and SIGTERM so that we can handle them later.
@@ -1158,7 +1159,8 @@ kj::MainBuilder::Validity UnpackMain::run() {
   NbdDevice device;
   NbdBinding binding(device, kj::AutoCloseFd(3), NbdAccessType::READ_WRITE);
   device.format();
-  Mount mount(device.getPath(), "/mnt", MS_NOATIME, nullptr);
+  KJ_ON_SCOPE_SUCCESS(device.trimJournalIfClean());
+  Mount mount(device.getPath(), "/mnt", MS_NOATIME, "discard");
   KJ_SYSCALL(mkdir("/mnt/spk", 0755));
 
   // We unpack packages with uid 1/gid 1: IDs that are not zero, but are also not used by apps.
@@ -1208,7 +1210,8 @@ kj::MainBuilder::Validity BackupMain::run(kj::StringPtr filename) {
   if (restore) {
     device.format();
   }
-  Mount mount(device.getPath(), "/mnt", MS_NOATIME, nullptr);
+  KJ_ON_SCOPE_SUCCESS(if (restore) device.trimJournalIfClean());
+  Mount mount(device.getPath(), "/mnt", MS_NOATIME, "discard");
 
   KJ_SYSCALL(chown(filename.cStr(), 1000, 1000));
   if (restore) {

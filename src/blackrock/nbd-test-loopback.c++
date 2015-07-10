@@ -144,6 +144,7 @@ private:
     }
 
     context.warning("mounting...");
+    KJ_DEFER(device.trimJournalIfClean());
     Mount mount(device.getPath(), mountPoint, 0, options);
     KJ_DEFER(context.warning("unmounting..."));
 

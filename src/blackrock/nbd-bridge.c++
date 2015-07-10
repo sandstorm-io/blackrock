@@ -16,9 +16,11 @@
 #include <sodium/randombytes.h>
 #include <capnp/message.h>
 #include <blackrock/sparse-data.capnp.h>
+#include <limits.h>
 
 #include <sys/mount.h>
-#undef BLOCK_SIZE  // #defined in mount.h, ugh
+#include <linux/fs.h>  // must come after mount.h because of macro pollution
+#undef BLOCK_SIZE  // #defined in mount.h and fs.h, ugh
 
 namespace blackrock {
 
@@ -367,6 +369,113 @@ void NbdDevice::format() {
   }
 }
 
+namespace {
+
+template <uint size>
+class alignas(uint64_t) Ext4Record {
+  // Convenience class for reading fixed-width ext4 records, e.g. the superblock.
+
+public:
+  Ext4Record(int fd, uint64_t offset) {
+    ssize_t n;
+    KJ_SYSCALL(n = pread(fd, data, size, offset));
+    KJ_ASSERT(n == size);
+  }
+
+  uint16_t le16(uint offset) { return *reinterpret_cast<uint16_t*>(data + offset); }
+  uint32_t le32(uint offset) { return *reinterpret_cast<uint32_t*>(data + offset); }
+
+  uint16_t be16(uint offset) { return __builtin_bswap16(le16(offset)); }
+  uint32_t be32(uint offset) { return __builtin_bswap32(le32(offset)); }
+
+  byte* bytes(uint offset) { return data + offset; }
+
+private:
+  byte data[size];
+};
+
+}  // namespace
+
+void NbdDevice::trimJournalIfClean() {
+#define EXPECT(exp, cond, message) KJ_ASSERT(exp cond, message, exp)
+#define EXPECTN(exp, cond, message) KJ_ASSERT(!(exp cond), message, exp)
+  KJ_IF_MAYBE(exception, kj::runCatchingExceptions([&]() {
+    // Carefully verify that the journal is clean, and then trim it.
+    //
+    // This code made possible by: https://ext4.wiki.kernel.org/index.php/Ext4_Disk_Layout
+
+    // Examine the superblock and check all our assuptions about the filesystem.
+    Ext4Record<1024> superblock(fd, 1024);
+    EXPECT(superblock.le32(0x18), == 2, "block size not 4k?");
+    EXPECT(superblock.le32(0x5C), & 0x4, "no journal?");
+    EXPECTN(superblock.le32(0x60), & 0x80, "not 32-bit?");
+    EXPECT(superblock.le32(0xE0), == 8, "journal is not inode 8?");
+    EXPECT(superblock.le32(0x28), >= 8, "fewer than 8 inodes per group?");
+    EXPECT(superblock.le16(0x58), == 256, "inodes not 256 bytes?");
+
+    // Read the group descriptor for the first group, which ought to contain the journal inode.
+    Ext4Record<64> group(fd, 4096);
+    uint inodeTableLocation = group.le32(0x8);
+
+    // Read the journal inode. Since there is no inode 0, inode 8 is located 7 inodes away from
+    // the table start.
+    Ext4Record<256> inode(fd, inodeTableLocation * 4096ull + 7 * 256);
+    EXPECT(inode.le32(0x1C), == (128 << 11), "journal is not 128 MB?");
+    EXPECT(inode.le32(0x20), & 0x80000, "journal not extents-based?");
+    EXPECT(inode.le16(0x28 + 0x0), == 0xF30Au, "journal inode extent tree has bad magic number?");
+
+    uint extentCount = inode.le16(0x28 + 0x2);
+    EXPECT(extentCount, <= 4, "journal inode has more than four extents?");
+
+    uint logicalPos = 0;
+    uint journalLocation = 0;
+    uint physicalPos = 0;
+    for (uint i = 0; i < extentCount; i++) {
+      uint off = 0x28 + 0xc + i * 0xc;
+      EXPECT(inode.le32(off + 0x0), == logicalPos, "journal exntents not contiguous from zero?");
+      EXPECT(inode.le16(off + 0x6), == 0, "journal location outside 32-bit range?");
+
+      if (i == 0) {
+        journalLocation = inode.le32(off + 0x8);
+        physicalPos = journalLocation;
+      } else {
+        EXPECT(inode.le32(off + 0x8), == physicalPos, "journal extents not contiguous?");
+      }
+
+      uint len = inode.le32(off + 0x4) & 0x7fffu;  // don't care if it's initialized
+      logicalPos += len;
+      physicalPos += len;
+    }
+    EXPECT(logicalPos, == 32768, "journal extents do not add to 128MB?");
+
+    KJ_ASSERT(memcmp(superblock.bytes(0x10C), inode.bytes(0x28), 60) == 0,
+              "superblock's backup of journal i_block doesn't match?");
+
+    if (journalLocation != 0x108000) {
+      KJ_LOG(WARNING, "journal location is different than it used to be", journalLocation);
+    }
+
+    Ext4Record<1024> journal(fd, journalLocation * 4096ull);
+    EXPECT(journal.be32(0x0), == 0xC03B3998u, "journal superblock has bad magic number?");
+    EXPECT(journal.be32(0x4), == 4, "journal doesn't start with superblock?");
+    KJ_ASSERT(memcmp(superblock.bytes(0xD0), journal.bytes(0x30), 16) == 0,
+              "journal uuid doesn't match?");
+
+    // The ext4 layout page claims journal.s_start == 0 does NOT imply the journal is clean, but
+    // several comments inside the kernel source code claim it does. I am not sure how else to
+    // tell, so we'll rely on this.
+    EXPECT(journal.be32(0x1C), == 0, "journal is not clean!");
+
+    // Trim everything except the superblock.
+    uint64_t range[2] = { (journalLocation + 1) * 4096ull, (logicalPos - 1) * 4096 };
+    KJ_SYSCALL(ioctl(fd, BLKDISCARD, &range));
+  })) {
+    KJ_LOG(ERROR, "exception while trimming journal", *exception);
+  }
+#undef EXPECT
+#undef EXPECTN
+}
+
 void NbdDevice::resetAll() {
   for (uint i = 0; i < MAX_NBDS; i++) {
     auto devname = kj::str("/dev/nbd", i);
@@ -450,17 +559,33 @@ NbdDevice& NbdBinding::setup(NbdDevice& device, kj::AutoCloseFd socket, NbdAcces
 // =======================================================================================
 
 Mount::Mount(kj::StringPtr devPath, kj::StringPtr mountPoint, uint64_t flags, kj::StringPtr options)
-    : mountPoint(kj::heapString(mountPoint)) {
+    : mountPoint(kj::heapString(mountPoint)), flags(flags) {
   KJ_SYSCALL(mount(devPath.cStr(), mountPoint.cStr(), "ext4",
                    MS_NODEV | MS_NOATIME | MS_NOSUID | flags, options.cStr()),
              devPath, mountPoint);
 }
 
 Mount::~Mount() noexcept(false) {
+  if (!(flags & MS_RDONLY)) {
+    KJ_IF_MAYBE(exception, kj::runCatchingExceptions([&]() {
+      // Before unmounting a writable device, trim unused pages.
+      // TODO(cleanup): This is mainly here to fix existing files made before we started setting
+      //   -o discard. Once migration is complete, we should remove this, as it is redundant given
+      //   -o discard is set.
+      struct fstrim_range range;
+      memset(&range, 0, sizeof(range));
+      range.len = ULLONG_MAX;
+      auto fd = sandstorm::raiiOpen(mountPoint, O_RDONLY);
+      KJ_SYSCALL(ioctl(fd, FITRIM, &range));
+    })) {
+      KJ_LOG(ERROR, "exception during fstrim", *exception);
+    }
+  }
+
   // TODO(soon): Do we need to handle EBUSY and maybe do a force-unmount? It *should* be the case
   //   that the app has been killed off by this point and therefore there should be no open files.
   //   A force-unmount is presumably no better than killing off the mount namespace.
-  KJ_SYSCALL(umount(mountPoint.cStr())) { break; };
+  KJ_SYSCALL(umount(mountPoint.cStr())) { return; };
 }
 
 }  // namespace blackrock
