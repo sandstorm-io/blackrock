@@ -22,6 +22,7 @@ fast: blackrock-fast.tar.xz
 clean:
 	rm -rf blackrock*.tar.xz shell/.meteor
 	make -f deps/sandstorm/Makefile clean
+	find shell/packages -type l | xargs -r rm
 
 continuous: tmp/.deps
 	make -f deps/sandstorm/Makefile continuous
@@ -35,10 +36,13 @@ shell/.meteor:
 	@mkdir shell/.meteor
 	@touch shell/.meteor/DO-NOT-EDIT-THESE
 shell/.meteor/%: deps/sandstorm/shell/.meteor/% tmp/.deps shell/.meteor
-	cp $< $@
+	@cp $< $@
 shell/.meteor/packages: deps/sandstorm/shell/.meteor/packages tmp/.deps shell/.meteor shell/packages/blackrock-*
-	cp $< $@
-	(echo && cd shell/packages && ls -d blackrock-*) >> $@
+	@$(call color,generating meteor package list)
+	@cp $< $@
+	@(echo && cd shell/packages && ls -d blackrock-*) >> $@
+	@find shell/packages -type l | xargs -r rm
+	@(cd shell/packages && ln -s ../../deps/sandstorm/shell/packages/* .)
 meteor-env: shell/.meteor/cordova-plugins shell/.meteor/platforms shell/.meteor/release shell/.meteor/versions shell/.meteor/packages
 
 bundle: meteor-env tmp/.deps
