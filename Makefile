@@ -36,7 +36,7 @@ shell/.meteor:
 	@touch shell/.meteor/DO-NOT-EDIT-THESE
 shell/.meteor/%: deps/sandstorm/shell/.meteor/% tmp/.deps shell/.meteor
 	cp $< $@
-shell/.meteor/packages: deps/sandstorm/shell/.meteor/packages tmp/.deps shell/.meteor
+shell/.meteor/packages: deps/sandstorm/shell/.meteor/packages tmp/.deps shell/.meteor shell/packages/blackrock-*
 	cp $< $@
 	(echo && cd shell/packages && ls -d blackrock-*) >> $@
 meteor-env: shell/.meteor/cordova-plugins shell/.meteor/platforms shell/.meteor/release shell/.meteor/versions shell/.meteor/packages
