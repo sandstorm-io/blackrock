@@ -26,7 +26,21 @@ clean:
 continuous: tmp/.deps
 	make -f deps/sandstorm/Makefile continuous
 
-bundle: tmp/.deps
+# These rules generate shell/.meteor by copying over files from Sandstorm and
+# then adding all packages named "blackrock-*" found in shell/packages to the
+# dependency list. You should never ever edit things in Blackrock's
+# shell/.meteor directly; edit Sandstorm's version instead, and then re-run
+# make.
+shell/.meteor:
+	@mkdir shell/.meteor
+shell/.meteor/%: deps/sandstorm/shell/.meteor/% tmp/.deps shell/.meteor
+	cp $< $@
+shell/.meteor/packages: deps/sandstorm/shell/.meteor/packages tmp/.deps shell/.meteor
+	cp $< $@
+	(echo && cd shell/packages && ls -d blackrock-*) >> $@
+meteor-env: shell/.meteor/cordova-plugins shell/.meteor/platforms shell/.meteor/release shell/.meteor/versions shell/.meteor/packages
+
+bundle: meteor-env tmp/.deps
 	make -f deps/sandstorm/Makefile bundle
 
 deps: tmp/.deps
