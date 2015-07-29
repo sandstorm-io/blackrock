@@ -5,7 +5,7 @@ set -eu
 echo findProvider canonical:blackrock/sparse-data
 read MKSPARSE
 
-echo newOutput blackrock/blank-ext4.o
+echo newOutput blackrock/blank-ext4.sparse
 read OUTPUT
 
 # Put temp file in /var/tmp because tmpfs doesn't handle sparse files well.
@@ -23,15 +23,5 @@ truncate -s 8589934592 $TMPFILE
 #   than just the UUID.
 /sbin/mkfs.ext4 -q -b 4096 -U 00000000-0000-0000-0000-000000000000 -m 0 -O sparse_super2 \
     -E num_backup_sb=0,resize=4294967295 $TMPFILE
-$MKSPARSE $TMPFILE > $TMPFILE.cp
+$MKSPARSE $TMPFILE > $OUTPUT
 rm $TMPFILE
-
-# Embed in an object file.
-(cd $(dirname $TMPFILE) && ld -r -b binary -o $(basename $TMPFILE).o $(basename $TMPFILE).cp)
-rm $TMPFILE.cp
-
-cp $TMPFILE.o $OUTPUT
-rm $TMPFILE.o
-echo provide $OUTPUT c++symbol:_binary_blackrock_blank_ext4_cp_start
-echo provide $OUTPUT c++symbol:_binary_blackrock_blank_ext4_cp_end
-echo provide $OUTPUT c++symbol:_binary_blackrock_blank_ext4_cp_size

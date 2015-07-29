@@ -16,6 +16,7 @@
 #include <sodium/randombytes.h>
 #include <capnp/message.h>
 #include <blackrock/sparse-data.capnp.h>
+#include <blackrock/blank-ext4.capnp.h>
 #include <limits.h>
 
 #include <sys/mount.h>
@@ -344,11 +345,6 @@ NbdDevice::NbdDevice(uint number)
   KJ_SYSCALL(flock(fd, LOCK_EX | LOCK_NB), "requested nbd device is already in-use", path);
 }
 
-extern "C" {
-  extern capnp::word _binary_blackrock_blank_ext4_cp_start[];
-  // Embedded data produced by blank-ext4.ekam-rule.
-}
-
 static void pwriteAll(int fd, const void* data, size_t size, off_t offset) {
   while (size > 0) {
     ssize_t n;
@@ -361,7 +357,7 @@ static void pwriteAll(int fd, const void* data, size_t size, off_t offset) {
 }
 
 void NbdDevice::format() {
-  auto sparse = capnp::readMessageUnchecked<SparseData>(_binary_blackrock_blank_ext4_cp_start);
+  SparseData::Reader sparse = BLANK_EXT4;
 
   for (auto chunk: sparse.getChunks()) {
     auto data = chunk.getData();

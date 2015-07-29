@@ -6,6 +6,7 @@
 #include <kj/main.h>
 #include <sandstorm/util.h>
 #include <capnp/message.h>
+#include <capnp/serialize.h>
 #include <unistd.h>
 #include <errno.h>
 
@@ -101,9 +102,7 @@ public:
       chunkBuilder.adoptData(kj::mv(chunks[i].data));
     }
 
-    auto flat = kj::heapArray<capnp::word>(root.totalSize().wordCount + 1);
-    capnp::copyToUnchecked(root.asReader(), flat);
-    kj::FdOutputStream(STDOUT_FILENO).write(flat.asBytes().begin(), flat.asBytes().size());
+    capnp::writeMessageToFd(STDOUT_FILENO, message);
 
     return true;
   }
