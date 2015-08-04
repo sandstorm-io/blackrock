@@ -1171,8 +1171,10 @@ kj::MainBuilder::Validity UnpackMain::run() {
   kj::String appId = sandstorm::unpackSpk(STDIN_FILENO, "/mnt/spk", "/tmp");
 
   // Read manifest.
+  capnp::ReaderOptions manifestLimits;
+  manifestLimits.traversalLimitInWords = sandstorm::spk::Manifest::SIZE_LIMIT_IN_WORDS;
   capnp::StreamFdMessageReader reader(sandstorm::raiiOpen(
-      "/mnt/spk/sandstorm-manifest", O_RDONLY | O_CLOEXEC));
+      "/mnt/spk/sandstorm-manifest", O_RDONLY | O_CLOEXEC), manifestLimits);
 
   // Write result to stdout.
   capnp::MallocMessageBuilder message;
