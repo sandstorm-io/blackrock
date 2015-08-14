@@ -1,0 +1,73 @@
+<!--
+Sandstorm - Personal Cloud Sandbox
+Copyright (c) 2015 Sandstorm Development Group, Inc. and contributors
+All rights reserved.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+  http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+-->
+
+<template name="billingSettings">
+  {{!--
+    Template for account settings. This typically:
+    - Displays a list of credit cards on file, and allows adding or removing cards.
+    - Displays current plan, and options for changing or canceling it.
+    - Displays available credit for in-app purchases, if any.
+
+    If the user modifies their plan, their quota is updated appropriately.
+  --}}
+  <div class="billing-settings">
+    <h3>Payment Methods</h3>
+    <table>
+      <thead>
+        <tr>
+          <td></td>
+          <td>Credit / Debit Card</td>
+          <td>Expiry</td>
+          <td></td>
+        </tr>
+      </thead>
+      <tbody>
+        {{#each cards}}
+          <tr class="card">
+            <td class="checkbox">
+              <span class="{{#unless isPrimary}}hidden{{/unless}}">Default</span>
+              <span class="checkbox-wrapper">
+                <input type="checkbox" class="make-primary-card" checked="{{isPrimary}}" id="primary-{{_id}}"><label for="primary-{{_id}}"></label>
+              </span>
+            </td>
+            <td>{{brand}}: **** **** **** {{last4}}</td>
+            <td>01/18</td>
+            <td><button class="delete-card">Delete</button></td>
+          </tr>
+        {{/each}}
+        <tr>
+          <td></td>
+          <td class="add-new-card">
+            {{#if checkoutData}}
+              <iframe class="mobile-iframe-hack {{#if showPrompt}}fullscreen{{/if}}" src="{{paymentsUrl}}/checkout#{{checkoutData}}"></iframe>
+            {{/if}}
+            <button class="add-card">+</button><span>Add a new credit / debit card</span>
+          </td>
+          <td></td>
+          <td></td>
+        </tr>
+      </tbody>
+    </table>
+    <h3>Subscription: {{subscription.plan.name}}</h3>
+
+    <button class="change-plan">Change plan</button>
+    {{#if billingPromptReason}}
+      {{>billingPrompt reason=billingPromptReason previousPlan=subscription onDismiss=onDismiss}}
+    {{/if}}
+  </div>
+</template>
