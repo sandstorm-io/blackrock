@@ -14,6 +14,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+var Crypto = Npm.require("crypto");
+var HOSTNAME = process.env.ROOT_URL;
 var stripe = Npm.require("stripe")(Meteor.settings.stripe_key);
 
 BlackrockPayments = function (db) {
@@ -39,6 +41,24 @@ var serveSandcat = Meteor.bindEnvironment(function (res) {
   res.end(new Buffer(Assets.getBinary("sandstorm-purplecircle.png")));
 });
 
+function hashId(id) {
+  return Crypto.createHash("sha256").update(HOSTNAME + ":" + id).digest("base64");
+}
+
+function findOriginalId(hashedId, customerId) {
+  var data = Meteor.wrapAsync(stripe.customers.retrieve.bind(stripe.customers))(customerId);
+  if (data.sources && data.sources.data) {
+    var sources = data.sources.data;
+    for (var i = 0; i < sources.length; i++) {
+      if (hashId(sources[i].id) === hashedId) {
+        return sources[i].id;
+      }
+    }
+  }
+
+  throw new Meteor.Error(400, "Id not found");
+}
+
 BlackrockPayments.prototype.connectHandler = function (req, res, next) {
   if (req.headers.host == this.db.makeWildcardHost("payments")) {
     if (req.url == "/checkout") {
@@ -54,9 +74,9 @@ BlackrockPayments.prototype.connectHandler = function (req, res, next) {
   }
 };
 
-BlackrockPayments.prototype._createUser = function (id, email) {
+BlackrockPayments.prototype._createUser = function (token, email) {
   var data = Meteor.wrapAsync(stripe.customers.create.bind(stripe.customers))({
-    source: id,
+    source: token,
     email: email,
     description: Meteor.userId()  // TODO(soon): Do we want to store backrefs to our database in stripe?
   });
@@ -64,11 +84,11 @@ BlackrockPayments.prototype._createUser = function (id, email) {
   return data.id;
 }
 
-BlackrockPayments.prototype.addCardForUser = function (id, email) {
+BlackrockPayments.prototype.addCardForUser = function (token, email) {
   if (!Meteor.userId()) {
     throw new Meteor.Error(403, "Must be logged in to add card");
   }
-  check(id, String);
+  check(token, String);
   check(email, String);
 
   var user = Meteor.user();
@@ -76,10 +96,10 @@ BlackrockPayments.prototype.addCardForUser = function (id, email) {
   if (user.payments && user.payments.id) {
     Meteor.wrapAsync(stripe.customers.createSource.bind(stripe.customers))(
       user.payments.id,
-      {source: id}
+      {source: token}
     );
   } else {
-    this._createUser(id, email);
+    this._createUser(token, email);
   }
 };
 
@@ -100,6 +120,8 @@ BlackrockPayments.prototype.deleteCardForUser = function (id) {
     }
   }
 
+  id = findOriginalId(id, customerId);
+
   Meteor.wrapAsync(stripe.customers.deleteCard.bind(stripe.customers))(
     customerId,
     id
@@ -112,8 +134,11 @@ BlackrockPayments.prototype.makeCardPrimary = function (id) {
   }
   check(id, String);
 
+  var customerId = Meteor.user().payments.id;
+  id = findOriginalId(id, customerId);
+
   Meteor.wrapAsync(stripe.customers.update.bind(stripe.customers))(
-    Meteor.user().payments.id,
+    customerId,
     {default_source: id}
   );
 };
@@ -133,17 +158,16 @@ BlackrockPayments.prototype.getStripeData = function () {
     for (var i = 0; i < sources.length; i++) {
       if (sources[i].id === data.default_source) {
         sources[i].isPrimary = true;
-      } else {
-        sources[i].isNotPrimary = true;
       }
+      sources[i] = _.pick(sources[i], "last4", "brand", "id", "exp_year", "exp_month", "isPrimary");
+      sources[i].id = hashId(sources[i].id);
     }
   }
 
   var subscription;
   if (data.subscriptions && data.subscriptions.data[0]) {
-    subscription = data.subscriptions.data[0];
     // Hack to deal with beta being in our plan names
-    subscription.plan.name = subscription.plan.name.replace("-beta", "");
+    subscription = data.subscriptions.data[0].plan.name.replace("-beta", "");
   }
   return {
     email: data.email,
@@ -195,21 +219,21 @@ BlackrockPayments.prototype.updateUserSubscription = function (newPlan) {
   }
 };
 
-BlackrockPayments.prototype.createUserSubscription = function (id, email, plan) {
+BlackrockPayments.prototype.createUserSubscription = function (token, email, plan) {
   if (!Meteor.userId()) {
     throw new Meteor.Error(403, "Must be logged in to update subscription");
   }
-  check(id, String);
+  check(token, String);
   check(email, String);
   check(plan, String);
 
   var payments = Meteor.user().payments;
   var customerId;
   if (!payments || !payments.id) {
-    customerId = this._createUser(id, email);
+    customerId = this._createUser(token, email);
   } else {
     customerId = payments.id;
-    this.addCardForUser(id, email);
+    this.addCardForUser(token, email);
   }
   stripe.customers.createSubscription.bind(stripe.customers)(
     customerId,

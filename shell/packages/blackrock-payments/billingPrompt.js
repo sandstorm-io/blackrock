@@ -167,17 +167,17 @@ Template._billingPromptBody.helpers({
   planIsStandard: function () {
     var data = StripeCustomerData.findOne();
     if (!data) return false;
-    return data.subscription.plan.name === "standard";
+    return data.subscription === "standard";
   },
   planIsLarge: function () {
     var data = StripeCustomerData.findOne();
     if (!data) return false;
-    return data.subscription.plan.name === "large";
+    return data.subscription === "large";
   },
   planIsMega: function () {
     var data = StripeCustomerData.findOne();
     if (!data) return false;
-    return data.subscription.plan.name === "mega";
+    return data.subscription === "mega";
   },
   planIsFree: function () {
     var data = StripeCustomerData.findOne();

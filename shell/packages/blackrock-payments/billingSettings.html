@@ -46,7 +46,7 @@ limitations under the License.
               </span>
             </td>
             <td>{{brand}}: **** **** **** {{last4}}</td>
-            <td>01/18</td>
+            <td>{{exp_month}}/{{exp_year}}</td><!-- TODO(soon): handle non-US formats -->
             <td><button class="delete-card">Delete</button></td>
           </tr>
         {{/each}}
@@ -63,7 +63,7 @@ limitations under the License.
         </tr>
       </tbody>
     </table>
-    <h3>Subscription: {{subscription.plan.name}}</h3>
+    <h3>Subscription: {{subscription}}</h3>
 
     <button class="change-plan">Change plan</button>
     {{#if billingPromptReason}}
