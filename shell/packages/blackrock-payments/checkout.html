@@ -1,0 +1,38 @@
+<html>
+  <head>
+    <title>Sandstorm Plans</title>
+    <meta charset="utf-8">
+    <script src="https://checkout.stripe.com/checkout.js"></script>
+  </head>
+  <body style="cursor: pointer; margin: 0px;">
+    <script>
+      data = JSON.parse(window.location.hash.slice(1));
+
+      var handler = StripeCheckout.configure({
+        key: '$STRIPE_KEY',
+        image: '/sandstorm-purplecircle.png',
+        zipCode: true,
+        token: function(token) {
+          window.parent.postMessage({id: data.id, token: token, plan: data.planName}, "*");
+        },
+        closed: function() {
+          window.parent.postMessage({id: data.id, error: "closed early"}, "*");
+        }
+      });
+
+      window.addEventListener("message", function (ev) {
+        if (ev && ev.data && ev.data.openDialog) {
+          window.parent.postMessage({id: data.id, showPrompt: true, plan: data.planName}, "*");
+          handler.open(data);
+        }
+      }, false);
+
+      document.querySelector("body").addEventListener("click", function () {
+        // TODO(soon): show user error if invalid plan specified
+        window.parent.postMessage({id: data.id, showPrompt: true, plan: data.planName}, "*");
+        handler.open(data);
+      });
+
+    </script>
+  </body>
+</html>

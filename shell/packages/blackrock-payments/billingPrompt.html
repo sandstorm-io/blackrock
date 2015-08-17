@@ -1,0 +1,128 @@
+<!--
+Sandstorm - Personal Cloud Sandbox
+Copyright (c) 2015 Sandstorm Development Group, Inc. and contributors
+All rights reserved.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+  http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+-->
+
+<template name="billingPrompt">
+  {{!--
+    Prompts the user to choose a plan, and a credit card with which to pay for it. Once the user
+    has chosen something, their quota is updated.
+
+    Data inputs:
+    - reason:
+        "voluntary": The user clicked a "sign up" button or is upgrading a plan. Optionally,
+          `previousPlan` is also passed in.
+        "outOfStorage": User ran out of storage.
+        "outOfCompute": User ran out of compute units.
+        "outOfGrains": Demo mode may limit the number of grains created.
+
+    This will be included at the top level HTML like:
+
+      {{#if billingPromptReason}}
+        {{>billingPrompt data=billingPromptReason}}
+      {{/if}}
+
+    (In this example, `billingPromptReason` is probably some session variable.)
+  --}}
+
+  {{#if showPrompt}}
+    {{> sandstormTopbarItem name="billing-prompt" topbar=globalTopbar onlyPopup=true popupTemplate="_billingPromptBody" onDismiss=onDismiss data=popupData}}
+  {{/if}}
+</template>
+
+<template name="_billingPromptBody">
+  <div class="subscriptions">
+    <div class="subscription standard {{#if planIsStandard}}selected{{/if}} {{#if isSelectingStandard}}selecting{{/if}}">
+      <h3>Standard</h3>
+      <table>
+        <tr>
+          <td>200 CU</td>
+          <td>Compute Units</td>
+        </tr>
+        <tr>
+          <td>5 GB</td>
+          <td>Storage</td>
+        </tr>
+        <tr>
+          <td>Unlimited</td>
+          <td># of Grains</td>
+        </tr>
+      </table>
+      <hr>
+      <span>6$ / Month FREE during beta</span>
+      <iframe class="mobile-iframe-hack {{#if standardFullscreen}}fullscreen{{/if}}" src="{{paymentsUrl}}/checkout#{{standardCheckoutData}}"></iframe>
+    </div>
+    <div class="subscription large {{#if planIsLarge}}selected{{/if}} {{#if isSelectingLarge}}selecting{{/if}}">
+      <h3>Large</h3>
+      <table>
+        <tr>
+          <td>400 CU</td>
+          <td>Compute Units</td>
+        </tr>
+        <tr>
+          <td>30 GB</td>
+          <td>Storage</td>
+        </tr>
+        <tr>
+          <td>Unlimited</td>
+          <td># of Grains</td>
+        </tr>
+      </table>
+      <hr>
+      <span>12$ / Month FREE during beta</span>
+      <iframe class="mobile-iframe-hack {{#if largeFullscreen}}fullscreen{{/if}}" src="{{paymentsUrl}}/checkout#{{largeCheckoutData}}"></iframe>
+    </div>
+    <div class="subscription mega {{#if planIsMega}}selected{{/if}} {{#if isSelectingMega}}selecting{{/if}}">
+      <h3>Mega</h3>
+      <table>
+        <tr>
+          <td>600 CU</td>
+          <td>Compute Units</td>
+        </tr>
+        <tr>
+          <td>100 GB</td>
+          <td>Storage</td>
+        </tr>
+        <tr>
+          <td>Unlimited</td>
+          <td># of Grains</td>
+        </tr>
+      </table>
+      <hr>
+      <span>24$ / Month FREE during beta</span>
+      <iframe class="mobile-iframe-hack {{#if megaFullscreen}}fullscreen{{/if}}" src="{{paymentsUrl}}/checkout#{{megaCheckoutData}}"></iframe>
+    </div>
+    <div class="subscription free {{#if planIsFree}}selected{{/if}} {{#if isSelectingFree}}selecting{{/if}}">
+      <h3>Free</h3>
+      <table>
+        <tr>
+          <td>200 CU</td>
+          <td>Compute Units</td>
+        </tr>
+        <tr>
+          <td>5 GB</td>
+          <td>Storage</td>
+        </tr>
+        <tr>
+          <td>5 (max)</td>
+          <td># of Grains</td>
+        </tr>
+      </table>
+      <hr>
+      <span>FREE</span>
+    </div>
+  </div>
+</template>

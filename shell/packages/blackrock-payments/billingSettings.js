@@ -1,0 +1,121 @@
+// Sandstorm - Personal Cloud Sandbox
+// Copyright (c) 2015 Sandstorm Development Group, Inc. and contributors
+// All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//   http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+var messageListener = function (showPrompt, template, event) {
+  if (event.origin !== window.location.protocol + "//" + makeWildcardHost("payments")) {
+    return;
+  }
+
+  if (event.data.id != template.id) {
+    return;
+  }
+
+  if (event.data.showPrompt) {
+    showPrompt.set(true);
+    return;
+  }
+
+  if (event.data.token) {
+    Meteor.call("addCardForUser", event.data.token.id, event.data.token.email, function (err) {
+      if (err) alert(err); // TODO(soon): make this UI better
+
+      updateStripeData();
+    });
+  }
+
+  if (event.data.error || event.data.token) {
+    showPrompt.set(false);
+  }
+};
+
+Template.billingSettings.onCreated(function () {
+  updateStripeData();
+  this.billingPromptReason = new ReactiveVar(null);
+  this.addCardPrompt = new ReactiveVar(false);
+  this.listener = messageListener.bind(this, this.addCardPrompt, this);
+  this.id = Math.random();
+  window.addEventListener("message", this.listener, false);
+});
+
+Template.billingSettings.onDestroyed(function () {
+  window.removeEventListener("message", this.listener, false);
+});
+
+Template.billingSettings.events({
+  "click .change-plan": function (ev) {
+    Template.instance().billingPromptReason.set("voluntary");
+  },
+  "click .add-card": function (ev) {
+    var frame = ev.target.parentElement.querySelector("iframe");
+    frame.contentWindow.postMessage({openDialog: true}, "*");
+  },
+  "click .delete-card": function (ev) {
+    var id = this.id;
+    var template = Template.instance();
+    Meteor.call("deleteCardForUser", id, function (err) {
+      if (err) alert(err); // TODO(soon): make this UI better
+
+      StripeCards.remove({_id: id});
+      updateStripeData();
+    });
+  },
+  "click .make-primary-card": function (ev) {
+    var template = Template.instance();
+    StripeCards.update({isPrimary: true}, {$set: {isPrimary: false}});
+    StripeCards.update({_id: this.id}, {$set: {isPrimary: true}});
+    Meteor.call("makeCardPrimary", this.id, function (err) {
+      if (err) alert(err); // TODO(soon): make this UI better
+
+      updateStripeData();
+    });
+  }
+});
+
+Template.billingSettings.helpers({
+  cards: function () {
+    return StripeCards.find();
+  },
+  subscription: function () {
+    var data = StripeCustomerData.findOne();
+    return (data && data.subscription) || "free";
+  },
+  billingPromptReason: function () {
+    return Template.instance().billingPromptReason.get();
+  },
+  onDismiss: function () {
+    var template = Template.instance();
+    return function () {
+      template.billingPromptReason.set(null);
+    };
+  },
+  checkoutData: function () {
+    var template = Template.instance();
+    var data = StripeCustomerData.findOne();
+    if (!data) return;
+    return JSON.stringify({
+      name: 'Sandstorm Oasis',
+      panelLabel: "Add Card",
+      email: data.email,
+      id: template.id
+    });
+  },
+  paymentsUrl: function () {
+    return window.location.protocol + "//" + makeWildcardHost("payments");
+  },
+  showPrompt: function () {
+    return Template.instance().addCardPrompt.get();
+  }
+});
