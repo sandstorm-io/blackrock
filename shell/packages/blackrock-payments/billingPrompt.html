@@ -28,23 +28,47 @@ limitations under the License.
         "outOfStorage": User ran out of storage.
         "outOfCompute": User ran out of compute units.
         "outOfGrains": Demo mode may limit the number of grains created.
+    - onComplete: Function to call on completion. The parameter is a boolean: true if the user
+        successfully chose a new plan (in which case the action prompting billing should continue)
+        or false if they dismissed the popup without choosing anything (in which case the action
+        should be canceled).
 
     This will be included at the top level HTML like:
 
       {{#if billingPromptReason}}
-        {{>billingPrompt data=billingPromptReason}}
+        {{>billingPrompt reason=billingPromptReason onComplete=onBillingPromptDone}}
       {{/if}}
 
     (In this example, `billingPromptReason` is probably some session variable.)
   --}}
 
-  {{#if showPrompt}}
-    {{> sandstormTopbarItem name="billing-prompt" topbar=globalTopbar onlyPopup=true popupTemplate="_billingPromptBody" onDismiss=onDismiss data=popupData}}
-  {{/if}}
+  {{> sandstormTopbarItem name="billing-prompt" topbar=globalTopbar
+                          onlyPopup=true popupTemplate="_billingPromptBody"
+                          onDismiss=onDismiss}}
 </template>
 
 <template name="_billingPromptBody">
   <div class="subscriptions">
+    <div class="subscription free {{#if planIsFree}}selected{{/if}} {{#if isSelectingFree}}selecting{{/if}}">
+      <h3>Free</h3>
+      <p>{{#if planIsFree}}(current){{else}}&nbsp;{{/if}}</p>
+      <table>
+        <tr>
+          <td>50 CU</td>
+          <td>Compute Units</td>
+        </tr>
+        <tr>
+          <td>100 MB</td>
+          <td>Storage</td>
+        </tr>
+        <tr>
+          <td>5 (max)</td>
+          <td># of Grains</td>
+        </tr>
+      </table>
+      <hr>
+      <span>FREE</span>
+    </div>
     <div class="subscription standard {{#if planIsStandard}}selected{{/if}} {{#if isSelectingStandard}}selecting{{/if}}">
       <h3>Standard</h3>
       <p>{{#if planIsStandard}}(current){{else}}&nbsp;{{/if}}</p>
@@ -107,26 +131,6 @@ limitations under the License.
       <hr>
       <span>24$ / Month FREE during beta</span>
       <iframe class="mobile-iframe-hack {{#if megaFullscreen}}fullscreen{{/if}}" src="{{paymentsUrl}}/checkout#{{megaCheckoutData}}"></iframe>
-    </div>
-    <div class="subscription free {{#if planIsFree}}selected{{/if}} {{#if isSelectingFree}}selecting{{/if}}">
-      <h3>Free</h3>
-      <p>{{#if planIsFree}}(current){{else}}&nbsp;{{/if}}</p>
-      <table>
-        <tr>
-          <td>50 CU</td>
-          <td>Compute Units</td>
-        </tr>
-        <tr>
-          <td>100 MB</td>
-          <td>Storage</td>
-        </tr>
-        <tr>
-          <td>5 (max)</td>
-          <td># of Grains</td>
-        </tr>
-      </table>
-      <hr>
-      <span>FREE</span>
     </div>
   </div>
 </template>

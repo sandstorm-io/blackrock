@@ -43,7 +43,6 @@ var messageListener = function (showPrompt, template, event) {
 
 Template.billingSettings.onCreated(function () {
   updateStripeData();
-  this.billingPromptReason = new ReactiveVar(null);
   this.addCardPrompt = new ReactiveVar(false);
   this.listener = messageListener.bind(this, this.addCardPrompt, this);
   this.id = Math.random();
@@ -55,9 +54,6 @@ Template.billingSettings.onDestroyed(function () {
 });
 
 Template.billingSettings.events({
-  "click .change-plan": function (ev) {
-    Template.instance().billingPromptReason.set("voluntary");
-  },
   "click .add-card": function (ev) {
     var frame = ev.target.parentElement.querySelector("iframe");
     frame.contentWindow.postMessage({openDialog: true}, "*");
@@ -92,13 +88,10 @@ Template.billingSettings.helpers({
     var data = StripeCustomerData.findOne();
     return (data && data.subscription) || "free";
   },
-  billingPromptReason: function () {
-    return Template.instance().billingPromptReason.get();
-  },
-  onDismiss: function () {
+  onChangePlanFunc: function () {
     var template = Template.instance();
     return function () {
-      template.billingPromptReason.set(null);
+      // TODO(someday): Anything we need to do here?
     };
   },
   checkoutData: function () {

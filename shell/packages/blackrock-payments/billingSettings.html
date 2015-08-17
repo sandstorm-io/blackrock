@@ -25,8 +25,8 @@ limitations under the License.
 
     If the user modifies their plan, their quota is updated appropriately.
   --}}
-  <div class="billing-settings">
-    <h3>Payment Methods</h3>
+  <section class="payment-methods">
+    <h2>Payment Methods</h2>
     <table>
       <thead>
         <tr>
@@ -63,11 +63,10 @@ limitations under the License.
         </tr>
       </tbody>
     </table>
-    <h3>Subscription: {{subscription}}</h3>
+  </section>
+  <section class="subscription">
+    <h2>Subscription Plan: {{subscription}}</h2>
 
-    <button class="change-plan">Change plan</button>
-    {{#if billingPromptReason}}
-      {{>billingPrompt reason=billingPromptReason previousPlan=subscription onDismiss=onDismiss}}
-    {{/if}}
-  </div>
+    {{>_billingPromptBody reason="voluntary" previousPlan=subscription onComplete=onChangePlanFunc}}
+  </section>
 </template>

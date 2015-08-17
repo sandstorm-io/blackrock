@@ -14,6 +14,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+var idCounter = 0;
+
 var messageListener = function (template, event) {
   if (event.origin !== window.location.protocol + "//" + makeWildcardHost("payments")) {
     return;
@@ -24,7 +26,7 @@ var messageListener = function (template, event) {
   }
 
   if (event.data.showPrompt) {
-    Session.set("plan-" + template.id, event.data.plan);
+    template.promptChoice.set(event.data.plan);
     return;
   }
 
@@ -46,42 +48,30 @@ var messageListener = function (template, event) {
   }
 
   if (event.data.error || event.data.token) {
-    template.showPrompt.set(false);
-    if (template.data.onDismiss) {
-      template.data.onDismiss();
+    template.promptChoice.set(null);
+    if (template.data.onComplete) {
+      template.data.onComplete(!event.data.error);
     }
   }
 };
 
-Template.billingPrompt.onCreated(function () {
-  this.showPrompt = new ReactiveVar(true);
-  this.showFullscreen = new ReactiveVar(null);
-  this.listener = messageListener.bind(this, this);
-  this.id = Math.random();
-  window.addEventListener("message", this.listener, false);
-});
-
-Template.billingPrompt.onDestroyed(function () {
-  window.removeEventListener("message", this.listener, false);
-});
-
 Template.billingPrompt.helpers({
-  showPrompt: function () {
-    return Template.instance().showPrompt.get();
-  },
   onDismiss: function () {
     var self = this;
     return function () {
-      if (self.onDismiss) self.onDismiss();
+      if (self.onComplete) self.onComplete(false);
       return "remove";
     }
-  },
-  popupData: function () {
-    return {promptId: Template.instance().id};
   }
 });
 
 Template._billingPromptBody.onCreated(function () {
+  this.showFullscreen = new ReactiveVar(null);
+  this.promptChoice = new ReactiveVar(null);  // which checkout iframe was clicked
+  this.listener = messageListener.bind(this, this);
+  this.id = idCounter++;
+  window.addEventListener("message", this.listener, false);
+
   this.checkoutPlan = new ReactiveVar(null);
   this.isSelectingPlan = new ReactiveVar(null);
   this.subscribe("stripeCustomerData");
@@ -108,6 +98,10 @@ Template._billingPromptBody.onCreated(function () {
       updateStripeData();
     }, 4000);
   }
+});
+
+Template._billingPromptBody.onDestroyed(function () {
+  window.removeEventListener("message", this.listener, false);
 });
 
 function clickPlanHelper(ev, planName) {
@@ -150,13 +144,13 @@ Template._billingPromptBody.events({
 
 Template._billingPromptBody.helpers({
   standardFullscreen: function () {
-    return Session.get("plan-" + this.promptId) === "standard";
+    return Template.instance().promptChoice.get() === "standard";
   },
   largeFullscreen: function () {
-    return Session.get("plan-" + this.promptId) === "large";
+    return Template.instance().promptChoice.get() === "large";
   },
   megaFullscreen: function () {
-    return Session.get("plan-" + this.promptId) === "mega";
+    return Template.instance().promptChoice.get() === "mega";
   },
   standardCheckoutData: function () {
     return JSON.stringify({
@@ -164,7 +158,7 @@ Template._billingPromptBody.helpers({
       description: "Standard Plan",
       amount: 600,
       panelLabel: "{{amount}} / Month",
-      id: this.promptId,
+      id: Template.instance().id,
       planName: "standard"
     });
   },
@@ -175,7 +169,7 @@ Template._billingPromptBody.helpers({
       description: "Large Plan",
       amount: 1200,
       panelLabel: "{{amount}} / Month",
-      id: this.promptId,
+      id: Template.instance().id,
       planName: "large"
     });
   },
@@ -186,7 +180,7 @@ Template._billingPromptBody.helpers({
       description: "Mega Plan",
       amount: 2400,
       panelLabel: "{{amount}} / Month",
-      id: this.promptId,
+      id: Template.instance().id,
       planName: "mega"
     });
   },
