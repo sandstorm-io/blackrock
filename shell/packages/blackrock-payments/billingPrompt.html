@@ -47,6 +47,7 @@ limitations under the License.
   <div class="subscriptions">
     <div class="subscription standard {{#if planIsStandard}}selected{{/if}} {{#if isSelectingStandard}}selecting{{/if}}">
       <h3>Standard</h3>
+      <p>{{#if planIsStandard}}(current){{else}}&nbsp;{{/if}}</p>
       <table>
         <tr>
           <td>200 CU</td>
@@ -67,6 +68,7 @@ limitations under the License.
     </div>
     <div class="subscription large {{#if planIsLarge}}selected{{/if}} {{#if isSelectingLarge}}selecting{{/if}}">
       <h3>Large</h3>
+      <p>{{#if planIsLarge}}(current){{else}}&nbsp;{{/if}}</p>
       <table>
         <tr>
           <td>400 CU</td>
@@ -87,6 +89,7 @@ limitations under the License.
     </div>
     <div class="subscription mega {{#if planIsMega}}selected{{/if}} {{#if isSelectingMega}}selecting{{/if}}">
       <h3>Mega</h3>
+      <p>{{#if planIsMega}}(current){{else}}&nbsp;{{/if}}</p>
       <table>
         <tr>
           <td>600 CU</td>
@@ -107,13 +110,14 @@ limitations under the License.
     </div>
     <div class="subscription free {{#if planIsFree}}selected{{/if}} {{#if isSelectingFree}}selecting{{/if}}">
       <h3>Free</h3>
+      <p>{{#if planIsFree}}(current){{else}}&nbsp;{{/if}}</p>
       <table>
         <tr>
-          <td>200 CU</td>
+          <td>50 CU</td>
           <td>Compute Units</td>
         </tr>
         <tr>
-          <td>5 GB</td>
+          <td>100 MB</td>
           <td>Storage</td>
         </tr>
         <tr>

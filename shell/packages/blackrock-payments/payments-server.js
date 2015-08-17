@@ -16,7 +16,7 @@
 
 var Crypto = Npm.require("crypto");
 var HOSTNAME = process.env.ROOT_URL;
-var stripe = Npm.require("stripe")(Meteor.settings.stripe_key);
+var stripe = Npm.require("stripe")(Meteor.settings.stripeKey);
 
 BlackrockPayments = function (db) {
   this.db = db;
@@ -32,7 +32,8 @@ BlackrockPayments = function (db) {
 
 var serveCheckout = Meteor.bindEnvironment(function (res) {
   res.writeHead(200, { "Content-Type": "text/html" });
-  res.end(Assets.getText("checkout.html").replace("$STRIPE_KEY", Meteor.settings.public.stripe_public_key));
+  res.end(Assets.getText("checkout.html").replace(
+      "$STRIPE_KEY", Meteor.settings.public.stripePublicKey));
 });
 
 var serveSandcat = Meteor.bindEnvironment(function (res) {
@@ -167,7 +168,7 @@ BlackrockPayments.prototype.getStripeData = function () {
   var subscription;
   if (data.subscriptions && data.subscriptions.data[0]) {
     // Hack to deal with beta being in our plan names
-    subscription = data.subscriptions.data[0].plan.name.replace("-beta", "");
+    subscription = data.subscriptions.data[0].plan.id.replace("-beta", "");
   }
   return {
     email: data.email,
@@ -176,11 +177,6 @@ BlackrockPayments.prototype.getStripeData = function () {
   };
 };
 
-var plans = {
-  standard: "1",
-  large: "2",
-  mega: "3"
-}
 BlackrockPayments.prototype.updateUserSubscription = function (newPlan) {
   if (!Meteor.userId()) {
     throw new Meteor.Error(403, "Must be logged in to update subscription");
@@ -208,12 +204,12 @@ BlackrockPayments.prototype.updateUserSubscription = function (newPlan) {
       stripe.customers.updateSubscription.bind(stripe.customers)(
         customerId,
         data.subscriptions.data[0].id,
-        {plan: plans[newPlan]}
+        {plan: newPlan + "-beta"}
       );
     } else {
       stripe.customers.createSubscription.bind(stripe.customers)(
         customerId,
-        {plan: plans[newPlan]}
+        {plan: newPlan + "-beta"}
       );
     }
   }
@@ -237,6 +233,6 @@ BlackrockPayments.prototype.createUserSubscription = function (token, email, pla
   }
   stripe.customers.createSubscription.bind(stripe.customers)(
     customerId,
-    {plan: plans[plan]}
+    {plan: plan + "-beta"}
   );
 }

@@ -29,14 +29,19 @@ var messageListener = function (template, event) {
   }
 
   if (event.data.token) {
-    Meteor.call("createUserSubscription", event.data.token.id, event.data.token.email, event.data.plan, function (err) {
+    var updateData = {
+      email: event.data.token.email,
+      subscription: event.data.plan
+    };
+    Meteor.call("createUserSubscription", event.data.token.id,
+                event.data.token.email, event.data.plan, function (err) {
       if (err) {
         alert(err); // TODO(soon): make this UI better);
         return;
       }
 
-      updateStripeData();
-      Meteor.setTimeout(updateStripeData, 3000); // Stripe is slow to update sometimes...
+      StripeCustomerData.upsert({_id: '0'}, updateData);
+      template.eventuallyCheckConsistency();
     });
   }
 
@@ -81,6 +86,28 @@ Template._billingPromptBody.onCreated(function () {
   this.isSelectingPlan = new ReactiveVar(null);
   this.subscribe("stripeCustomerData");
   updateStripeData();
+
+  this.eventuallyCheckConsistency = function () {
+    // After a few seconds, refresh stripe data from the server. If this method is called again
+    // before the refresh, it pushes back the timeout.
+    //
+    // Stripe's database, like many distributed systems, is "eventually consistent", meaning if
+    // we update a customer and then immediately read back the customer data we might not yet see
+    // our own update. We could just assume that any successful update call did in fact update
+    // the database and update our client-side copy, but this could lead to invisible bugs where
+    // we're making the wrong kind of request and don't notice. So, what we do is update our
+    // client-side copy but then fire off a request a few seconds later to see if the server has
+    // the content we expect.
+
+    if (this.eventualTimeout) {
+      Meteor.clearTimeout(this.eventualTimeout);
+    }
+    var self = this;
+    this.eventualTimeout = Meteor.setTimeout(function () {
+      delete self.eventualTimeout;
+      updateStripeData();
+    }, 4000);
+  }
 });
 
 function clickPlanHelper(ev, planName) {
@@ -94,12 +121,11 @@ function clickPlanHelper(ev, planName) {
         return;
       }
 
-      // Sometimes stripe doesn't update their DB immediately and this will return old results.
-      updateStripeData(function () {
-        template.isSelectingPlan.set(null);
-        // TODO(soon): check that the data actually updated before clearing the spinner
-      });
-      Meteor.setTimeout(updateStripeData, 3000);
+      // Non-error return means the plan was updated successfully, so update our client-side copy.
+      StripeCustomerData.update("0", {subscription: planName === "free" ? undefined : planName});
+      template.isSelectingPlan.set(null);
+
+      template.eventuallyCheckConsistency();
     });
   } else {
     var frame = ev.currentTarget.querySelector("iframe");
