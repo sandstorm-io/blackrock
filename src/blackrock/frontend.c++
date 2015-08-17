@@ -876,9 +876,12 @@ kj::Promise<void> FrontendImpl::execLoop(MongoInfo&& mongoInfo) {
           ", \"allowDemoAccounts\":", config.getAllowDemoAccounts() ? "true" : "false",
           ", \"allowDevAccounts\": false"
           ", \"isTesting\":", config.getIsTesting() ? "true" : "false",
-          ", \"wildcardHost\":\"", config.getWildcardHost(), "\"",
+          ", \"wildcardHost\":\"", config.getWildcardHost(), "\""
           ", \"quotaEnabled\": true"
-          "}}").cStr(), true));
+          ", \"stripePublicKey\":\"", config.getStripePublicKey(), "\""
+          "}"
+          ", \"stripeKey\":\"", config.getStripeKey(), "\""
+          "}").cStr(), true));
 
       // Execute!
       KJ_SYSCALL(execl("bin/node", "bin/node", "main.js", (char*)nullptr));

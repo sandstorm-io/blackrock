@@ -43,4 +43,7 @@ struct FrontendConfig {
 
   isTesting @5 :Bool;
   # Equivalent to IS_TESTING from sandstorm.conf.
+
+  stripeKey @6 :Text;
+  stripePublicKey @7 :Text;
 }
