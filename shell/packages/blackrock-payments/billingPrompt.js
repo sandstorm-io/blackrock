@@ -36,13 +36,14 @@ var messageListener = function (template, event) {
       subscription: event.data.plan
     };
     Meteor.call("createUserSubscription", event.data.token.id,
-                event.data.token.email, event.data.plan, function (err) {
+                event.data.token.email, event.data.plan, function (err, source) {
       if (err) {
         alert(err); // TODO(soon): make this UI better);
         return;
       }
 
       StripeCustomerData.upsert({_id: '0'}, updateData);
+      if (source) StripeCards.upsert({_id: source.id}, source);
       template.eventuallyCheckConsistency();
     });
   }
@@ -75,19 +76,15 @@ Template._billingPromptBody.onCreated(function () {
   this.checkoutPlan = new ReactiveVar(null);
   this.isSelectingPlan = new ReactiveVar(null);
   this.subscribe("stripeCustomerData");
+  this.subscribe("plans");
   updateStripeData();
 
   this.eventuallyCheckConsistency = function () {
     // After a few seconds, refresh stripe data from the server. If this method is called again
     // before the refresh, it pushes back the timeout.
     //
-    // Stripe's database, like many distributed systems, is "eventually consistent", meaning if
-    // we update a customer and then immediately read back the customer data we might not yet see
-    // our own update. We could just assume that any successful update call did in fact update
-    // the database and update our client-side copy, but this could lead to invisible bugs where
-    // we're making the wrong kind of request and don't notice. So, what we do is update our
-    // client-side copy but then fire off a request a few seconds later to see if the server has
-    // the content we expect.
+    // This is meant to catch problems in our ad hoc client-side cache. The update shouldn't ever
+    // lead to changes if things are working correctly.
 
     if (this.eventualTimeout) {
       Meteor.clearTimeout(this.eventualTimeout);
@@ -96,7 +93,7 @@ Template._billingPromptBody.onCreated(function () {
     this.eventualTimeout = Meteor.setTimeout(function () {
       delete self.eventualTimeout;
       updateStripeData();
-    }, 4000);
+    }, 2000);
   }
 });
 
@@ -116,7 +113,8 @@ function clickPlanHelper(ev, planName) {
       }
 
       // Non-error return means the plan was updated successfully, so update our client-side copy.
-      StripeCustomerData.update("0", {subscription: planName === "free" ? undefined : planName});
+      StripeCustomerData.update("0",
+          {$set: {subscription: planName === "free" ? undefined : planName}});
       template.isSelectingPlan.set(null);
 
       template.eventuallyCheckConsistency();
@@ -143,78 +141,55 @@ Template._billingPromptBody.events({
 });
 
 Template._billingPromptBody.helpers({
-  standardFullscreen: function () {
-    return Template.instance().promptChoice.get() === "standard";
+  isFullscreen: function () {
+    return Template.instance().promptChoice.get() === this._id;
   },
-  largeFullscreen: function () {
-    return Template.instance().promptChoice.get() === "large";
-  },
-  megaFullscreen: function () {
-    return Template.instance().promptChoice.get() === "mega";
-  },
-  standardCheckoutData: function () {
+  checkoutData: function () {
+    var title = this._id.charAt(0).toUpperCase() + this._id.slice(1);
+
     return JSON.stringify({
       name: 'Sandstorm Oasis Subscription',
-      description: "Standard Plan",
-      amount: 600,
+      description: title + " Plan",
+      amount: this.price,
       panelLabel: "{{amount}} / Month",
       id: Template.instance().id,
-      planName: "standard"
+      planName: this._id
     });
   },
-  largeCheckoutData: function () {
-    var template = Template.instance();
-    return JSON.stringify({
-      name: 'Sandstorm Oasis Subscription',
-      description: "Large Plan",
-      amount: 1200,
-      panelLabel: "{{amount}} / Month",
-      id: Template.instance().id,
-      planName: "large"
+  plans: function () {
+    var plans = this.db.listPlans().fetch();
+    var data = StripeCustomerData.findOne();
+    var myPlan = (data && data.subscription) || "unknown";
+    plans.forEach(function (plan) {
+      if (plan._id === myPlan) plan.isCurrent = true;
     });
+    return plans;
   },
-  megaCheckoutData: function () {
-    var template = Template.instance();
-    return JSON.stringify({
-      name: 'Sandstorm Oasis Subscription',
-      description: "Mega Plan",
-      amount: 2400,
-      panelLabel: "{{amount}} / Month",
-      id: Template.instance().id,
-      planName: "mega"
-    });
+  renderCu: function (n) {
+    return Math.floor(n / 1000000 / 3600);
   },
-  planIsStandard: function () {
-    var data = StripeCustomerData.findOne();
-    if (!data) return false;
-    return data.subscription === "standard";
+  renderCents: function (price) {
+    return Math.floor(price / 100) + "." + ("00" + (price % 100)).slice(-2);
   },
-  planIsLarge: function () {
-    var data = StripeCustomerData.findOne();
-    if (!data) return false;
-    return data.subscription === "large";
+  renderStorage: function (size) {
+    var suffix = "B";
+    if (size >= 1000000000) {
+      size = size / 1000000000;
+      suffix = "GB";
+    } else if (size >= 1000000) {
+      size = size / 1000000;
+      suffix = "MB";
+    } else if (size >= 1000) {
+      size = size / 1000;
+      suffix = "kB";
+    }
+    return Math.floor(size) + suffix;
   },
-  planIsMega: function () {
-    var data = StripeCustomerData.findOne();
-    if (!data) return false;
-    return data.subscription === "mega";
+  renderQuantity: function (n) {
+    return (n === Infinity) ? "Unlimited" : n.toString();
   },
-  planIsFree: function () {
-    var data = StripeCustomerData.findOne();
-    if (!data) return true;
-    return !data.subscription;
-  },
-  isSelectingStandard: function () {
-    return Template.instance().isSelectingPlan.get() === "standard";
-  },
-  isSelectingLarge: function () {
-    return Template.instance().isSelectingPlan.get() === "large";
-  },
-  isSelectingMega: function () {
-    return Template.instance().isSelectingPlan.get() === "mega";
-  },
-  isSelectingFree: function () {
-    return Template.instance().isSelectingPlan.get() === "free";
+  isSelecting: function () {
+    return Template.instance().isSelectingPlan.get() === this._id;
   },
   paymentsUrl: function () {
     return window.location.protocol + "//" + makeWildcardHost("payments");

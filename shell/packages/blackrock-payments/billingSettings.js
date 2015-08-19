@@ -62,9 +62,12 @@ Template.billingSettings.events({
     var id = this.id;
     var template = Template.instance();
     Meteor.call("deleteCardForUser", id, function (err) {
-      if (err) alert(err); // TODO(soon): make this UI better
+      if (err) {
+        alert(err); // TODO(soon): make this UI better
+      } else {
+        StripeCards.remove({_id: id});
+      }
 
-      StripeCards.remove({_id: id});
       updateStripeData();
     });
   },
@@ -88,6 +91,10 @@ Template.billingSettings.helpers({
     var data = StripeCustomerData.findOne();
     return (data && data.subscription) || "free";
   },
+  credit: function () {
+    var data = StripeCustomerData.findOne();
+    return data && data.credit;
+  },
   onChangePlanFunc: function () {
     var template = Template.instance();
     return function () {
@@ -110,5 +117,8 @@ Template.billingSettings.helpers({
   },
   showPrompt: function () {
     return Template.instance().addCardPrompt.get();
-  }
+  },
+  renderCents: function (price) {
+    return Math.floor(price / 100) + "." + ("00" + (price % 100)).slice(-2);
+  },
 });

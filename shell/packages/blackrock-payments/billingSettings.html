@@ -27,23 +27,29 @@ limitations under the License.
   --}}
   <section class="payment-methods">
     <h2>Payment Methods</h2>
+    {{#if credit}}
+      <p class="balance">Account Balance <span class="amount">${{renderCents credit}}</span>
+        <span class="details">This balance will be automatically applied to future subscription
+          payments and purchases.</span></p>
+    {{/if}}
     <table>
       <thead>
         <tr>
           <td></td>
           <td>Credit / Debit Card</td>
           <td>Expiry</td>
-          <td></td>
+          <td>Delete</td>
         </tr>
       </thead>
       <tbody>
         {{#each cards}}
           <tr class="card">
             <td class="checkbox">
-              <span class="{{#unless isPrimary}}hidden{{/unless}}">Default</span>
-              <span class="checkbox-wrapper">
-                <input type="radio" class="make-primary-card" checked="{{isPrimary}}" id="primary-{{_id}}"><label for="primary-{{_id}}"></label>
-              </span>
+              {{#if isPrimary}}<span>Default</span>{{/if}}
+              <label class="{{#if isPrimary}}selected{{/if}}">
+                {{#unless isPrimary}}Set default{{/unless}}
+                <input type="radio" class="make-primary-card" checked="{{isPrimary}}">
+              </label>
             </td>
             <td>{{brand}}: **** **** **** {{last4}}</td>
             <td>{{exp_month}}/{{exp_year}}</td><!-- TODO(soon): handle non-US formats -->
@@ -67,6 +73,7 @@ limitations under the License.
   <section class="subscription">
     <h2>Subscription Plan: {{subscription}}</h2>
 
-    {{>_billingPromptBody reason="voluntary" previousPlan=subscription onComplete=onChangePlanFunc}}
+    {{>_billingPromptBody reason="voluntary" previousPlan=subscription
+                          onComplete=onChangePlanFunc db=db}}
   </section>
 </template>

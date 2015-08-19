@@ -24,8 +24,8 @@ Npm.depends({
 });
 
 Package.onUse(function (api) {
-  api.use('mongo', ['client', 'server']);
-  api.use(["reactive-var", "templating"], "client");
+  api.use("sandstorm-db", "server");
+  api.use(["mongo", "reactive-var", "templating"], "client");
 
   api.addFiles([
     "billingSettings.html",
@@ -37,7 +37,7 @@ Package.onUse(function (api) {
   api.addFiles(["payments-server.js",], "server");
   api.addFiles(["checkout.html", "sandstorm-purplecircle.png"], "server", {isAsset: true});
 
-  api.export("BlackrockPayments");
+  api.export(["BlackrockPayments", "makePaymentsConnectHandler"]);
 });
 
 // TODO(test): tests

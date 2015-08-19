@@ -36,7 +36,7 @@ limitations under the License.
     This will be included at the top level HTML like:
 
       {{#if billingPromptReason}}
-        {{>billingPrompt reason=billingPromptReason onComplete=onBillingPromptDone}}
+        {{>billingPrompt reason=billingPromptReason onComplete=onBillingPromptDone db=globalDb}}
       {{/if}}
 
     (In this example, `billingPromptReason` is probably some session variable.)
@@ -49,88 +49,32 @@ limitations under the License.
 
 <template name="_billingPromptBody">
   <div class="subscriptions">
-    <div class="subscription free {{#if planIsFree}}selected{{/if}} {{#if isSelectingFree}}selecting{{/if}}">
-      <h3>Free</h3>
-      <p>{{#if planIsFree}}(current){{else}}&nbsp;{{/if}}</p>
-      <table>
-        <tr>
-          <td>50 CU</td>
-          <td>Compute Units</td>
-        </tr>
-        <tr>
-          <td>100 MB</td>
-          <td>Storage</td>
-        </tr>
-        <tr>
-          <td>5 (max)</td>
-          <td># of Grains</td>
-        </tr>
-      </table>
-      <hr>
-      <span>FREE</span>
-    </div>
-    <div class="subscription standard {{#if planIsStandard}}selected{{/if}} {{#if isSelectingStandard}}selecting{{/if}}">
-      <h3>Standard</h3>
-      <p>{{#if planIsStandard}}(current){{else}}&nbsp;{{/if}}</p>
-      <table>
-        <tr>
-          <td>200 CU</td>
-          <td>Compute Units</td>
-        </tr>
-        <tr>
-          <td>5 GB</td>
-          <td>Storage</td>
-        </tr>
-        <tr>
-          <td>Unlimited</td>
-          <td># of Grains</td>
-        </tr>
-      </table>
-      <hr>
-      <span>6$ / Month FREE during beta</span>
-      <iframe class="mobile-iframe-hack {{#if standardFullscreen}}fullscreen{{/if}}" src="{{paymentsUrl}}/checkout#{{standardCheckoutData}}"></iframe>
-    </div>
-    <div class="subscription large {{#if planIsLarge}}selected{{/if}} {{#if isSelectingLarge}}selecting{{/if}}">
-      <h3>Large</h3>
-      <p>{{#if planIsLarge}}(current){{else}}&nbsp;{{/if}}</p>
-      <table>
-        <tr>
-          <td>400 CU</td>
-          <td>Compute Units</td>
-        </tr>
-        <tr>
-          <td>30 GB</td>
-          <td>Storage</td>
-        </tr>
-        <tr>
-          <td>Unlimited</td>
-          <td># of Grains</td>
-        </tr>
-      </table>
-      <hr>
-      <span>12$ / Month FREE during beta</span>
-      <iframe class="mobile-iframe-hack {{#if largeFullscreen}}fullscreen{{/if}}" src="{{paymentsUrl}}/checkout#{{largeCheckoutData}}"></iframe>
-    </div>
-    <div class="subscription mega {{#if planIsMega}}selected{{/if}} {{#if isSelectingMega}}selecting{{/if}}">
-      <h3>Mega</h3>
-      <p>{{#if planIsMega}}(current){{else}}&nbsp;{{/if}}</p>
-      <table>
-        <tr>
-          <td>600 CU</td>
-          <td>Compute Units</td>
-        </tr>
-        <tr>
-          <td>100 GB</td>
-          <td>Storage</td>
-        </tr>
-        <tr>
-          <td>Unlimited</td>
-          <td># of Grains</td>
-        </tr>
-      </table>
-      <hr>
-      <span>24$ / Month FREE during beta</span>
-      <iframe class="mobile-iframe-hack {{#if megaFullscreen}}fullscreen{{/if}}" src="{{paymentsUrl}}/checkout#{{megaCheckoutData}}"></iframe>
-    </div>
+    {{#each plans}}
+      <div class="subscription {{_id}} {{#if isCurrent}}selected{{/if}} {{#if isSelecting}}selecting{{/if}}">
+        <h4>{{_id}}</h4>
+        <p>{{#if isCurrent}}(current){{else}}&nbsp;{{/if}}</p>
+        <table>
+          <tr>
+            <td>{{renderCu compute}} CU</td>
+            <td>Compute Units</td>
+          </tr>
+          <tr>
+            <td>{{renderStorage storage}}</td>
+            <td>Storage</td>
+          </tr>
+          <tr>
+            <td>{{renderQuantity grains}}</td>
+            <td># of Grains</td>
+          </tr>
+        </table>
+        <hr>
+        {{#if price}}
+          <span>${{renderCents price}} / Month (FREE during beta)</span>
+          <iframe class="mobile-iframe-hack {{#if isFullscreen}}fullscreen{{/if}}" src="{{paymentsUrl}}/checkout#{{checkoutData}}"></iframe>
+        {{else}}
+          <span>FREE</span>
+        {{/if}}
+      </div>
+    {{/each}}
   </div>
 </template>

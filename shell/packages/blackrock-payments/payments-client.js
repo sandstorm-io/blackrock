@@ -22,7 +22,8 @@ updateStripeData = function (cb) {
     if (err) {
       alert(err); // TODO(soon): make this UI better
     } else {
-      StripeCustomerData.upsert({_id: '0'}, {email: data.email, subscription: data.subscription});
+      StripeCustomerData.upsert({_id: '0'}, {
+          email: data.email, subscription: data.subscription || "free", credit: data.credit});
       if (data.sources) {
         sources = data.sources;
         for (var i = 0; i < sources.length; i++) {
