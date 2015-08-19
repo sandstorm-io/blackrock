@@ -45,14 +45,15 @@ var messageListener = function (template, event) {
       StripeCustomerData.upsert({_id: '0'}, updateData);
       if (source) StripeCards.upsert({_id: source.id}, source);
       template.eventuallyCheckConsistency();
+
+      if (template.data.onComplete) {
+        template.data.onComplete(true);
+      }
     });
   }
 
   if (event.data.error || event.data.token) {
     template.promptChoice.set(null);
-    if (template.data.onComplete) {
-      template.data.onComplete(!event.data.error);
-    }
   }
 };
 
@@ -101,7 +102,12 @@ Template._billingPromptBody.onDestroyed(function () {
   window.removeEventListener("message", this.listener, false);
 });
 
-function clickPlanHelper(ev, planName) {
+function clickPlanHelper(context, ev, planName) {
+  if (context.isCurrent && Meteor.user().plan === planName) {
+    // Ignore click on current plan.
+    return;
+  }
+
   var template = Template.instance();
   var data = StripeCards.find();
   if (data.count() > 0) {
@@ -113,11 +119,14 @@ function clickPlanHelper(ev, planName) {
       }
 
       // Non-error return means the plan was updated successfully, so update our client-side copy.
-      StripeCustomerData.update("0",
-          {$set: {subscription: planName === "free" ? undefined : planName}});
+      StripeCustomerData.update("0", {$set: {subscription: planName }});
       template.isSelectingPlan.set(null);
 
       template.eventuallyCheckConsistency();
+
+      if (template.data.onComplete) {
+        template.data.onComplete(true);
+      }
     });
   } else {
     var frame = ev.currentTarget.querySelector("iframe");
@@ -127,16 +136,16 @@ function clickPlanHelper(ev, planName) {
 
 Template._billingPromptBody.events({
   "click .standard": function (ev) {
-    clickPlanHelper(ev, "standard");
+    clickPlanHelper(this, ev, "standard");
   },
   "click .large": function (ev) {
-    clickPlanHelper(ev, "large");
+    clickPlanHelper(this, ev, "large");
   },
   "click .mega": function (ev) {
-    clickPlanHelper(ev, "mega");
+    clickPlanHelper(this, ev, "mega");
   },
   "click .free": function (ev) {
-    clickPlanHelper(ev, "free");
+    clickPlanHelper(this, ev, "free");
   },
 });
 
@@ -193,5 +202,12 @@ Template._billingPromptBody.helpers({
   },
   paymentsUrl: function () {
     return window.location.protocol + "//" + makeWildcardHost("payments");
+  },
+  involuntary: function () { return this.reason && this.reason !== "voluntary"; },
+  outOfGrains: function () { return this.reason === "outOfGrains"; },
+  outOfStorage: function () { return this.reason === "outOfStorage"; },
+  outOfCompute: function () { return this.reason === "outOfCompute"; },
+  myPlan: function () {
+    return this.db.getMyPlan();
   }
 });

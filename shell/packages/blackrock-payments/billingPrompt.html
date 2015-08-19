@@ -48,6 +48,27 @@ limitations under the License.
 </template>
 
 <template name="_billingPromptBody">
+  {{#if involuntary}}
+    <h4>Upgrade Account</h4>
+
+    <p class="reason">
+      {{#if outOfGrains}}
+        Oops! Your current account level only allows you to create {{myPlan.grains}} total grains
+        (app instances). If you want to create more, please choose an upgraded plan:
+      {{/if}}
+      {{#if outOfStorage}}
+        Oops! You're all out of storage. Your current account level only includes
+        {{renderStorage myPlan.storage}} of storage space. You'll either need to delete some
+        things, or you can upgrade to a larger plan:
+      {{/if}}
+      {{#if outOfCompute}}
+        Oops! You're all out of compute units. Your current account level gives you
+        {{renderCu myPlan.compute}} compute units per month. They recharge continuously, so you
+        can either wait a while and try again, or you can upgrade to a larger plan:
+      {{/if}}
+    </p>
+  {{/if}}
+
   <div class="subscriptions">
     {{#each plans}}
       <div class="subscription {{_id}} {{#if isCurrent}}selected{{/if}} {{#if isSelecting}}selecting{{/if}}">

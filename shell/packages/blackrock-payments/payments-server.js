@@ -244,6 +244,7 @@ var methods = {
       customerId,
       {plan: plan + "-beta"}
     );
+    Meteor.users.update({_id: this.userId}, {$set: { plan: plan }});
     return sanitizedSource;
   }
 };
