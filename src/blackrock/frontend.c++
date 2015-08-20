@@ -879,9 +879,9 @@ kj::Promise<void> FrontendImpl::execLoop(MongoInfo&& mongoInfo) {
           ", \"wildcardHost\":\"", config.getWildcardHost(), "\""
           ", \"quotaEnabled\": true"
           ", \"stripePublicKey\":\"", config.getStripePublicKey(), "\""
+          ", \"allowUninvited\":", config.getAllowUninvited() ? "true" : "false",
           "}"
           ", \"stripeKey\":\"", config.getStripeKey(), "\""
-          ", \"allowUninvited\":", config.getAllowUninvited() ? "true" : "false",
           "}").cStr(), true));
 
       // Execute!
