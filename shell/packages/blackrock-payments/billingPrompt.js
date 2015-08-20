@@ -149,7 +149,7 @@ Template._billingPromptBody.events({
   },
 });
 
-Template._billingPromptBody.helpers({
+var helpers = {
   isFullscreen: function () {
     return Template.instance().promptChoice.get() === this._id;
   },
@@ -203,9 +203,6 @@ Template._billingPromptBody.helpers({
   paymentsUrl: function () {
     return window.location.protocol + "//" + makeWildcardHost("payments");
   },
-});
-
-Template._billingPromptPopup.helpers({
   involuntary: function () { return this.reason && this.reason !== "voluntary"; },
   outOfGrains: function () { return this.reason === "outOfGrains"; },
   outOfStorage: function () { return this.reason === "outOfStorage"; },
@@ -216,4 +213,7 @@ Template._billingPromptPopup.helpers({
   myPlan: function () {
     return this.db.getMyPlan();
   }
-});
+};
+
+Template._billingPromptBody.helpers(helpers);
+Template._billingPromptPopup.helpers(helpers);
