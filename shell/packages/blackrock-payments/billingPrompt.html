@@ -36,21 +36,28 @@ limitations under the License.
     This will be included at the top level HTML like:
 
       {{#if billingPromptReason}}
-        {{>billingPrompt reason=billingPromptReason onComplete=onBillingPromptDone db=globalDb}}
+        {{>billingPrompt reason=billingPromptReason onComplete=onBillingPromptDone
+                         topbar=globalTopbar db=globalDb accountsUi=globalAccountsUi}}
       {{/if}}
 
     (In this example, `billingPromptReason` is probably some session variable.)
   --}}
 
-  {{> sandstormTopbarItem name="billing-prompt" topbar=globalTopbar
-                          onlyPopup=true popupTemplate="_billingPromptBody"
+  {{> sandstormTopbarItem name="billing-prompt" topbar=topbar
+                          onlyPopup=true popupTemplate="_billingPromptPopup"
                           onDismiss=onDismiss}}
 </template>
 
-<template name="_billingPromptBody">
-  {{#if involuntary}}
-    <h4>Upgrade Account</h4>
+<template name="_billingPromptPopup">
+  <h4>Upgrade Account</h4>
 
+  {{#if isDemoUser}}
+    <p>Thanks for trying the Sandstorm Demo! You've reached the limits for a demo account. If
+      you'd like to continue using Sandstorm, please sign in.</p>
+    <div class="login">
+      {{> _loginButtonsLoggedOutDropdown accountsUi}}
+    </div>
+  {{else}}
     <p class="reason">
       {{#if outOfGrains}}
         Oops! Your current account level only allows you to create {{myPlan.grains}} total grains
@@ -67,8 +74,12 @@ limitations under the License.
         can either wait a while and try again, or you can upgrade to a larger plan:
       {{/if}}
     </p>
-  {{/if}}
 
+    {{>_billingPromptBody}}
+  {{/if}}
+</template>
+
+<template name="_billingPromptBody">
   <div class="subscriptions">
     {{#each plans}}
       <div class="subscription {{_id}} {{#if isCurrent}}selected{{/if}} {{#if isSelecting}}selecting{{/if}}">

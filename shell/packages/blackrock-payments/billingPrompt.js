@@ -203,10 +203,16 @@ Template._billingPromptBody.helpers({
   paymentsUrl: function () {
     return window.location.protocol + "//" + makeWildcardHost("payments");
   },
+});
+
+Template._billingPromptPopup.helpers({
   involuntary: function () { return this.reason && this.reason !== "voluntary"; },
   outOfGrains: function () { return this.reason === "outOfGrains"; },
   outOfStorage: function () { return this.reason === "outOfStorage"; },
   outOfCompute: function () { return this.reason === "outOfCompute"; },
+  isDemoUser: function () {
+    return this.db.isDemoUser();
+  },
   myPlan: function () {
     return this.db.getMyPlan();
   }
