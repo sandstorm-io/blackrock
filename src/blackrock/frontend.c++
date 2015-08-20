@@ -194,6 +194,77 @@ protected:
     });
   }
 
+  kj::Promise<void> transferGrain(TransferGrainContext context) override {
+    // Ownership transfer at the storage level is not currently supported, so instead we do a
+    // backup followed by a restore.
+    //
+    // TODO(cleanup): TODO(perf): This is pretty awful. Support ownership transfer at the storage
+    //   level, please.
+
+    auto params = context.getParams();
+    auto grainId = params.getGrainId();
+    auto oldOwnerId = params.getOwnerId();
+    auto newOwnerId = params.getNewOwnerId();
+    KJ_LOG(INFO, "Backend: transferGrain", grainId, oldOwnerId, newOwnerId);
+
+    byte random[16];
+    randombytes(random, sizeof(random));
+    auto backupId = sandstorm::hexEncode(random);
+
+    auto backup = thisCap().backupGrainRequest();
+    backup.setBackupId(backupId);
+    backup.setOwnerId(oldOwnerId);
+    backup.setGrainId(grainId);
+    // Don't care about GrainInfo.
+
+    return backup.send().then([this,KJ_MVCAP(backupId),grainId,newOwnerId](auto&&) mutable {
+      auto restore = thisCap().restoreGrainRequest();
+      restore.setBackupId(backupId);
+      restore.setOwnerId(newOwnerId);
+      restore.setGrainId(grainId);
+
+      auto cleanup = kj::heap([this,KJ_MVCAP(backupId),grainId]() {
+        auto promises = kj::heapArrayBuilder<kj::Promise<void>>(2);
+        auto req1 = thisCap().deleteBackupRequest();
+        req1.setBackupId(backupId);
+        promises.add(req1.send().then([](auto&&) {}));
+        auto req2 = thisCap().deleteGrainRequest();
+        req2.setGrainId(grainId);
+        promises.add(req2.send().then([](auto&&) {}));
+        return kj::joinPromises(promises.finish());
+      });
+
+      auto& cleanupRef = *cleanup;
+
+      return restore.send().then([this,&cleanupRef](auto&&) mutable {
+        return cleanupRef();
+      }, [this,&cleanupRef](kj::Exception&& exception) mutable {
+        // Exception during restore. Still need to clean up.
+        // TODO(cleanup): kj::Promise should have a "finally()" method, I guess. (We can't use the
+        //   usual approach of attach()ing a kj::Defer here because the cleanup is asynchronous.)
+        kj::Exception& exceptionRef = exception;
+        return cleanupRef().then([&exceptionRef]() mutable {
+          return kj::Promise<void>(kj::mv(exceptionRef));
+        }, [&exceptionRef](auto&&) mutable {
+          return kj::Promise<void>(kj::mv(exceptionRef));
+        }).attach(kj::mv(exception));
+      }).attach(kj::mv(cleanup));
+    });
+  }
+
+  kj::Promise<void> deleteUser(DeleteUserContext context) override {
+    auto params = context.getParams();
+    auto userId = params.getUserId();
+    KJ_LOG(INFO, "Backend: deleteUser", userId);
+
+    auto userObjectName = kj::str("user-", userId);
+    context.releaseParams();
+
+    auto req = frontend.storageRoots->chooseOne().removeRequest();
+    req.setName(userObjectName);
+    return req.send().then([](auto&&){});
+  }
+
   // ---------------------------------------------------------------------------
 
   kj::Promise<void> installPackage(InstallPackageContext context) override {
