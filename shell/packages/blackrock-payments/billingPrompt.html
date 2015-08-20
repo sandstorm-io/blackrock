@@ -53,9 +53,9 @@ limitations under the License.
 
   {{#if isDemoUser}}
     <p>Thanks for trying the Sandstorm Demo! You've reached the limits for a demo account. If
-      you'd like to continue using Sandstorm, please sign in.</p>
+      you'd like to continue using Sandstorm and make your data permanent, please sign in.</p>
     <div class="login">
-      {{> _loginButtonsLoggedOutDropdown accountsUi}}
+      {{> loginButtonsList accountsUi}}
     </div>
   {{else}}
     <p class="reason">
