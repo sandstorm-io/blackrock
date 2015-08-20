@@ -881,6 +881,7 @@ kj::Promise<void> FrontendImpl::execLoop(MongoInfo&& mongoInfo) {
           ", \"stripePublicKey\":\"", config.getStripePublicKey(), "\""
           "}"
           ", \"stripeKey\":\"", config.getStripeKey(), "\""
+          ", \"allowUninvited\":", config.getAllowUninvited() ? "true" : "false",
           "}").cStr(), true));
 
       // Execute!

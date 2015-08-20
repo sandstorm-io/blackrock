@@ -46,4 +46,6 @@ struct FrontendConfig {
 
   stripeKey @6 :Text;
   stripePublicKey @7 :Text;
+
+  allowUninvited @8 :Bool;
 }
