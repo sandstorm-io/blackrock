@@ -28,6 +28,7 @@ limitations under the License.
         "outOfStorage": User ran out of storage.
         "outOfCompute": User ran out of compute units.
         "outOfGrains": Demo mode may limit the number of grains created.
+        "customApp": User wants to install a custom app.
     - onComplete: Function to call on completion. The parameter is a boolean: true if the user
         successfully chose a new plan (in which case the action prompting billing should continue)
         or false if they dismissed the popup without choosing anything (in which case the action
@@ -52,8 +53,16 @@ limitations under the License.
   <h4>Upgrade Account</h4>
 
   {{#if isDemoUser}}
-    <p>Thanks for trying the Sandstorm Demo! You've reached the limits for a demo account. If
-      you'd like to continue using Sandstorm and make your data permanent, please sign in.</p>
+    {{#if customApp}}
+      <p class="reason">
+        Sorry, demo users can only install
+        <a href="https://apps.sandstorm.io/?host={{origin}}">apps from Sandstorm.io</a>. If you'd
+        like to install custom apps, please sign in and choose a paid plan.
+      </p>
+    {{else}}
+      <p>Thanks for trying the Sandstorm Demo! You've reached the limits for a demo account. If
+        you'd like to continue using Sandstorm and make your data permanent, please sign in.</p>
+    {{/if}}
     <div class="login">
       {{> loginButtonsList accountsUi}}
     </div>
@@ -72,6 +81,11 @@ limitations under the License.
         Oops! You're all out of compute units. Your current account level gives you
         {{renderCu myPlan.compute}} compute units per month. They recharge continuously, so you
         can either wait a while and try again, or you can upgrade to a larger plan:
+      {{/if}}
+      {{#if customApp}}
+        Sorry, free-plan users can only install
+        <a href="https://apps.sandstorm.io/?host={{origin}}">apps from Sandstorm.io</a>. If you'd
+        like to install custom apps, please choose a paid plan.
       {{/if}}
     </p>
 

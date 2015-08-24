@@ -207,6 +207,8 @@ var helpers = {
   outOfGrains: function () { return this.reason === "outOfGrains"; },
   outOfStorage: function () { return this.reason === "outOfStorage"; },
   outOfCompute: function () { return this.reason === "outOfCompute"; },
+  customApp: function () { return this.reason === "customApp"; },
+  origin: function () { return document.location.protocol + "//" + document.location.host; },
   isDemoUser: function () {
     return this.db.isDemoUser();
   },
