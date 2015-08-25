@@ -108,7 +108,7 @@ Template.billingSettings.helpers({
     return JSON.stringify({
       name: 'Sandstorm Oasis',
       panelLabel: "Add Card",
-      email: data.email,
+      email: Meteor.user().profile.email,
       id: template.id
     });
   },

@@ -162,7 +162,8 @@ var helpers = {
       amount: this.price,
       panelLabel: "{{amount}} / Month",
       id: Template.instance().id,
-      planName: this._id
+      planName: this._id,
+      email: Meteor.user().profile.email
     });
   },
   plans: function () {
