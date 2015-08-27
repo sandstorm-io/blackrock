@@ -5,6 +5,7 @@
     <script src="https://checkout.stripe.com/checkout.js"></script>
   </head>
   <body style="cursor: pointer; margin: 0px;">
+    <div style="height: 100%; width: 100%;"></div>
     <script>
       data = JSON.parse(window.location.hash.slice(1));
 
@@ -27,12 +28,11 @@
         }
       }, false);
 
-      document.querySelector("body").addEventListener("click", function () {
+      document.querySelector("div").addEventListener("click", function () {
         // TODO(soon): show user error if invalid plan specified
         window.parent.postMessage({id: data.id, showPrompt: true, plan: data.planName}, "*");
         handler.open(data);
       });
-
     </script>
   </body>
 </html>

@@ -94,8 +94,8 @@ limitations under the License.
 <template name="_billingPromptBody">
   <div class="subscriptions">
     {{#each plans}}
-      <div class="subscription {{_id}} {{#if isCurrent}}selected{{/if}} {{#if isSelecting}}selecting{{/if}}">
-        {{#if price}}
+      <div class="subscription {{_id}} {{#if isCurrent}}selected{{/if}} {{#if isSelecting}}selecting{{/if}} {{#if isFullscreen}}iframe-active{{/if}}">
+        {{#if isShowingIframe}}
           <iframe class="mobile-iframe-hack {{#if isFullscreen}}fullscreen{{/if}}" src="{{paymentsUrl}}/checkout#{{checkoutData}}"></iframe>
         {{/if}}
 

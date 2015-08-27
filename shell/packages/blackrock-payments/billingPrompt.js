@@ -269,6 +269,10 @@ var helpers = {
   },
   myUsage: function () {
     return this.db.getMyUsage();
+  },
+  isShowingIframe: function () {
+    var data = StripeCards.find();
+    return this.price && !this.isCurrent && data.count() === 0;
   }
 };
 
