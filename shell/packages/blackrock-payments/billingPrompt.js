@@ -237,7 +237,7 @@ var helpers = {
     return (n === Infinity) ? "Unlimited" : n.toString();
   },
   renderPercent: function (num, denom) {
-    return Math.min(100, Math.max(0, Math.round(num / denom * 100)));
+    return Math.min(100, Math.max(0, num / denom * 100)).toPrecision(3);
   },
   isSelecting: function () {
     return Template.instance().isSelectingPlan.get() === this._id;
