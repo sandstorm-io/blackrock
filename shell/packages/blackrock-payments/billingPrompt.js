@@ -202,8 +202,8 @@ var helpers = {
   renderCu: function (n) {
     return Math.floor(n / 1000000 / 3600);
   },
-  renderCents: function (price) {
-    return Math.floor(price / 100) + "." + ("00" + (price % 100)).slice(-2);
+  renderDollars: function (price) {
+    return Math.floor(price / 100);
   },
   renderStorage: function (size) {
     var suffix = "B";
