@@ -50,43 +50,45 @@ limitations under the License.
 </template>
 
 <template name="_billingPromptPopup">
-  {{#if isDemoUser}}
-    {{#if customApp}}
-      <h2>Want more?</h2>
-
-      <p>Demo users can only install <a href="https://apps.sandstorm.io/?host={{origin}}" target="_blank">apps from Sandstorm.io</a>.<br>
-        If you'd like to upload custom apps, please sign in.</p>
-    {{else}}
-      <h2>Want more?</h2>
-
-      <p>You've reached the limits for a demo account.<br>
-        If you'd like to continue using Sandstorm and<br>
-        make your data permanent, please sign in.</p>
-    {{/if}}
-    <div class="login">
-      {{> loginButtonsDialog accountsUi}}
-    </div>
-  {{else}}
-    {{#if involuntary}}
+  <div class="scroll-box">
+    {{#if isDemoUser}}
       {{#if customApp}}
-        <h2>Want to upload your own apps?</h2>
+        <h2>Want more?</h2>
 
-        <p>Free-plan users can only install <a href="https://apps.sandstorm.io/?host={{origin}}" target="_blank">apps from Sandstorm.io</a>.<br>
-          If you'd like to upload custom apps, please upgrade your plan.</p>
+        <p>Demo users can only install <a href="https://apps.sandstorm.io/?host={{origin}}" target="_blank">apps from Sandstorm.io</a>.<br>
+          If you'd like to upload custom apps, please sign in.</p>
       {{else}}
-        <h2>Looks like you've run out of
-          {{#if outOfGrains}}grains.{{/if}}
-          {{#if outOfStorage}}storage.{{/if}}
-          {{#if outOfCompute}}compute.{{/if}}
-        </h2>
-        <p>Don't worry, you can upgrade your plan.</p>
-      {{/if}}
-    {{else}}
-      <h2>Choose a new plan</h2>
-    {{/if}}
+        <h2>Want more?</h2>
 
-    {{>_billingPromptBody}}
-  {{/if}}
+        <p>You've reached the limits for a demo account.<br>
+          If you'd like to continue using Sandstorm and<br>
+          make your data permanent, please sign in.</p>
+      {{/if}}
+      <div class="login">
+        {{> loginButtonsDialog accountsUi}}
+      </div>
+    {{else}}
+      {{#if involuntary}}
+        {{#if customApp}}
+          <h2>Want to upload your own apps?</h2>
+
+          <p>Free-plan users can only install <a href="https://apps.sandstorm.io/?host={{origin}}" target="_blank">apps from Sandstorm.io</a>.<br>
+            If you'd like to upload custom apps, please upgrade your plan.</p>
+        {{else}}
+          <h2>Looks like you've run out of
+            {{#if outOfGrains}}grains.{{/if}}
+            {{#if outOfStorage}}storage.{{/if}}
+            {{#if outOfCompute}}compute.{{/if}}
+          </h2>
+          <p>Don't worry, you can upgrade your plan.</p>
+        {{/if}}
+      {{else}}
+        <h2>Choose a new plan</h2>
+      {{/if}}
+
+      {{>_billingPromptBody}}
+    {{/if}}
+  </div>
 </template>
 
 <template name="_billingPromptBody">
