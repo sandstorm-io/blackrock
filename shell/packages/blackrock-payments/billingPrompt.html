@@ -64,7 +64,7 @@ limitations under the License.
         you'd like to continue using Sandstorm and make your data permanent, please sign in.</p>
     {{/if}}
     <div class="login">
-      {{> loginButtonsList accountsUi}}
+      {{> loginButtonsDialog accountsUi}}
     </div>
   {{else}}
     <p class="reason">
@@ -123,4 +123,47 @@ limitations under the License.
       </div>
     {{/each}}
   </div>
+</template>
+
+<template name="billingUsage">
+  <div class="usage">
+    <h3>Usage</h3>
+    {{#with plan=myPlan used=myUsage}}
+      <table>
+        <tr>
+          <td>Compute Units</td>
+          <td>
+            <div class="progress-bar">
+              <div style="width: {{renderPercent used.compute plan.compute}}%"></div>
+            </div>
+            <div class="used">not tracked yet (beta)</div>
+            <div class="total"><span class="amount">{{renderStorage plan.compute}}</span> total</div>
+          </td>
+        </tr>
+        <tr>
+          <td>Storage</td>
+          <td>
+            <div class="progress-bar">
+              <div style="width: {{renderPercent used.storage plan.storage}}%"></div>
+            </div>
+            <div class="used"><span class="amount">{{renderStoragePrecise used.storage}}</span> used</div>
+            <div class="total"><span class="amount">{{renderStorage plan.storage}}</span> total</div>
+          </td>
+        </tr>
+        <tr>
+          <td>Grains</td>
+          <td>
+            <span class="grain-count"><span class="used">{{renderQuantity used.grains}}</span> out of <span class="total">{{renderQuantity plan.grains}}</span></span>
+          </td>
+        </tr>
+      </table>
+      <hr>
+      <p>Based on current plan: <span class="plan-name">{{plan._id}}</span>
+          <button class="change-plan">change plan</button></p>
+    {{/with}}
+  </div>
+
+  {{#if showPrompt}}
+    {{>billingPrompt reason="voluntary" topbar=topbar db=db onComplete=promptClosed}}
+  {{/if}}
 </template>

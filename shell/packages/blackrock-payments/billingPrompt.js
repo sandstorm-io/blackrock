@@ -102,6 +102,30 @@ Template._billingPromptBody.onDestroyed(function () {
   window.removeEventListener("message", this.listener, false);
 });
 
+Template.billingUsage.onCreated(function () {
+  this.subscribe("getMyUsage");
+  this._showPrompt = new ReactiveVar(false);
+});
+
+Template.billingUsage.helpers({
+  showPrompt: function () {
+    return Template.instance()._showPrompt.get();
+  },
+  promptClosed: function () {
+    var v = Template.instance()._showPrompt;
+    return function () {
+      v.set(false);
+    };
+  }
+});
+
+Template.billingUsage.events({
+  "click .change-plan": function (event, template) {
+    event.preventDefault();
+    template._showPrompt.set(true);
+  }
+});
+
 function clickPlanHelper(context, ev, planName) {
   if (context.isCurrent && Meteor.user().plan === planName) {
     // Ignore click on current plan.
@@ -195,8 +219,25 @@ var helpers = {
     }
     return Math.floor(size) + suffix;
   },
+  renderStoragePrecise: function (size) {
+    var suffix = "B";
+    if (size >= 1000000000) {
+      size = size / 1000000000;
+      suffix = "GB";
+    } else if (size >= 1000000) {
+      size = size / 1000000;
+      suffix = "MB";
+    } else if (size >= 1000) {
+      size = size / 1000;
+      suffix = "kB";
+    }
+    return size.toPrecision(3) + suffix;
+  },
   renderQuantity: function (n) {
     return (n === Infinity) ? "Unlimited" : n.toString();
+  },
+  renderPercent: function (num, denom) {
+    return Math.min(100, Math.max(0, Math.round(num / denom * 100)));
   },
   isSelecting: function () {
     return Template.instance().isSelectingPlan.get() === this._id;
@@ -215,8 +256,12 @@ var helpers = {
   },
   myPlan: function () {
     return this.db.getMyPlan();
+  },
+  myUsage: function () {
+    return this.db.getMyUsage();
   }
 };
 
 Template._billingPromptBody.helpers(helpers);
 Template._billingPromptPopup.helpers(helpers);
+Template.billingUsage.helpers(helpers);

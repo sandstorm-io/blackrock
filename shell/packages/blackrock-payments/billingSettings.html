@@ -70,10 +70,4 @@ limitations under the License.
       </tbody>
     </table>
   </section>
-  <section class="subscription">
-    <h2>Subscription Plan: {{subscription}}</h2>
-
-    {{>_billingPromptBody reason="voluntary" previousPlan=subscription
-                          onComplete=onChangePlanFunc db=db}}
-  </section>
 </template>
