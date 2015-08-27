@@ -50,44 +50,40 @@ limitations under the License.
 </template>
 
 <template name="_billingPromptPopup">
-  <h4>Upgrade Account</h4>
-
   {{#if isDemoUser}}
     {{#if customApp}}
-      <p class="reason">
-        Sorry, demo users can only install
-        <a href="https://apps.sandstorm.io/?host={{origin}}">apps from Sandstorm.io</a>. If you'd
-        like to install custom apps, please sign in and choose a paid plan.
-      </p>
+      <h2>Want more?</h2>
+
+      <p>Demo users can only install <a href="https://apps.sandstorm.io/?host={{origin}}" target="_blank">apps from Sandstorm.io</a>.<br>
+        If you'd like to upload custom apps, please sign in.</p>
     {{else}}
-      <p>Thanks for trying the Sandstorm Demo! You've reached the limits for a demo account. If
-        you'd like to continue using Sandstorm and make your data permanent, please sign in.</p>
+      <h2>Want more?</h2>
+
+      <p>You've reached the limits for a demo account.<br>
+        If you'd like to continue using Sandstorm and<br>
+        make your data permanent, please sign in.</p>
     {{/if}}
     <div class="login">
       {{> loginButtonsDialog accountsUi}}
     </div>
   {{else}}
-    <p class="reason">
-      {{#if outOfGrains}}
-        Oops! Your current account level only allows you to create {{myPlan.grains}} total grains
-        (app instances). If you want to create more, please choose an upgraded plan:
-      {{/if}}
-      {{#if outOfStorage}}
-        Oops! You're all out of storage. Your current account level only includes
-        {{renderStorage myPlan.storage}} of storage space. You'll either need to delete some
-        things, or you can upgrade to a larger plan:
-      {{/if}}
-      {{#if outOfCompute}}
-        Oops! You're all out of compute units. Your current account level gives you
-        {{renderCu myPlan.compute}} compute units per month. They recharge continuously, so you
-        can either wait a while and try again, or you can upgrade to a larger plan:
-      {{/if}}
+    {{#if involuntary}}
       {{#if customApp}}
-        Sorry, free-plan users can only install
-        <a href="https://apps.sandstorm.io/?host={{origin}}">apps from Sandstorm.io</a>. If you'd
-        like to install custom apps, please choose a paid plan.
+        <h2>Want to upload your own apps?</h2>
+
+        <p>Free-plan users can only install <a href="https://apps.sandstorm.io/?host={{origin}}" target="_blank">apps from Sandstorm.io</a>.<br>
+          If you'd like to upload custom apps, please upgrade your plan.</p>
+      {{else}}
+        <h2>Looks like you've run out of
+          {{#if outOfGrains}}grains.{{/if}}
+          {{#if outOfStorage}}storage.{{/if}}
+          {{#if outOfCompute}}compute.{{/if}}
+        </h2>
+        <p>Don't worry, you can upgrade your plan.</p>
       {{/if}}
-    </p>
+    {{else}}
+      <h2>Choose a new plan</h2>
+    {{/if}}
 
     {{>_billingPromptBody}}
   {{/if}}
@@ -126,11 +122,40 @@ limitations under the License.
             <p># of Grains</p>
           </td></tr>
           <tr><td>
-            <button>{{#if isCurrent}}Keep Plan{{else}}Upgrade{{/if}}</button>
+            <button>
+              {{#if isCurrent}}
+                Keep Plan
+              {{else}}
+                {{#if isUpgrade}}
+                  Upgrade
+                {{else}}
+                  Downgrade
+                {{/if}}
+              {{/if}}
+            </button>
           </td></tr>
         </table>
       </div>
     {{/each}}
+  </div>
+
+  <div class="faq">
+    <h3>F. A. Q.</h3>
+
+    <div class="answer">
+      <h4>*What is a compute unit?</h4>
+
+      <p>A compute unit is 1GB of RAM used for one hour. Sandstorm apps only use RAM while
+        you are actively using them, so 200 CU should be plenty for most users.
+        <a href="https://blog.sandstorm.io/news/2015-01-14-compute-units.html" target="_blank">
+        Learn more about compute units »</a></p>
+    </div><div class="answer">
+      <h4>Which plan should I choose?</h4>
+
+      <p>If you aren't sure, start small &mdash; you can upgrade at any time.</p>
+    </div>
+
+    <a class="button" href="mailto:support@sandstorm.io" target="_blank">Contact Support</a>
   </div>
 </template>
 

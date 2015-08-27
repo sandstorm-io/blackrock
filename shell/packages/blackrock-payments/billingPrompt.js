@@ -127,12 +127,14 @@ Template.billingUsage.events({
 });
 
 function clickPlanHelper(context, ev, planName) {
+  var template = Template.instance();
+
   if (context.isCurrent && Meteor.user().plan === planName) {
-    // Ignore click on current plan.
+    // Clicked on current plan. Treat as dismiss.
+    template.data.onComplete(false);
     return;
   }
 
-  var template = Template.instance();
   var data = StripeCards.find();
   if (data.count() > 0) {
     template.isSelectingPlan.set(planName);
@@ -193,9 +195,17 @@ var helpers = {
   plans: function () {
     var plans = this.db.listPlans().fetch();
     var data = StripeCustomerData.findOne();
-    var myPlan = (data && data.subscription) || "unknown";
+    var myPlanName = (data && data.subscription) || "unknown";
+    var myPlan;
     plans.forEach(function (plan) {
-      if (plan._id === myPlan) plan.isCurrent = true;
+      if (plan._id === myPlanName) myPlan = plan;
+    });
+    plans.forEach(function (plan) {
+      if (plan._id === myPlanName) {
+        plan.isCurrent = true;
+      } else {
+        plan.isUpgrade = plan.price > myPlan.price;
+      }
     });
     return plans;
   },
