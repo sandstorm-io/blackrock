@@ -97,29 +97,38 @@ limitations under the License.
   <div class="subscriptions">
     {{#each plans}}
       <div class="subscription {{_id}} {{#if isCurrent}}selected{{/if}} {{#if isSelecting}}selecting{{/if}}">
-        <h4>{{_id}}</h4>
-        <p>{{#if isCurrent}}(current){{else}}&nbsp;{{/if}}</p>
-        <table>
-          <tr>
-            <td>{{renderCu compute}} CU</td>
-            <td>Compute Units</td>
-          </tr>
-          <tr>
-            <td>{{renderStorage storage}}</td>
-            <td>Storage</td>
-          </tr>
-          <tr>
-            <td>{{renderQuantity grains}}</td>
-            <td># of Grains</td>
-          </tr>
-        </table>
-        <hr>
         {{#if price}}
-          <span>${{renderCents price}} / Month (FREE during beta)</span>
           <iframe class="mobile-iframe-hack {{#if isFullscreen}}fullscreen{{/if}}" src="{{paymentsUrl}}/checkout#{{checkoutData}}"></iframe>
-        {{else}}
-          <span>FREE</span>
         {{/if}}
+
+        <p>{{#if isCurrent}}Current Plan{{else}}&nbsp;{{/if}}</p>
+        <table>
+          <tr><td>{{_id}}</td></tr>
+          <tr><td>
+            {{#if price}}
+              <p>${{renderDollars price}}</p>
+              <p>/ month</p>
+            {{else}}
+              <p>FREE</p>
+              <p>&nbsp;</p>
+            {{/if}}
+          </td></tr>
+          <tr><td>
+            <p>{{renderCu compute}} CU</p>
+            <p>Compute Units*</p>
+          </td></tr>
+          <tr><td>
+            <p>{{renderStorage storage}}</p>
+            <p>Storage</p>
+          </td></tr>
+          <tr><td>
+            <p>{{renderQuantity grains}}</p>
+            <p># of Grains</p>
+          </td></tr>
+          <tr><td>
+            <button>{{#if isCurrent}}Keep Plan{{else}}Upgrade{{/if}}</button>
+          </td></tr>
+        </table>
       </div>
     {{/each}}
   </div>
