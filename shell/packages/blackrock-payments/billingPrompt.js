@@ -131,8 +131,9 @@ Template.billingUsage.events({
   }
 });
 
-function clickPlanHelper(context, ev, planName) {
+function clickPlanHelper(context, ev) {
   var template = Template.instance();
+  var planName = context._id;
 
   if (context.isCurrent && Meteor.user().plan === planName) {
     // Clicked on current plan. Treat as dismiss.
@@ -141,7 +142,7 @@ function clickPlanHelper(context, ev, planName) {
   }
 
   var data = StripeCards.find();
-  if (data.count() > 0) {
+  if (data.count() > 0 || context.price === 0) {
     template.isSelectingPlan.set(planName);
     Meteor.call("updateUserSubscription", planName, function (err) {
       if (err) {
@@ -174,18 +175,9 @@ Template._billingPromptPopup.events({
 });
 
 Template._billingPromptBody.events({
-  "click .standard": function (ev) {
-    clickPlanHelper(this, ev, "standard");
-  },
-  "click .large": function (ev) {
-    clickPlanHelper(this, ev, "large");
-  },
-  "click .mega": function (ev) {
-    clickPlanHelper(this, ev, "mega");
-  },
-  "click .free": function (ev) {
-    clickPlanHelper(this, ev, "free");
-  },
+  "click .subscription": function (ev) {
+    clickPlanHelper(this, ev);
+  }
 });
 
 var helpers = {
@@ -217,7 +209,7 @@ var helpers = {
       if (plan._id === myPlanName) {
         plan.isCurrent = true;
       } else {
-        plan.isUpgrade = plan.price > myPlan.price;
+        plan.isUpgrade = !myPlan || plan.price > myPlan.price;
       }
     });
     return plans;
