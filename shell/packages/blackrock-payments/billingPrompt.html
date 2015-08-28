@@ -100,6 +100,10 @@ limitations under the License.
 
 <template name="_billingPromptBody">
   <div class="subscriptions">
+    <a class="free-note" href="https://blog.sandstorm.io/news/2015-08-31-oasis-beta-launch.html" target="_blank">
+      All plans are <strong>FREE</strong> during beta.
+    </a>
+
     {{#each plans}}
       <div class="subscription {{_id}} {{#if isCurrent}}selected{{/if}} {{#if isSelecting}}selecting{{/if}} {{#if isFullscreen}}iframe-active{{/if}}">
         {{#if isShowingIframe}}
@@ -112,10 +116,10 @@ limitations under the License.
           <tr><td>
             {{#if price}}
               <p>${{renderDollars price}}</p>
-              <p>/ month</p>
+              <p>/ month<br>(FREE during beta)</p>
             {{else}}
               <p>FREE</p>
-              <p>&nbsp;</p>
+              <p>&nbsp;<br>&nbsp;</p>
             {{/if}}
           </td></tr>
           <tr><td>
