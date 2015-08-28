@@ -58,7 +58,7 @@ limitations under the License.
         {{/each}}
         <tr>
           <td></td>
-          <td class="add-new-card">
+          <td class="add-new-card {{#if showPrompt}}iframe-active{{/if}}">
             {{#if checkoutData}}
               <iframe class="mobile-iframe-hack {{#if showPrompt}}fullscreen{{/if}}" src="{{paymentsUrl}}/checkout#{{checkoutData}}"></iframe>
             {{/if}}

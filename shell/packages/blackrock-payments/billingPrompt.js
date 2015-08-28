@@ -298,6 +298,10 @@ var helpers = {
   },
   oldPlan: function () {
     return Template.instance()._oldPlan;
+  },
+  isShowingIframe: function () {
+    var data = StripeCards.find();
+    return this.price && !this.isCurrent && data.count() === 0;
   }
 };
 
