@@ -50,6 +50,12 @@ limitations under the License.
 </template>
 
 <template name="_billingPromptPopup">
+  {{#if isComplete}}
+    <h2>Success!</h2>
+    <p class="success-note">You've changed your plan from <strong>{{oldPlan}}</strong> to
+      <strong>{{myPlan._id}}</strong>.</p>
+    <button class="continue">Continue</button>
+  {{else}}
   {{#if isDemoUser}}
     {{#if customApp}}
       <h2>Want more?</h2>
@@ -85,7 +91,9 @@ limitations under the License.
       <h2>Choose a new plan</h2>
     {{/if}}
 
-    {{>_billingPromptBody}}
+    {{>_billingPromptBody reason=reason onComplete=onCompleteWrapper
+                          topbar=topbar db=db accountsUi=accountsUi}}
+  {{/if}}
   {{/if}}
 </template>
 

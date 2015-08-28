@@ -67,6 +67,11 @@ Template.billingPrompt.helpers({
   }
 });
 
+Template._billingPromptPopup.onCreated(function () {
+  this._oldPlan = Meteor.user().plan;
+  this._isComplete = new ReactiveVar(false);
+});
+
 Template._billingPromptBody.onCreated(function () {
   this.showFullscreen = new ReactiveVar(null);
   this.promptChoice = new ReactiveVar(null);  // which checkout iframe was clicked
@@ -159,6 +164,14 @@ function clickPlanHelper(context, ev, planName) {
     frame.contentWindow.postMessage({openDialog: true}, "*");
   }
 }
+
+Template._billingPromptPopup.events({
+  "click .continue": function (ev) {
+    if (this.onComplete) {
+      this.onComplete(true);
+    }
+  }
+});
 
 Template._billingPromptBody.events({
   "click .standard": function (ev) {
@@ -269,6 +282,22 @@ var helpers = {
   },
   myUsage: function () {
     return this.db.getMyUsage();
+  },
+  onCompleteWrapper: function () {
+    var template = Template.instance();
+    return function (success) {
+      if (success) {
+        template._isComplete.set(true);
+      } else {
+        template.data.onComplete(false);
+      }
+    }
+  },
+  isComplete: function () {
+    return Template.instance()._isComplete.get();
+  },
+  oldPlan: function () {
+    return Template.instance()._oldPlan;
   }
 };
 
