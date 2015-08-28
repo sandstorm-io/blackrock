@@ -68,7 +68,7 @@ Template.billingPrompt.helpers({
 });
 
 Template._billingPromptPopup.onCreated(function () {
-  this._oldPlan = Meteor.user().plan;
+  this._oldPlan = Meteor.user().plan || "free";
   this._isComplete = new ReactiveVar(false);
 });
 
