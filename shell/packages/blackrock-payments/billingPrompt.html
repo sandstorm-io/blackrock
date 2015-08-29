@@ -175,7 +175,7 @@ limitations under the License.
 <template name="billingUsage">
   <div class="usage">
     <h3>Usage</h3>
-    {{#with plan=myPlan used=myUsage}}
+    {{#with plan=myPlan used=myUsage}}{{#if plan}}
       <table>
         <tr>
           <td>Compute Units</td>
@@ -207,7 +207,7 @@ limitations under the License.
       <hr>
       <p>Based on current plan: <span class="plan-name">{{plan._id}}</span>
           <button class="change-plan">change plan</button></p>
-    {{/with}}
+    {{/if}}{{/with}}
   </div>
 
   {{#if showPrompt}}
