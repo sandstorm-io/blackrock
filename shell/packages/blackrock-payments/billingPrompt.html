@@ -61,18 +61,25 @@ limitations under the License.
     {{#if customApp}}
       <h2>Want more?</h2>
 
-      <p>Demo users can only install <a href="https://apps.sandstorm.io/?host={{origin}}" target="_blank">apps from Sandstorm.io</a>.<br>
+      <p class="custom-app">Demo users can only install <a href="https://apps.sandstorm.io/?host={{origin}}" target="_blank">apps from Sandstorm.io</a>.
         If you'd like to upload custom apps, please sign in.</p>
     {{else}}
       <h2>Want more?</h2>
 
-      <p>You've reached the limits for a demo account.<br>
-        If you'd like to continue using Sandstorm and<br>
+      <p>You've reached the limits for a demo account.
+        If you'd like to continue using Sandstorm and
         make your data permanent, please sign in.</p>
+
     {{/if}}
     <div class="login">
       {{> loginButtonsDialog accountsUi}}
     </div>
+
+    <p class="alternatives">
+      {{#unless customApp}}<a href="/demo-restart">Clear data and start over »</a><br>{{/unless}}
+      <a href="https://sandstorm.io/install/">Install your own server »</a><br>
+      (Sandstorm is Open Source!)
+    </p>
   {{else}}
     {{#if involuntary}}
       {{#if customApp}}
@@ -163,9 +170,11 @@ limitations under the License.
         <a href="https://blog.sandstorm.io/news/2015-01-14-compute-units.html" target="_blank">
         Learn more about compute units »</a></p>
     </div><div class="answer">
-      <h4>Which plan should I choose?</h4>
+      <h4>What if I'm not ready to upgrade?</h4>
 
-      <p>If you aren't sure, start small &mdash; you can upgrade at any time.</p>
+      <p>You'll need to delete one of your existing grains before you can create a new one.
+        Open a grain and click <span class="trash">the delete button</span> in the top bar.
+        Or, since Sandstorm is Open Source you can <a href="https://sandstorm.io/install/" target="_blank">install your own server »</a></p>
     </div>
 
     <a class="button" href="mailto:support@sandstorm.io" target="_blank">Contact Support</a>
