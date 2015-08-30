@@ -187,15 +187,18 @@ var helpers = {
   checkoutData: function () {
     var title = this._id.charAt(0).toUpperCase() + this._id.slice(1);
 
-    return JSON.stringify({
-      name: 'Sandstorm Oasis Subscription',
+    // Firefox will apparently automatically do some URI encoding if we don't do it ourselves.
+    // Other browsers won't. Meanwhile Firefox used to also do some automatic decoding on the
+    // other end, but stopped in v41 to become consistent with other browsers.
+    return encodeURIComponent(JSON.stringify({
+      name: 'Sandstorm Oasis',
       description: title + " Plan",
       amount: this.price,
       panelLabel: "{{amount}} / Month",
       id: Template.instance().id,
       planName: this._id,
       email: Meteor.user().profile.email
-    });
+    }));
   },
   plans: function () {
     var plans = this.db.listPlans().fetch();
