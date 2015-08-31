@@ -360,7 +360,11 @@ protected:
                   .then([](auto&&) {
                 // Success, continue on.
               }, [](kj::Exception&& exception) {
-                KJ_LOG(ERROR, "syncStorage failed", exception);
+                if (exception.getType() == kj::Exception::Type::DISCONNECTED) {
+                  // Must have shut down. No problem, carry on.
+                } else {
+                  KJ_LOG(ERROR, "syncStorage failed", exception);
+                }
               }).then(kj::mv(getVolume));
             } else {
               return getVolume();
