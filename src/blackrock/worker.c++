@@ -474,6 +474,16 @@ WorkerImpl::WorkerImpl(kj::AsyncIoContext& ioContext, sandstorm::SubprocessSet& 
     // This system may need to be configured to enable user namespaces.
     kj::FdOutputStream(fd->get()).write("1\n", 2);
   }
+  KJ_IF_MAYBE(fd, sandstorm::raiiOpenIfExists(
+      "/proc/sys/fs/inotify/max_user_instances", O_WRONLY | O_TRUNC | O_CLOEXEC)) {
+    // Default = 128, but we need one per grain and theoretically we could have 4k grains.
+    kj::FdOutputStream(fd->get()).write("8192\n", strlen("8192\n"));
+  }
+  KJ_IF_MAYBE(fd, sandstorm::raiiOpenIfExists(
+      "/proc/sys/fs/inotify/max_user_watches", O_WRONLY | O_TRUNC | O_CLOEXEC)) {
+    // Default = 8192, which is too low.
+    kj::FdOutputStream(fd->get()).write("524288\n", strlen("524288\n"));
+  }
 }
 WorkerImpl::~WorkerImpl() noexcept(false) {}
 
