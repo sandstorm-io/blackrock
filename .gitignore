@@ -30,3 +30,6 @@ selenium-debug.log
 # Added for Blackrock
 dbg
 shell/.meteor
+config.capnp
+oasis-config
+testrock-config
