@@ -264,7 +264,7 @@ function getAllStripeCustomers() {
     results = results.concat(next.data);
     hasMore = next.has_more;
     if (hasMore) {
-      req.starting_after = results.slice(-1)[0];
+      req.starting_after = results.slice(-1)[0].id;
     }
   }
   return results;
