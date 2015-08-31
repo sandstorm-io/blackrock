@@ -258,10 +258,14 @@ function getAllStripeCustomers() {
   var hasMore = true;
   var results = [];
 
+  var req = {limit: 100};
   while (hasMore) {
-    var next = Meteor.wrapAsync(stripe.customers.list.bind(stripe.customers))({limit: 100});
+    var next = Meteor.wrapAsync(stripe.customers.list.bind(stripe.customers))(req);
     results = results.concat(next.data);
     hasMore = next.has_more;
+    if (hasMore) {
+      req.starting_after = results.slice(-1)[0];
+    }
   }
   return results;
 }
@@ -269,6 +273,7 @@ function getAllStripeCustomers() {
 SandstormDb.paymentsMigrationHook = function (SignupKeys, plans) {
   var db = this;
   var customers = getAllStripeCustomers();
+  console.log("got customers", customers.length);
   if (!customers) throw new Error("missing customers");
 
   var byEmail = {};
