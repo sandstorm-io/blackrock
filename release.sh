@@ -20,7 +20,7 @@ case $1 in
 
     # We always do a Blackrock prod release shortly after a Sandstorm release.
     BUILD=$(curl -s https://install.sandstorm.io/dev)
-    BUILDSTAMP=$BUILD
+    BUILDSTAMP=$BUILD-$(date -u +%Y%m%d-%H%M%S)
 
     if (grep -r KJ_DBG src/* | egrep -v '/(debug(-test)?|exception)[.]'); then
       echo '*** Error:  There are instances of KJ_DBG in the code.' >&2
