@@ -373,6 +373,13 @@ public:
         //   involved in the transaction (make them all start throwing DISCONNECTED, remove them
         //   from the already-open table).
         KJ_LOG(FATAL, "INCOMPLETE TRANSACTION; ABORTING");
+        try {
+          std::rethrow_exception(std::current_exception());
+        } catch (const std::exception& exception) {
+          KJ_LOG(FATAL, exception.what());
+        } catch (...) {
+          KJ_LOG(FATAL, "unknown exception type");
+        }
         abort();
       }
     }
