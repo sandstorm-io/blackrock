@@ -48,4 +48,6 @@ struct FrontendConfig {
   stripePublicKey @7 :Text;
 
   allowUninvited @8 :Bool;
+
+  replicasPerMachine @9 :UInt32;
 }

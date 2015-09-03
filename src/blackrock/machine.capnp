@@ -80,7 +80,7 @@ interface Machine {
                     externalRestorer :MasterRestorer(SturdyRef.External),
                     storageRestorers :BackendSet(Restorer(SturdyRef.Stored)),
                     frontends :BackendSet(Frontend.Frontend));
-  becomeFrontend @4 (config :Frontend.FrontendConfig)
+  becomeFrontend @4 (config :Frontend.FrontendConfig, replicaNumber :UInt32)
                  -> (frontend :Frontend.Frontend,
                      storageRestorerSet :BackendSet(Restorer(SturdyRef.Stored)),
                      storageRootSet :BackendSet(Storage.StorageRootSet),

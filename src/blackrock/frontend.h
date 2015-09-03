@@ -24,7 +24,7 @@ namespace blackrock {
 class FrontendImpl: public Frontend::Server, private kj::TaskSet::ErrorHandler {
 public:
   FrontendImpl(kj::Network& network, kj::Timer& timer, sandstorm::SubprocessSet& subprocessSet,
-               FrontendConfig::Reader config);
+               FrontendConfig::Reader config, uint replicaNumber);
 
   void setConfig(FrontendConfig::Reader config);
 
@@ -51,7 +51,7 @@ private:
   pid_t frontendPid = 0;
   kj::TaskSet tasks;
 
-  kj::Promise<void> execLoop(MongoInfo&& mongoInfo);
+  kj::Promise<void> execLoop(MongoInfo&& mongoInfo, uint replicaNumber, uint port);
 
   void taskFailed(kj::Exception&& exception) override;
 };

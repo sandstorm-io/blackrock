@@ -195,7 +195,7 @@ void runMaster(kj::AsyncIoContext& ioContext, ComputeDriver& driver, MasterConfi
 
   uint storageCount = 1;
   uint workerCount = config.getWorkerCount();
-  uint frontendCount = 1;
+  uint frontendCount = config.getFrontendCount();
   uint mongoCount = 1;
   uint coordinatorCount = 0;
   uint gatewayCount = 0;
@@ -224,7 +224,7 @@ void runMaster(kj::AsyncIoContext& ioContext, ComputeDriver& driver, MasterConfi
 
   VatPath::Reader storagePath;
   auto workerPaths = kj::heapArray<VatPath::Reader>(config.getWorkerCount());
-  VatPath::Reader frontendPath;
+  auto frontendPaths = kj::heapArray<VatPath::Reader>(config.getFrontendCount());
   VatPath::Reader mongoPath;
 
   KJ_LOG(INFO, "examining currently-running machines...");
@@ -282,22 +282,25 @@ void runMaster(kj::AsyncIoContext& ioContext, ComputeDriver& driver, MasterConfi
   }
 
   // Start front-end.
-  start({ ComputeDriver::MachineType::FRONTEND, 0 }, [&](Machine::Client&& machine) {
-    auto frontend = ({
-      auto req = machine.becomeFrontendRequest();
-      req.setConfig(config.getFrontendConfig());
-      req.send();
-    });
+  for (uint i = 0; i < frontendCount; i++) {
+    start({ ComputeDriver::MachineType::FRONTEND, i }, [&,i](Machine::Client&& machine) {
+      auto frontend = ({
+        auto req = machine.becomeFrontendRequest();
+        req.setConfig(config.getFrontendConfig());
+        req.setReplicaNumber(i);
+        req.send();
+      });
 
-    return registrationArray(
-        frontendFeeder.addBackend(frontend.getFrontend()),
-        storageRestorerForFrontendFeeder.addConsumer(frontend.getStorageRestorerSet()),
-        storageRootFeeder.addConsumer(frontend.getStorageRootSet()),
-        storageFactoryFeeder.addConsumer(frontend.getStorageFactorySet()),
-        hostedRestorerForFrontendFeeder.addConsumer(frontend.getHostedRestorerSet()),
-        workerFeeder.addConsumer(frontend.getWorkerSet()),
-        mongoFeeder.addConsumer(frontend.getMongoSet()));
-  });
+      return registrationArray(
+          frontendFeeder.addBackend(frontend.getFrontend()),
+          storageRestorerForFrontendFeeder.addConsumer(frontend.getStorageRestorerSet()),
+          storageRootFeeder.addConsumer(frontend.getStorageRootSet()),
+          storageFactoryFeeder.addConsumer(frontend.getStorageFactorySet()),
+          hostedRestorerForFrontendFeeder.addConsumer(frontend.getHostedRestorerSet()),
+          workerFeeder.addConsumer(frontend.getWorkerSet()),
+          mongoFeeder.addConsumer(frontend.getMongoSet()));
+    });
+  }
 
   // Start mongo.
   start({ ComputeDriver::MachineType::MONGO, 0 }, [&](Machine::Client&& machine) {

@@ -750,7 +750,7 @@ struct FrontendImpl::MongoInfo {
 
 FrontendImpl::FrontendImpl(kj::Network& network, kj::Timer& timer,
                            sandstorm::SubprocessSet& subprocessSet,
-                           FrontendConfig::Reader config)
+                           FrontendConfig::Reader config, uint replicaNumber)
     : timer(timer),
       subprocessSet(subprocessSet),
       capnpServer(kj::heap<BackendImpl>(*this, timer)),
@@ -771,17 +771,21 @@ FrontendImpl::FrontendImpl(kj::Network& network, kj::Timer& timer,
   auto mongoInfoPromise = mongos->chooseOne().getConnectionInfoRequest().send();
 
   auto promise = network.parseAddress(kj::str("unix:", outsideSandboxSocketPath));
-  tasks.add(promise.then([this,KJ_MVCAP(outsideSandboxSocketPath),KJ_MVCAP(mongoInfoPromise)]
-                         (kj::Own<kj::NetworkAddress>&& addr) mutable {
+  tasks.add(promise.then([this,KJ_MVCAP(outsideSandboxSocketPath),KJ_MVCAP(mongoInfoPromise),
+                          replicaNumber](kj::Own<kj::NetworkAddress>&& addr) mutable {
     return mongoInfoPromise
-        .then([this,KJ_MVCAP(addr),KJ_MVCAP(outsideSandboxSocketPath)](auto&& mongoInfo) mutable {
+        .then([this,KJ_MVCAP(addr),KJ_MVCAP(outsideSandboxSocketPath),replicaNumber]
+              (auto&& mongoInfo) mutable {
       auto listener = addr->listen();
       KJ_SYSCALL(chown(outsideSandboxSocketPath.cStr(), 0, 1000));
       KJ_SYSCALL(chmod(outsideSandboxSocketPath.cStr(), 0770));
 
       // Now that we're listening on the socket, and we have Mongo's address, it's safe to start
       // the front-end.
-      tasks.add(execLoop(MongoInfo(mongoInfo)));
+      uint n = this->config.getReplicasPerMachine();
+      for (uint i = 0; i < n; i++) {
+        tasks.add(execLoop(MongoInfo(mongoInfo), replicaNumber * n + i, 6080 + i));
+      }
 
       return capnpServer.listen(kj::mv(listener));
     });
@@ -913,7 +917,7 @@ static void enterSandstormBundle() {
   KJ_SYSCALL(sigprocmask(SIG_SETMASK, &sigset, nullptr));
 }
 
-kj::Promise<void> FrontendImpl::execLoop(MongoInfo&& mongoInfo) {
+kj::Promise<void> FrontendImpl::execLoop(MongoInfo&& mongoInfo, uint replicaNumber, uint port) {
   // If node fails, we will wait until at least 10 seconds from now before restarting it.
   auto rateLimit = timer.afterDelay(10 * kj::SECONDS);
 
@@ -927,7 +931,7 @@ kj::Promise<void> FrontendImpl::execLoop(MongoInfo&& mongoInfo) {
 
       // Set up environment.
       KJ_SYSCALL(setenv("ROOT_URL", config.getBaseUrl().cStr(), true));
-      KJ_SYSCALL(setenv("PORT", "6080", true));
+      KJ_SYSCALL(setenv("PORT", kj::str(port).cStr(), true));
       KJ_SYSCALL(setenv("MONGO_URL",
           kj::str("mongodb://", mongoInfo, "/meteor?authSource=admin").cStr(), true));
       KJ_SYSCALL(setenv("MONGO_OPLOG_URL",
@@ -957,6 +961,7 @@ kj::Promise<void> FrontendImpl::execLoop(MongoInfo&& mongoInfo) {
           ", \"allowUninvited\":", config.getAllowUninvited() ? "true" : "false",
           "}"
           ", \"stripeKey\":\"", config.getStripeKey(), "\""
+          ", \"replicaNumber\":", replicaNumber,
           "}").cStr(), true));
 
       // Execute!
@@ -973,8 +978,8 @@ kj::Promise<void> FrontendImpl::execLoop(MongoInfo&& mongoInfo) {
   }).catch_([KJ_MVCAP(rateLimit)](kj::Exception&& exception) mutable {
     KJ_LOG(ERROR, "frontend died; restarting", exception);
     return kj::mv(rateLimit);
-  }).then([this,KJ_MVCAP(mongoInfo)]() mutable {
-    return execLoop(kj::mv(mongoInfo));
+  }).then([this,KJ_MVCAP(mongoInfo),replicaNumber, port]() mutable {
+    return execLoop(kj::mv(mongoInfo), replicaNumber, port);
   });
 }
 

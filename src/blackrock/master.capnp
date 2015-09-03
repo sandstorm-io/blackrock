@@ -8,6 +8,7 @@ $import "/capnp/c++.capnp".namespace("blackrock");
 
 struct MasterConfig {
   workerCount @0 :UInt32;
+  frontendCount @4 :UInt32 = 1;
 
   # For now, we expect exactly one of each of the other machine types.
 
@@ -28,7 +29,7 @@ struct GceConfig {
     storage @2 :Text = "n1-standard-1";
     worker @3 :Text = "n1-highmem-2";
     coordinator @4 :Text = "n1-standard-1";
-    frontend @5 :Text = "n1-standard-1";
+    frontend @5 :Text = "n1-highcpu-2";
     mongo @6 :Text = "n1-standard-1";
   }
 }
