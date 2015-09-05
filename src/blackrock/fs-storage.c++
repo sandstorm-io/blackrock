@@ -373,12 +373,17 @@ public:
         //   involved in the transaction (make them all start throwing DISCONNECTED, remove them
         //   from the already-open table).
         KJ_LOG(FATAL, "INCOMPLETE TRANSACTION; ABORTING");
-        try {
-          std::rethrow_exception(std::current_exception());
-        } catch (const std::exception& exception) {
-          KJ_LOG(FATAL, exception.what());
-        } catch (...) {
-          KJ_LOG(FATAL, "unknown exception type");
+        auto stdex = std::current_exception();
+        if (stdex) {
+          try {
+            std::rethrow_exception(stdex);
+          } catch (const std::exception& exception) {
+            KJ_LOG(FATAL, exception.what());
+          } catch (...) {
+            KJ_LOG(FATAL, "unknown exception type");
+          }
+        } else {
+          KJ_LOG(FATAL, "no current exception", std::uncaught_exception());
         }
         abort();
       }
@@ -1346,9 +1351,14 @@ protected:
       if (blocks != xattr.accountedBlockCount) {
         int64_t delta = blocks - xattr.accountedBlockCount;
         Journal::Transaction txn(journal);
-        xattr.accountedBlockCount = blocks;
-        factory->modifyTransitiveSize(id, delta, txn);
-        txn.commit();
+        KJ_IF_MAYBE(exception, kj::runCatchingExceptions([&]() {
+          xattr.accountedBlockCount = blocks;
+          factory->modifyTransitiveSize(id, delta, txn);
+          txn.commit();
+        })) {
+          KJ_LOG(FATAL, "EXCEPTION DURING TXN", *exception);
+          kj::throwFatalException(kj::mv(*exception));
+        }
       }
     } else {
       // We don't bother counting child size until we're committed to disk.
