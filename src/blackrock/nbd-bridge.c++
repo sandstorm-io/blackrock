@@ -91,6 +91,10 @@ struct NbdVolumeAdapter::ReplyAndIovec {
   }
 };
 
+void NbdVolumeAdapter::updateVolume(Volume::Client newVolume) {
+  volume = kj::mv(newVolume);
+}
+
 kj::Promise<void> NbdVolumeAdapter::run() {
   return socket->read(&request, sizeof(request))
       .then([this]() -> kj::Promise<void> {

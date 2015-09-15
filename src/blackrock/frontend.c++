@@ -63,6 +63,7 @@ protected:
         packageInfo.setVolume(kj::mv(packageVolume));
         req.setCommand(params.getCommand());
         req.setStorage(kj::mv(storageFactory));
+        req.setGrainIdForLogging(grainId);
         req.send();
       });
 
@@ -83,7 +84,7 @@ protected:
             //   for continueGrain() to finish, but we need `packageId` and `command` to stay
             //   live in the continueGrain() loop. Make a copy?
             return continueGrain({grainInfo.getState(), kj::mv(storageFactory),
-                    kj::mv(packageVolume), packageId, params.getCommand()})
+                    kj::mv(packageVolume), packageId, grainId, params.getCommand()})
                 .then([context](sandstorm::Supervisor::Client supervisor) mutable {
               context.getResults(capnp::MessageSize { 4, 1 })
                   .setSupervisor(kj::mv(supervisor));
@@ -611,6 +612,7 @@ private:
     StorageFactory::Client storageFactory;
     Volume::Client packageVolume;
     capnp::Text::Reader packageId;
+    capnp::Text::Reader grainIdForLogging;
     sandstorm::spk::Manifest::Command::Reader command;
   };
 
@@ -644,13 +646,16 @@ private:
 
           auto req = worker.restoreGrainRequest();
           auto packageInfo = req.initPackage();
-          packageInfo.setId(params.packageId.asBytes());  // TODO(perf): parse ID hex to bytes?
+          // TODO(perf): parse ID hex to bytes? Be sure to update worker.c++ which logs
+          //   id.asChars() in some places.
+          packageInfo.setId(params.packageId.asBytes());
           packageInfo.setVolume(kj::mv(params.packageVolume));
           req.setCommand(params.command);
           req.setStorage(kj::mv(params.storageFactory));
           req.setGrainState(grainState);
           req.setExclusiveGrainStateSetter(grainGetResult.getSetter());
           req.setExclusiveVolume(volume.getExclusiveRequest().send().getExclusive());
+          req.setGrainIdForLogging(params.grainIdForLogging);
 
           return req.send().getGrain();
         }

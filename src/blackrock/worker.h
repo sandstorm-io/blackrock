@@ -54,6 +54,10 @@ public:
 
     kj::Promise<void> whenReady() { return loaded.addBranch(); }
 
+    kj::Promise<void> onDisconnected() { return disconnected.addBranch(); }
+
+    void updateVolume(Volume::Client newVolume);
+
   private:
     friend class PackageMountSet;
 
@@ -76,6 +80,14 @@ public:
 
     kj::ForkedPromise<void> loaded;
     // Resolves when the thread reports that the mount point is active.
+
+    bool unregistered = false;
+
+    kj::ForkedPromise<void> disconnected;
+    // Resolves when this mount has been disconnecnted from storage and therefore will report I/O
+    // errors. Grains using this package should attempt to shut down.
+
+    void unregister();
   };
 
   kj::Promise<kj::Own<PackageMount>> getPackage(PackageInfo::Reader package);
@@ -127,7 +139,8 @@ private:
   sandstorm::Supervisor::Client bootGrain(
       PackageInfo::Reader packageInfo, kj::Own<capnp::MessageBuilder> grainState,
       sandstorm::Assignable<GrainState>::Setter::Client grainStateSetter, Volume::Client grainVolume,
-      sandstorm::spk::Manifest::Command::Reader command, bool isNew);
+      sandstorm::spk::Manifest::Command::Reader command, bool isNew,
+      kj::String grainIdForLogging);
 
   void taskFailed(kj::Exception&& exception) override;
 };

@@ -276,9 +276,24 @@ auto PackageMountSet::getPackage(PackageInfo::Reader package)
     packageMount = kj::refcounted<PackageMount>(*this, id,
         kj::str("/var/blackrock/packages/", counter++, '-', kj::hex(random)),
         package.getVolume(), kj::mv(nbdUserEnd), kj::mv(nbdKernelEnd));
+    KJ_LOG(INFO, "registering package", id.asChars(), packageMount->getPath());
     mounts[packageMount->getId()] = packageMount.get();
   } else {
     packageMount = kj::addRef(*iter->second);
+
+    // Let's update to the latest Volume capability. This way, if our Volume has been disconnected
+    // in the background but we haven't noticed yet because the kernel hasn't tried to read any
+    // blocks, we can recover. (This is common when a full storage crash occurs: the grains will
+    // all have been killed because their grain storage was disconnected, but often it won't be
+    // noticed that the packages have disconnected because the kernel hasn't read any blocks from
+    // them lately. The kernel definitely won't read any blocks while all the grains are dead, but
+    // it might purge some from the cache. Luckily the next time the package is used we'll get a
+    // new capability and the kernel will never know anything went wrong!)
+    //
+    // TODO(security): Do a capability join to verify that they are the same capability, and panic
+    //   if they aren't. (Or better yet, turn the whole package mount table into an identity map
+    //   and ditch the IDs. Either way we need capnp level 4 to do this.)
+    packageMount->updateVolume(package.getVolume());
   }
 
   auto promise = packageMount->loaded.addBranch();
@@ -340,18 +355,26 @@ PackageMountSet::PackageMount::PackageMount(PackageMountSet& mountSet,
 
         // We'll close our end of the pipe on the way out, thus signaling completion.
       })),
-      loaded(nbdThread.pipe->read(&dummyByte, 1).fork()) {}
+      loaded(nbdThread.pipe->read(&dummyByte, 1).fork()),
+      disconnected(volumeAdapter->onDisconnected().then([this]() {
+        // Volume disconnected. Unregister to prevent new grains from reusing this mount.
+        KJ_LOG(ERROR, "package volume connection lost", this->id.asChars(), this->path);
+        unregister();
+      }).fork()) {}
 
 PackageMountSet::PackageMount::~PackageMount() noexcept(false) {
+  unregister();
+
   // We don't want to block waiting for the NBD thread to complete. So, we carefully wait for
   // the thread to report completion in a detached promise.
   //
   // TODO(cleanup): Make kj::Thread::detach() work correctly.
 
-  mountSet.mounts.erase(id);
-
   auto pipe = kj::mv(nbdThread.pipe);
+
+  // Send EOF to the NBD thread, which tells it to disconnect.
   pipe->shutdownWrite();
+
   auto runTask = kj::mv(volumeRunTask);
   loaded.addBranch().then([KJ_MVCAP(pipe)]() mutable {
     // OK, we read the first byte. Wait for the pipe to become readable again, signalling EOF
@@ -369,6 +392,18 @@ PackageMountSet::PackageMount::~PackageMount() noexcept(false) {
     .detach([](kj::Exception&& exception) {
     KJ_LOG(ERROR, "Exception while trying to unmount package.", exception);
   });
+}
+
+void PackageMountSet::PackageMount::updateVolume(Volume::Client newVolume) {
+  volumeAdapter->updateVolume(kj::mv(newVolume));
+}
+
+void PackageMountSet::PackageMount::unregister() {
+  if (!unregistered) {
+    KJ_LOG(INFO, "unregistering package", id.asChars(), path);
+    mountSet.mounts.erase(id);
+    unregistered = true;
+  }
 }
 
 // =======================================================================================
@@ -389,29 +424,38 @@ public:
                kj::Own<kj::AsyncIoStream> nbdSocket,
                Volume::Client volume,
                kj::Own<kj::AsyncIoStream> capnpSocket,
-               kj::Own<PackageMountSet::PackageMount> packageMount,
-               sandstorm::Subprocess::Options&& subprocessOptions)
+               kj::Own<PackageMountSet::PackageMount> packageMountParam,
+               sandstorm::Subprocess::Options&& subprocessOptions,
+               kj::String grainIdForLoggingParam)
       : worker(worker),
         workerCap(kj::mv(workerCap)),
         grainState(kj::mv(grainState)),
         grainStateSetter(kj::mv(grainStateSetter)),
-        packageMount(kj::mv(packageMount)),
+        packageMount(kj::mv(packageMountParam)),
         nbdVolume(kj::mv(nbdSocket), kj::mv(volume), NbdAccessType::READ_WRITE),
         volumeRunTask(nbdVolume.run().eagerlyEvaluate([](kj::Exception&& exception) {
           KJ_LOG(FATAL, "NbdVolumeAdapter failed (grain)", exception);
         })),
-        volumeDisconnectTask(nbdVolume.onDisconnected().then([this]() {
-          // If the volume disconnected while the grain is still running, kill the grain.
+        volumeDisconnectTask(nbdVolume.onDisconnected()
+            .exclusiveJoin(packageMount->onDisconnected())
+            .then([this]() {
+          // If the package or grain volume disconnected while the grain is still running, kill
+          // the grain.
+          KJ_LOG(ERROR, "emergency grain shutdown due to storage loss", grainIdForLogging);
           subprocess.signal(SIGTERM);
         }).eagerlyEvaluate(nullptr)),
         subprocess(kj::mv(subprocessOptions)),
         processWaitTask(worker.subprocessSet.waitForSuccess(subprocess)),
         capnpSocket(kj::mv(capnpSocket)),
         rpcClient(*this->capnpSocket, kj::heap<SandstormCoreImpl>()),
-        persistentRegistration(worker.persistentRegistry, rpcClient.bootstrap()) {
+        persistentRegistration(worker.persistentRegistry, rpcClient.bootstrap()),
+        grainIdForLogging(kj::mv(grainIdForLoggingParam)) {
+    KJ_LOG(INFO, "starting grain", grainIdForLogging);
   }
 
   ~RunningGrain() {
+    KJ_LOG(INFO, "stopping grain", grainIdForLogging);
+
     auto newState = grainState->getRoot<GrainState>();
 
     // TODO(cleanup): Calling setInactive() doesn't actually remove the `active` pointer;
@@ -462,6 +506,8 @@ private:
   // Cap'n Proto RPC connection to the grain's supervisor.
 
   LocalPersistentRegistry::Registration persistentRegistration;
+
+  kj::String grainIdForLogging;
 };
 
 WorkerImpl::WorkerImpl(kj::AsyncIoContext& ioContext, sandstorm::SubprocessSet& subprocessSet,
@@ -532,7 +578,8 @@ kj::Promise<void> WorkerImpl::newGrain(NewGrainContext context) {
 
   sandstorm::Supervisor::Client supervisor = bootGrain(params.getPackage(),
       kj::mv(grainStateHolder), kj::mv(setter),
-      kj::mv(exclusiveVolume), params.getCommand(), true);
+      kj::mv(exclusiveVolume), params.getCommand(), true,
+      kj::heapString(params.getGrainIdForLogging()));
 
   supervisorPaf.fulfiller->fulfill(kj::cp(supervisor));
 
@@ -557,7 +604,8 @@ kj::Promise<void> WorkerImpl::restoreGrain(RestoreGrainContext context) {
 
   auto supervisor = bootGrain(
       params.getPackage(), kj::mv(grainStateHolder), setter,
-      params.getExclusiveVolume(), params.getCommand(), false);
+      params.getExclusiveVolume(), params.getCommand(), false,
+      kj::heapString(params.getGrainIdForLogging()));
 
   mutableGrainState.setActive(supervisor);
 
@@ -574,14 +622,15 @@ kj::Promise<void> WorkerImpl::restoreGrain(RestoreGrainContext context) {
 sandstorm::Supervisor::Client WorkerImpl::bootGrain(
     PackageInfo::Reader packageInfo, kj::Own<capnp::MessageBuilder> grainState,
     sandstorm::Assignable<GrainState>::Setter::Client grainStateSetter, Volume::Client grainVolume,
-    sandstorm::spk::Manifest::Command::Reader commandReader, bool isNew) {
+    sandstorm::spk::Manifest::Command::Reader commandReader, bool isNew,
+    kj::String grainIdForLogging) {
   // Copy command info from params, since params will no longer be valid when we return.
   CommandInfo command(commandReader);
 
   // Make sure the package is mounted, then start the grain.
   return packageMountSet.getPackage(packageInfo)
       .then([this,isNew,KJ_MVCAP(grainState),KJ_MVCAP(grainStateSetter),
-             KJ_MVCAP(command),KJ_MVCAP(grainVolume)]
+             KJ_MVCAP(command),KJ_MVCAP(grainVolume),KJ_MVCAP(grainIdForLogging)]
             (auto&& packageMount) mutable {
     // Create the NBD socketpair. The Supervisor will actually mount the NBD device (in its own
     // mount namespace) but we'll implement it in the Worker.
@@ -638,7 +687,8 @@ sandstorm::Supervisor::Client WorkerImpl::bootGrain(
     // Make the RunningGrain.
     auto grain = kj::heap<RunningGrain>(
         *this, thisCap(), kj::mv(grainState), kj::mv(grainStateSetter), kj::mv(nbdUserEnd),
-        kj::mv(grainVolume), kj::mv(capnpWorkerEnd), kj::mv(packageMount), kj::mv(options));
+        kj::mv(grainVolume), kj::mv(capnpWorkerEnd), kj::mv(packageMount), kj::mv(options),
+        kj::mv(grainIdForLogging));
 
     auto supervisor = grain->getSupervisor();
 
@@ -1071,6 +1121,25 @@ kj::MainBuilder::Validity MetaSupervisorMain::run() {
   sigaddset(&sigmask, SIGTERM);
   KJ_SYSCALL(sigprocmask(SIG_SETMASK, &sigmask, nullptr));
 
+  KJ_DEFER({
+    // Wait for any children that were reparented to us when the supervisor died. The supervisor
+    // should have already sent them SIGKILL but we need to make sure they've actually died before
+    // unmounting because they may hold a reference to the mount in their mount namespace, and we
+    // need to make sure the mount really is unmounted before we disconnect nbd.
+    for (;;) {
+      int status;
+      if (wait(&status) < 0) {
+        int error = errno;
+        if (error == ECHILD) {
+          // No more children.
+          break;
+        } else if (error != EINTR) {
+          KJ_FAIL_SYSCALL("wait()", error) { return; }
+        }
+      }
+    }
+  });
+
   // In order to ensure we get a chance to clean up after the supervisor exits, we run it in a
   // fork.
   sandstorm::Subprocess child([this]() -> int {
@@ -1116,23 +1185,6 @@ kj::MainBuilder::Validity MetaSupervisorMain::run() {
   }
 
   child.waitForSuccess();
-
-  // Wait for any children that were reparented to us when the supervisor died. The supervisor
-  // should have already sent them SIGKILL but we need to make sure they've actually died before
-  // unmounting because they may hold a reference to the mount in their mount namespace, and we
-  // need to make sure the mount really is unmounted before we disconnect nbd.
-  for (;;) {
-    int status;
-    if (wait(&status) < 0) {
-      int error = errno;
-      if (error == ECHILD) {
-        // No more children.
-        break;
-      } else if (error != EINTR) {
-        KJ_FAIL_SYSCALL("wait()", error);
-      }
-    }
-  }
 
   return true;
 }

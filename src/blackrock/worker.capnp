@@ -23,7 +23,8 @@ interface Worker {
 
   newGrain @0 (package :PackageInfo,
                command :Package.Manifest.Command,
-               storage :Storage.StorageFactory)
+               storage :Storage.StorageFactory,
+               grainIdForLogging :Text)
            -> (grain :Supervisor, grainState :Storage.OwnedAssignable(GrainState));
   # Start a new grain using the given package.
   #
@@ -35,7 +36,8 @@ interface Worker {
                    storage :Storage.StorageFactory,
                    grainState :GrainState,
                    exclusiveGrainStateSetter :Util.Assignable(GrainState).Setter,
-                   exclusiveVolume :Storage.Volume)
+                   exclusiveVolume :Storage.Volume,
+                   grainIdForLogging :Text)
                -> (grain :Supervisor);
   # Continue an existing grain.
   #

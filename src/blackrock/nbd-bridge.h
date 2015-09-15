@@ -25,6 +25,10 @@ public:
                    NbdAccessType access);
   // NBD requests are read from `socket` and implemented via `volume`.
 
+  void updateVolume(Volume::Client newVolume);
+  // Replaces the Volume capability with a new one, which must point to the exact same volume.
+  // Useful for recovering after disconnects, if the driver hasn't noticed the disconnect yet.
+
   kj::Promise<void> run();
   // Actually runs the loop. The promise resolves successfully when the device has been shut down.
   // It is extremely important to wait for this before destroying the NbdVolumeAdapter; failure

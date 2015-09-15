@@ -9,8 +9,6 @@ using persistent = import "/capnp/persistent.capnp".persistent;
 
 using Util = import "/sandstorm/util.capnp";
 using ByteStream = Util.ByteStream;
-using ClusterRpc = import "cluster-rpc.capnp";
-using StoredObjectId = ClusterRpc.StoredObjectId;
 
 using Timepoint = UInt64;
 # Nanoseconds since epoch.
