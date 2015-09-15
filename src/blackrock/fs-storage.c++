@@ -357,7 +357,7 @@ public:
     return storage.createTempFile();
   }
 
-  class Transaction {
+  class Transaction: private kj::ExceptionCallback {
   public:
     explicit Transaction(Journal& journal): journal(journal) {
       KJ_REQUIRE(!journal.txInProgress, "only one transaction is allowed at a time");
@@ -373,18 +373,6 @@ public:
         //   involved in the transaction (make them all start throwing DISCONNECTED, remove them
         //   from the already-open table).
         KJ_LOG(FATAL, "INCOMPLETE TRANSACTION; ABORTING");
-        auto stdex = std::current_exception();
-        if (stdex) {
-          try {
-            std::rethrow_exception(stdex);
-          } catch (const std::exception& exception) {
-            KJ_LOG(FATAL, exception.what());
-          } catch (...) {
-            KJ_LOG(FATAL, "unknown exception type");
-          }
-        } else {
-          KJ_LOG(FATAL, "no current exception", std::uncaught_exception());
-        }
         abort();
       }
     }
@@ -546,6 +534,24 @@ public:
 
     kj::Vector<Entry> entries;
     // The entries being written.
+
+    // We implement ExceptionCallback in order to log exceptions being thrown that are likely
+    // to force us to abort in the destructor. Unfortunately there is apparently no way to
+    // determine the exception being thrown *during* the destructor.
+
+    void onRecoverableException(kj::Exception&& exception) override {
+      if (journal.txInProgress) {
+        KJ_LOG(ERROR, "exception during transaction", exception);
+      }
+      kj::ExceptionCallback::onRecoverableException(kj::mv(exception));
+    }
+
+    void onFatalException(kj::Exception&& exception) override {
+      if (journal.txInProgress) {
+        KJ_LOG(ERROR, "exception during transaction", exception);
+      }
+      kj::ExceptionCallback::onFatalException(kj::mv(exception));
+    }
   };
 
 private:
@@ -1351,14 +1357,9 @@ protected:
       if (blocks != xattr.accountedBlockCount) {
         int64_t delta = blocks - xattr.accountedBlockCount;
         Journal::Transaction txn(journal);
-        KJ_IF_MAYBE(exception, kj::runCatchingExceptions([&]() {
-          xattr.accountedBlockCount = blocks;
-          factory->modifyTransitiveSize(id, delta, txn);
-          txn.commit();
-        })) {
-          KJ_LOG(FATAL, "EXCEPTION DURING TXN", *exception);
-          kj::throwFatalException(kj::mv(*exception));
-        }
+        xattr.accountedBlockCount = blocks;
+        factory->modifyTransitiveSize(id, delta, txn);
+        txn.commit();
       }
     } else {
       // We don't bother counting child size until we're committed to disk.
