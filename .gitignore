@@ -43,6 +43,7 @@ shell/packages/sandstorm-accounts-ui
 shell/packages/sandstorm-db
 shell/packages/sandstorm-email
 shell/packages/sandstorm-identicons
+shell/packages/sandstorm-permissions
 shell/packages/sandstorm-ui-applist
 shell/packages/sandstorm-ui-grainlist
 shell/packages/sandstorm-ui-topbar
