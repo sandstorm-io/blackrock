@@ -328,16 +328,17 @@ public:
     // Now the destructor of the thread will wait for the thread to exit.
   }
 
-  kj::AutoCloseFd openObject(ObjectId id, Xattr& xattr) {
+  kj::Maybe<kj::AutoCloseFd> openObject(ObjectId id, Xattr& xattr) {
     // Obtain a file descriptor and current attributes for the given object, as if all transactions
     // had already completed. `xattr` is filled in with the attributes.
 
     auto iter = cache.find(id);
     if (iter == cache.end()) {
-      auto result = KJ_ASSERT_NONNULL(storage.openObject(id), "object not found");
-      memset(&xattr, 0, sizeof(xattr));
-      KJ_SYSCALL(fgetxattr(result, Xattr::NAME, &xattr, sizeof(xattr)));
-      return result;
+      return storage.openObject(id).map([&](kj::AutoCloseFd&& result) {
+        memset(&xattr, 0, sizeof(xattr));
+        KJ_SYSCALL(fgetxattr(result, Xattr::NAME, &xattr, sizeof(xattr)));
+        return kj::mv(result);
+      });
     } else {
       xattr = iter->second.xattr;
       if (iter->second.stagingId != 0) {
@@ -345,11 +346,9 @@ public:
           return kj::mv(*fd);
         }
       }
-      // TODO(soon): This assert has been observed firing sometimes when fs-storage-test is run.
-      //   However, it's been a while since I last saw it, and I can't reproduce the problem
-      //   anymore, so maybe it was fixed?
-      return KJ_ASSERT_NONNULL(storage.openObject(id),
-          "object is in cache but file not found on disk?");
+      // Note: Even though it's in cache, the file may not be present on disk if it was recently
+      //   deleted.
+      return storage.openObject(id);
     }
   }
 
@@ -2121,7 +2120,7 @@ auto FilesystemStorage::ObjectFactory::openObject(ObjectKey key)
 
   // Not in cache. Create it.
   Xattr xattr;
-  auto fd = journal.openObject(id, xattr);
+  auto fd = KJ_ASSERT_NONNULL(journal.openObject(id, xattr), "object not found");
 
   switch (xattr.type) {
 #define HANDLE_TYPE(tag, type) \
@@ -2166,7 +2165,10 @@ void FilesystemStorage::ObjectFactory::modifyTransitiveSize(
   auto iter = objectCache.find(id);
   if (iter == objectCache.end()) {
     // Object not loaded. Edit directly.
-    journal.openObject(id, scratchXattr);
+    if (journal.openObject(id, scratchXattr) == nullptr) {
+      // Apparently the object has been deleted. There's no use trying to modify it or its parents.
+      return;
+    }
     xattr = &scratchXattr;
   } else {
     xattr = &iter->second->getXattrRef();

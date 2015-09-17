@@ -14,6 +14,7 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include "fs-storage-test.capnp.h"
+#undef BLOCK_SIZE
 
 namespace blackrock {
 namespace {
@@ -232,6 +233,75 @@ KJ_TEST("delete some children") {
   // Expect parent's size wasn't unexpectedly modified.
   KJ_EXPECT(root.getStorageUsageRequest().send().wait(env.io.waitScope).getTotalBytes() == 4096*2);
 }
+
+// Current state of storage:
+//
+// root = (text = "quux", sub1 = x)
+// x = (text = "baz")
+
+KJ_TEST("delete volume child while still writing") {
+   StorageTestFixture env;
+
+  auto root = env.getRoot("root");
+
+  auto main = sandstorm::raiiOpenAt(testTempdir.fd, "main", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+  auto deathRow = sandstorm::raiiOpenAt(testTempdir.fd, "death-row",
+      O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+
+  KJ_EXPECT(sandstorm::listDirectoryFd(main).size() == 2);
+  KJ_EXPECT(sandstorm::listDirectoryFd(deathRow).size() == 0);
+
+  // Set root.sub2 to (volume = (some new volume)).
+  OwnedVolume::Client volume = ({
+    auto volume = env.factory.newVolumeRequest().send().wait(env.io.waitScope).getVolume();
+
+    auto response = root.getRequest().send().wait(env.io.waitScope);
+    auto req = response.getSetter().setRequest();
+    req.setValue(response.getValue());
+    req.getValue().setSub2(env.newObject([&](auto value) {
+      value.setText("deleteme");
+      value.setVolume(volume);
+    }));
+
+    req.send().wait(env.io.waitScope);
+    volume;
+  });
+
+  {
+    auto response = root.getRequest().send().wait(env.io.waitScope);
+    auto req = response.getSetter().setRequest();
+    auto value = req.initValue();
+    value.setText("grault");
+    value.setSub1(response.getValue().getSub1());
+    // don't set sub2
+    req.send().wait(env.io.waitScope);
+
+    uint64_t size = root.getStorageUsageRequest().send().wait(env.io.waitScope).getTotalBytes();
+    KJ_EXPECT(size == 4096 * 2, size);
+  };
+
+  // Death row is cleaned up asynchronously, so wait a bit before checking.
+  env.io.provider->getTimer().afterDelay(10 * kj::MILLISECONDS).wait(env.io.waitScope);
+
+  // Verify that tree was deleted. We'll need to give the death-row deleter thread some time, too.
+  KJ_EXPECT(sandstorm::listDirectoryFd(main).size() == 2);
+  KJ_EXPECT(sandstorm::listDirectoryFd(deathRow).size() == 0);
+
+  // Try writing to our volume. It takes several writes before a size update is triggered, which
+  // used to crash.
+  for (auto i: kj::range(0, 1024)) {
+    auto req = volume.writeRequest();
+    req.setBlockNum(i * 8);
+    auto data = req.initData(Volume::BLOCK_SIZE * 8);
+    memset(data.begin(), 12, data.size());
+    req.send().wait(env.io.waitScope);
+  }
+
+  // Expect parent's size wasn't unexpectedly modified.
+  KJ_EXPECT(root.getStorageUsageRequest().send().wait(env.io.waitScope).getTotalBytes() == 4096*2);
+}
+
+// =======================================================================================
 
 struct TestByteStream final: public sandstorm::ByteStream::Server, public kj::Refcounted {
   kj::Promise<void> write(WriteContext context) override {
