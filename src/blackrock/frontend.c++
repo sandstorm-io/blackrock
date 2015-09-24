@@ -24,6 +24,10 @@ public:
       : frontend(frontend), timer(timer) {}
 
 protected:
+  kj::Promise<void> ping(PingContext context) override {
+    return kj::READY_NOW;
+  }
+
   kj::Promise<void> startGrain(StartGrainContext context) override {
     auto params = context.getParams();
     auto packageId = params.getPackageId();
