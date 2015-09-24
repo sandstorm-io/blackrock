@@ -9,9 +9,6 @@
 #
 # All objects are stored in a massive directory with filenames like:
 #     o<objectId>: object content
-#     c<objectId>: list of object IDs that should be deleted if this object is deleted. This list
-#                  is generally append-only and so can contain IDs that no longer exist; those
-#                  should be ignored when deleting.
 #
 # In all cases above, an <id> is a 16-byte value base64-encoded to 22 bytes (with '-' and '_' as
 # digits 62 and 63). Note that ext4 directory entries are 8 + name_len bytes, rounded up to a
