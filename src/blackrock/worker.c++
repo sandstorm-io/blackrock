@@ -18,6 +18,7 @@
 #include <sys/wait.h>
 #include <errno.h>
 #include <sandstorm/backup.h>
+#include "bundle.h"
 
 #include <sys/mount.h>
 #undef BLOCK_SIZE // grr, mount.h
@@ -766,6 +767,9 @@ protected:
       results.setAppId(inResults.getAppId());
       results.setManifest(inResults.getManifest());
       results.setVolume(volume);
+      if (inResults.hasAuthorPgpKeyFingerprint()) {
+        results.setAuthorPgpKeyFingerprint(inResults.getAuthorPgpKeyFingerprint());
+      }
       auto promises = kj::heapArrayBuilder<kj::Promise<void>>(2);
       promises.add(kj::mv(volumeRunTask));
       promises.add(kj::mv(subprocess));
@@ -1225,12 +1229,14 @@ kj::MainBuilder::Validity UnpackMain::run() {
   Mount mount(device.getPath(), "/mnt", MS_NOATIME, "discard");
   KJ_SYSCALL(mkdir("/mnt/spk", 0755));
 
-  // We unpack packages with uid 1/gid 1: IDs that are not zero, but are also not used by apps.
-  KJ_SYSCALL(chown("/mnt/spk", 1, 1));
-  seteugidNoHang(1, 1);
-  KJ_DEFER(seteugidNoHang(0, 0));
+  kj::String appId = ({
+    // We unpack packages with uid 1/gid 1: IDs that are not zero, but are also not used by apps.
+    KJ_SYSCALL(chown("/mnt/spk", 1, 1));
+    seteugidNoHang(1, 1);
+    KJ_DEFER(seteugidNoHang(0, 0));
 
-  kj::String appId = sandstorm::unpackSpk(STDIN_FILENO, "/mnt/spk", "/tmp");
+    sandstorm::unpackSpk(STDIN_FILENO, "/mnt/spk", "/tmp");
+  });
 
   // Read manifest.
   capnp::ReaderOptions manifestLimits;
@@ -1241,8 +1247,13 @@ kj::MainBuilder::Validity UnpackMain::run() {
   // Write result to stdout.
   capnp::MallocMessageBuilder message;
   auto root = message.getRoot<Worker::PackageUploadStream::GetResultResults>();
+  auto manifest = reader.getRoot<sandstorm::spk::Manifest>();
   root.setAppId(appId);
-  root.setManifest(reader.getRoot<sandstorm::spk::Manifest>());
+  root.setManifest(manifest);
+  KJ_IF_MAYBE(fp, checkPgpSignatureInBundle(appId, manifest.getMetadata())) {
+    root.setAuthorPgpKeyFingerprint(*fp);
+  }
+
   capnp::writeMessageToFd(STDOUT_FILENO, message);
 
   return true;

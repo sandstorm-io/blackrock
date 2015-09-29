@@ -54,11 +54,14 @@ interface Worker {
   # Initiate upload of a package, unpacking it into a fresh Volume.
 
   interface PackageUploadStream extends(Util.ByteStream) {
-    getResult @0 () -> (appId :Text, manifest :Package.Manifest, volume :Storage.OwnedVolume);
+    getResult @0 () -> (appId :Text, manifest :Package.Manifest, volume :Storage.OwnedVolume,
+                        authorPgpKeyFingerprint :Text);
     # Waits until `ByteStream.done()` is called, then returns:
     #
     # `appId`: The verified application ID string, as produced by the `spk` tool.
     # `manifest`: The parsed package manifest.
+    # `volume`: The new Volume containing the unpacked app.
+    # `authorPgpKeyFingerprint`: If the app was PGP-signed, the author's key fingerprint.
   }
 
   unpackBackup @3 (data :Storage.Blob, storage :Storage.StorageFactory)

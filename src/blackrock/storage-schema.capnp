@@ -39,6 +39,7 @@ struct PackageStorage {
   volume @0 :OwnedVolume;
   appId @1 :Text;
   manifest @2 :Package.Manifest;
+  authorPgpKeyFingerprint @3 :Text;
 }
 
 struct GrainState {
