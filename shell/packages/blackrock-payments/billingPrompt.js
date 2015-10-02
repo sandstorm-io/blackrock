@@ -135,7 +135,7 @@ function clickPlanHelper(context, ev) {
   var template = Template.instance();
   var planName = context._id;
 
-  if (context.isCurrent && Meteor.user().plan === planName) {
+  if (context.isCurrent && ((Meteor.user().plan || "free") === planName)) {
     // Clicked on current plan. Treat as dismiss.
     template.data.onComplete(false);
     return;
