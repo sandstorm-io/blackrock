@@ -186,6 +186,8 @@ var helpers = {
   },
   checkoutData: function () {
     var title = this._id.charAt(0).toUpperCase() + this._id.slice(1);
+    var primaryEmail = _.findWhere(SandstormDb.getUserEmails(Meteor.user()), {primary: true});
+    if (!primaryEmail) return;
 
     // Firefox will apparently automatically do some URI encoding if we don't do it ourselves.
     // Other browsers won't. Meanwhile Firefox used to also do some automatic decoding on the
@@ -197,7 +199,7 @@ var helpers = {
       panelLabel: "{{amount}} / Month",
       id: Template.instance().id,
       planName: this._id,
-      email: Meteor.user().profile.email
+      email: primaryEmail.email,
     }));
   },
   plans: function () {
