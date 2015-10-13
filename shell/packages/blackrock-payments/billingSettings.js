@@ -108,10 +108,12 @@ Template.billingSettings.helpers({
     var template = Template.instance();
     var data = StripeCustomerData.findOne();
     if (!data) return;
+    var primaryEmail = _.findWhere(SandstormDb.getUserEmails(Meteor.user()), {primary: true});
+    if (!primaryEmail) return;
     return encodeURIComponent(JSON.stringify({
       name: 'Sandstorm Oasis',
       panelLabel: "Add Card",
-      email: Meteor.user().profile.email,
+      email: primaryEmail.email,
       id: template.id
     }));
   },
