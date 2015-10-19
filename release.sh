@@ -47,6 +47,7 @@ shift
 
 DRY_RUN=no
 CONFIRM_EACH=no
+HOTFIX=no
 
 while [ $# -gt 0 ]; do
   case $1 in
@@ -55,6 +56,9 @@ while [ $# -gt 0 ]; do
       ;;
     -m )
       CONFIRM_EACH=yes
+      ;;
+    -h )
+      HOTFIX=yes
       ;;
     * )
       echo "unknown arg: $1" >&2
@@ -71,17 +75,17 @@ gce() {
 doit() {
   local ANSWER
   if [ "$CONFIRM_EACH" != "no" ]; then
-    printf "\033[0;33m=== RUN? $* ===\033[0m"
+    printf "\033[0;33m=== RUN? %s ===\033[0m" "$*"
     read -sn 1 ANSWER
     if [ -z "$ANSWER" ]; then
       printf "\r\033[K"
     else
-      printf "\033[0;31m\r=== SKIPPED: $* ===\033[0m\n"
+      printf "\033[0;31m\r=== SKIPPED: %s ===\033[0m\n" "$*"
       return
     fi
   fi
 
-  printf "\033[0;35m=== $* ===\033[0m\n"
+  printf "\033[0;35m=== %s ===\033[0m\n" "$*"
 
   if [ "$DRY_RUN" = "no" ]; then
     "$@"
@@ -90,6 +94,25 @@ doit() {
 
 doit make clean BUILD=$BUILD
 doit make BUILD=$BUILD
+
+if [ "$HOTFIX" = "yes" ]; then
+  FRONTENDS=$(gce instances list --format=text | grep '^name:' | sed -e 's/^name: *//g' | grep '^frontend' | grep -v 'frontend0$')
+  FRONTENDS="$FRONTENDS frontend0"
+
+  for FRONTEND in $FRONTENDS; do
+    doit gce copy-files blackrock.tar.xz "root@$FRONTEND:/root"
+  done
+
+  for FRONTEND in $FRONTENDS; do
+    doit gce ssh "root@$FRONTEND" --command 'cd /root && rm -rf blackrock /blackrock/bundle.new && tar Jxof blackrock.tar.xz && mv blackrock/bundle /blackrock/bundle.new && cd /blackrock && mv bundle bundle.$(date -u +%Y%m%d-%H%M%S) && mv bundle.new bundle'
+  done
+
+  for FRONTEND in $FRONTENDS; do
+    doit gce ssh "root@$FRONTEND" --command 'kill $(pidof node)'
+  done
+
+  exit 0
+fi
 
 # Keep unstripped binary for debugging.
 mkdir -p dbg
