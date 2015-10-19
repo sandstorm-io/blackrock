@@ -20,82 +20,102 @@ public:
   kj::MainFunc getMain() {
     return kj::MainBuilder(context, "Blackrock",
           "Tool for probing the contents of Blackrock storage.")
-        .addOption({"r2k"}, KJ_BIND_METHOD(*this, rootToKey), "root to key")
-        .addOption({"k2i"}, KJ_BIND_METHOD(*this, keyToId), "key to id")
-        .addOption({"i2f"}, KJ_BIND_METHOD(*this, idToFilename), "id to filename")
-        .addOption({"user"}, KJ_BIND_METHOD(*this, dumpStoredUser), "dump user account")
-        .callAfterParsing(KJ_BIND_METHOD(*this, done))
+        .expectArg("<userId>", KJ_BIND_METHOD(*this, setUserId))
+        .expectArg("<grainId>", KJ_BIND_METHOD(*this, setGrainId))
+        .callAfterParsing(KJ_BIND_METHOD(*this, run))
         .build();
   }
 
 private:
   kj::ProcessContext& context;
-  kj::Array<byte> input;
-  bool read = false;
+  kj::StringPtr userId;
+  kj::StringPtr grainId;
 
-  void ensureRead() {
-    if (!read) {
-      input = kj::heapArray(sandstorm::readAll(STDIN_FILENO).asBytes());
-      read = true;
+  typedef FilesystemStorage::ObjectId ObjectId;
+  typedef FilesystemStorage::ObjectKey ObjectKey;
+
+  class RawClientHook: public capnp::ClientHook, public kj::Refcounted {
+  public:
+    explicit RawClientHook(StoredObject::CapDescriptor::Reader descriptor)
+        : descriptor(descriptor) {}
+
+    StoredObject::CapDescriptor::Reader descriptor;
+
+    capnp::Request<capnp::AnyPointer, capnp::AnyPointer> newCall(
+        uint64_t interfaceId, uint16_t methodId, kj::Maybe<capnp::MessageSize> sizeHint) override {
+      KJ_UNIMPLEMENTED("RawClientHook doesn't implement anything");
     }
+
+    VoidPromiseAndPipeline call(uint64_t interfaceId, uint16_t methodId,
+                                kj::Own<capnp::CallContextHook>&& context) override {
+      KJ_UNIMPLEMENTED("RawClientHook doesn't implement anything");
+    }
+
+    kj::Maybe<ClientHook&> getResolved() override {
+      KJ_UNIMPLEMENTED("RawClientHook doesn't implement anything");
+    }
+
+    kj::Maybe<kj::Promise<kj::Own<ClientHook>>> whenMoreResolved() override {
+      KJ_UNIMPLEMENTED("RawClientHook doesn't implement anything");
+    }
+
+    kj::Own<ClientHook> addRef() override {
+      return kj::addRef(*this);
+    }
+
+    const void* getBrand() override {
+      return nullptr;
+    }
+  };
+
+  ObjectKey getUser(kj::StringPtr userId) {
+    capnp::StreamFdMessageReader reader(sandstorm::raiiOpen(
+        kj::str("roots/user-", userId), O_RDONLY));
+    return reader.getRoot<StoredRoot>().getKey();
   }
 
-  bool rootToKey() {
-    ensureRead();
-    capnp::FlatArrayMessageReader reader(
-        kj::ArrayPtr<capnp::word>(reinterpret_cast<capnp::word*>(input.begin()),
-                                  input.size() * sizeof(capnp::word)));
-    FilesystemStorage::ObjectKey key(reader.getRoot<StoredRoot>().getKey());
-    input = kj::heapArray(kj::arrayPtr(&key, 1).asBytes());
+  ObjectKey getGrain(ObjectKey user, kj::StringPtr grainId) {
+    auto fd = sandstorm::raiiOpen(kj::str("main/", ObjectId(user).filename('o').begin()), O_RDONLY);
+
+    auto children = ({
+      capnp::StreamFdMessageReader reader(fd.get());
+      KJ_MAP(c, reader.getRoot<StoredChildIds>().getChildren()) -> ObjectId { return c; };
+    });
+
+    capnp::StreamFdMessageReader reader(fd.get());
+    auto object = reader.getRoot<StoredObject>();
+
+    capnp::ReaderCapabilityTable capTable(KJ_MAP(cap, object.getCapTable())
+        -> kj::Maybe<kj::Own<capnp::ClientHook>> {
+      return kj::Own<capnp::ClientHook>(kj::refcounted<RawClientHook>(cap));
+    });
+
+    auto imbued = capTable.imbue(object);
+
+    for (auto grain: imbued.getPayload().getAs<AccountStorage>().getGrains()) {
+      if (grain.getId() == grainId) {
+        auto descriptor = capnp::ClientHook::from(grain.getState())
+            .downcast<RawClientHook>()->descriptor;
+        KJ_ASSERT(descriptor.isChild(), descriptor);
+        return descriptor.getChild();
+      }
+    }
+
+    KJ_FAIL_REQUIRE("user had no such grain");
+  }
+
+  bool setUserId(kj::StringPtr arg) {
+    userId = arg;
     return true;
   }
 
-  bool keyToId() {
-    ensureRead();
-    KJ_ASSERT(input.size() == sizeof(FilesystemStorage::ObjectKey));
-    FilesystemStorage::ObjectId id =
-        *reinterpret_cast<FilesystemStorage::ObjectKey*>(input.begin());
-    input = kj::heapArray(kj::arrayPtr(&id, 1).asBytes());
+  bool setGrainId(kj::StringPtr arg) {
+    grainId = arg;
     return true;
   }
 
-  bool idToFilename() {
-    ensureRead();
-    KJ_ASSERT(input.size() == sizeof(FilesystemStorage::ObjectId));
-    auto fn = reinterpret_cast<FilesystemStorage::ObjectId*>(input.begin())->filename('o');
-    input = kj::heapArray(kj::StringPtr(fn.begin()).asBytes());
-    return true;
-  }
-
-  bool dumpStoredUser() {
-    ensureRead();
-    kj::ArrayPtr<const capnp::word> words(reinterpret_cast<capnp::word*>(input.begin()),
-                                          input.size() * sizeof(capnp::word));
-    capnp::FlatArrayMessageReader reader(words);
-    auto children = KJ_MAP(i, reader.getRoot<StoredChildIds>().getChildren()) {
-      return kj::heapString(FilesystemStorage::ObjectId(i).filename('o').begin());
-    };
-    KJ_LOG(WARNING, children);
-
-    words = kj::arrayPtr(reader.getEnd(), words.end());
-    capnp::FlatArrayMessageReader reader2(words);
-    auto obj = reader2.getRoot<StoredObject>();
-    capnp::ReaderCapabilityTable capTable(
-        KJ_MAP(dummy, obj.getCapTable()) -> kj::Maybe<kj::Own<capnp::ClientHook>> {
-          return capnp::newBrokenCap("dummy cap");
-        });
-    KJ_LOG(WARNING, capnp::prettyPrint(capTable.imbue(obj)));
-
-    auto account = obj.getPayload().getAs<AccountStorage>();
-    KJ_LOG(WARNING, capnp::prettyPrint(account));
-    return true;
-  }
-
-  bool done() {
-    ensureRead();
-    kj::FdOutputStream(STDOUT_FILENO).write(input.begin(), input.size());
-    if (isatty(STDOUT_FILENO)) kj::FdOutputStream(STDOUT_FILENO).write("\n", 1);
-    return true;
+  bool run() {
+    context.exitInfo(ObjectId(getGrain(getUser(userId), grainId)).filename('o').begin());
   }
 };
 
