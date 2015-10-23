@@ -35,6 +35,7 @@ public:
   class Transaction {
   public:
     explicit Transaction(JournalLayer& journal);
+    ~Transaction() noexcept(false);
 
     kj::Own<BlobLayer::Object> wrap(Object& object);
     kj::Own<BlobLayer::Temporary> wrap(RecoverableTemporary& content);
@@ -80,7 +81,6 @@ public:
   private:
     class LockedObject;
     class LockedTemporary;
-    class Committer;
 
     JournalLayer& journal;
     kj::Vector<kj::Own<LockedObject>> objects;
@@ -190,6 +190,7 @@ private:
   BlobLayer* blobLayer;
   kj::Own<BlobLayer::Temporary> journalFile;
   uint64_t journalPosition = 0;
+  uint64_t stagingIdCounter = 1;
   kj::Promise<void> writeQueue = nullptr;
   std::unordered_map<ObjectId, Object*, ObjectId::Hash> openObjects;
 };

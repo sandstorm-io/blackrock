@@ -76,93 +76,6 @@ void JournalLayer::RecoverableTemporary::update(
 
 // =======================================================================================
 
-class JournalLayer::Transaction::Committer {
-public:
-  void createObject(kj::Own<JournalLayer::Object> object,
-                    Xattr xattr, kj::Own<BlobLayer::Temporary> content);
-  void updateObject(kj::Own<JournalLayer::Object> object,
-                    Xattr replacementXattr, kj::Own<BlobLayer::Temporary> replacementContent);
-  void updateObjectXattr(kj::Own<JournalLayer::Object> object, Xattr replacementXattr);
-  void removeObject(kj::Own<JournalLayer::Object> object);
-
-  void createTemporary(kj::Own<JournalLayer::RecoverableTemporary> temporary,
-                       TemporaryXattr xattr, kj::Own<BlobLayer::Temporary> content);
-  void updateTemporary(kj::Own<JournalLayer::RecoverableTemporary> temporary,
-                       TemporaryXattr replacementXattr,
-                       kj::Own<BlobLayer::Temporary> replacementContent);
-  void updateTemporaryXattr(kj::Own<JournalLayer::RecoverableTemporary> temporary,
-                         TemporaryXattr replacementXattr);
-  void removeTemporary(kj::Own<JournalLayer::RecoverableTemporary> temporary);
-
-  void execute(BlobLayer& blobLayer) {
-    // Actually executes the transaction. Called after the journal entries have been synced to
-    // disk. Note that execute() only guarantees that the changes have been pushed to the kernel;
-    // it does not guarantee that these changes have themselves been flushed to disk. The journal
-    // entry should not be removed from the journal until an fssync() (or full sync()) has taken
-    // place (noting that there is no urgency to do this).
-
-    for (EntryContext& context: entries) {
-      JournalEntry& entry = context.entry;
-      switch (entry.type) {
-        case JournalEntry::Type::CREATE_OBJECT:
-          context.object->inner = blobLayer.createObject(
-              entry.object.id, entry.object.xattr, kj::mv(context.replacementContent));
-          break;
-
-        case JournalEntry::Type::UPDATE_OBJECT:
-          context.object->inner->overwrite(entry.object.xattr, kj::mv(context.replacementContent));
-          break;
-
-        case JournalEntry::Type::UPDATE_XATTR:
-          context.object->inner->setXattr(entry.object.xattr);
-          break;
-
-        case JournalEntry::Type::DELETE_OBJECT:
-          context.object->inner->remove();
-          break;
-
-        case JournalEntry::Type::CREATE_TEMPORARY:
-          context.replacementContent->setRecoveryId(entry.temporary.id, entry.temporary.xattr);
-          context.temporary->inner = kj::mv(context.replacementContent);
-          break;
-
-        case JournalEntry::Type::UPDATE_TEMPORARY:
-          context.temporary->inner->overwrite(entry.temporary.xattr,
-              kj::mv(context.replacementContent));
-          break;
-
-        case JournalEntry::Type::UPDATE_TEMPORARY_XATTR:
-          context.temporary->inner->setXattr(entry.temporary.xattr);
-          break;
-
-        case JournalEntry::Type::DELETE_TEMPORARY:
-          // Just release the temporary!
-          context.temporary = nullptr;
-          break;
-      }
-    }
-  }
-
-  kj::Array<JournalEntry> getForWrite() {
-    return KJ_MAP(e, entries) { return e.entry; };
-  }
-
-private:
-  struct EntryContext {
-    JournalEntry entry;
-
-    kj::Own<JournalLayer::Object> object;
-    kj::Own<JournalLayer::RecoverableTemporary> temporary;
-    // Exactly one of the above is filled in, depending on the entry type.
-
-    kj::Own<BlobLayer::Temporary> replacementContent;
-  };
-
-  kj::Vector<EntryContext> entries;
-};
-
-// =======================================================================================
-
 class JournalLayer::Transaction::LockedObject final
     : public BlobLayer::Object, public kj::Refcounted {
 public:
@@ -188,28 +101,72 @@ public:
     object->locked = false;
   }
 
-  void commit(Committer& committer) {
+  kj::Maybe<JournalEntry> getJournalEntry(uint64_t stagingId) {
+    // Write a journal entry for this object's changes. If a temporary needs to be staged, do so
+    // and assign it `stagingId`.
+
+    if (changeCount == 0 || (created && removed)) return nullptr;
+
+    JournalEntry entry;
+    memset(&entry, 0, sizeof(entry));
+
+    KJ_IF_MAYBE(c, newContent) {
+      c->get()->setRecoveryId(RecoveryId(RecoveryType::STAGING, stagingId));
+      entry.stagingId = stagingId;
+    }
+
+    entry.object.id = object->id;
+    entry.object.xattr = getXattr();
+
+    if (created) {
+      entry.type = JournalEntry::Type::CREATE_OBJECT;
+    } else if (removed) {
+      entry.type = JournalEntry::Type::DELETE_OBJECT;
+    } else if (newContent == nullptr) {
+      entry.type = JournalEntry::Type::UPDATE_XATTR;
+    } else {
+      entry.type = JournalEntry::Type::UPDATE_OBJECT;
+    }
+
+    return entry;
+  }
+
+  kj::Function<void(BlobLayer& blobLayer)> commit() {
     // Commit to the changes made to this object. That is:
     // 1. Update the journal-layer object to reflect these changes.
-    // 2. Add journal entries reflecting the changes to `op`.
-    // 3. Add callbacks to `op` to be called after the journal is synced to disk. Note: These
-    //    callbacks will be called AFTER deleting the LockedObject, but are guaranteed to be
-    //    called in-order with other transactions.
+    // 2. Return a function which should be called later to actually execute the changes. This
+    //    function will be called once the journal entry for this change has been synced to disk.
+    //
+    // No other methods of LockedObject will be called after commit(), and the LockedObject will
+    // be destroyed before the returned callback is called, therefore the callback should take
+    // ownership of anything it needs.
 
-    if (changeCount == 0 || (created && removed)) return;
+    if (changeCount == 0 || (created && removed)) return [](BlobLayer& blobLayer) {};
 
     object->update(getXattr(),
         newContent.map([](auto& t) -> BlobLayer::Content& { return t->getContent(); }),
         changeCount);
 
+    Xattr xattr = getXattr();
+
     if (created) {
-      committer.createObject(kj::mv(object), getXattr(), kj::mv(KJ_ASSERT_NONNULL(newContent)));
+      auto content = kj::mv(KJ_ASSERT_NONNULL(newContent));
+      return [KJ_MVCAP(object),KJ_MVCAP(content),xattr](BlobLayer& blobLayer) mutable {
+        object->inner = blobLayer.createObject(object->id, xattr, kj::mv(content));
+      };
     } else if (removed) {
-      committer.removeObject(kj::mv(object));
+      return [KJ_MVCAP(object)](BlobLayer& blobLayer) mutable {
+        object->inner->remove();
+      };
     } else KJ_IF_MAYBE(c, newContent) {
-      committer.updateObject(kj::mv(object), getXattr(), kj::mv(*c));
+      auto content = kj::mv(*c);
+      return [KJ_MVCAP(object),KJ_MVCAP(content),xattr](BlobLayer& blobLayer) mutable {
+        object->inner->overwrite(xattr, kj::mv(content));
+      };
     } else {
-      committer.updateObjectXattr(kj::mv(object), getXattr());
+      return [KJ_MVCAP(object),xattr](BlobLayer& blobLayer) mutable {
+        object->inner->setXattr(xattr);
+      };
     }
   }
 
@@ -283,28 +240,78 @@ public:
     object->locked = false;
   }
 
-  void commit(Committer& committer) {
-    // Commit to the changes made to this temporary. That is:
-    // 1. Update the journal-layer object to reflect these changes.
-    // 2. Add journal entries reflecting the changes to `op`.
-    // 3. Add callbacks to `op` to be called after the journal is synced to disk. Note: These
-    //    callbacks will be called AFTER deleting the LockedObject, but are guaranteed to be
-    //    called in-order with other transactions.
+  void remove() {
+    ++changeCount;
+    removed = true;
+  }
 
-    if (changeCount == 0 || (created && removed)) return;
+  kj::Maybe<JournalEntry> getJournalEntry(uint64_t stagingId) {
+    // Write a journal entry for this object's changes. If a temporary needs to be staged, do so
+    // and assign it `stagingId`.
+
+    if (changeCount == 0 || (created && removed)) return nullptr;
+
+    JournalEntry entry;
+    memset(&entry, 0, sizeof(entry));
+
+    KJ_IF_MAYBE(c, newContent) {
+      c->get()->setRecoveryId(RecoveryId(RecoveryType::STAGING, stagingId));
+      entry.stagingId = stagingId;
+    }
+
+    entry.temporary.id = object->id;
+    entry.temporary.xattr = getXattr();
+
+    if (created) {
+      entry.type = JournalEntry::Type::CREATE_TEMPORARY;
+    } else if (removed) {
+      entry.type = JournalEntry::Type::DELETE_TEMPORARY;
+    } else if (newContent == nullptr) {
+      entry.type = JournalEntry::Type::UPDATE_TEMPORARY_XATTR;
+    } else {
+      entry.type = JournalEntry::Type::UPDATE_TEMPORARY;
+    }
+
+    return entry;
+  }
+
+  kj::Function<void(BlobLayer&)> commit() {
+    // Commit to the changes made to this object. That is:
+    // 1. Update the journal-layer object to reflect these changes.
+    // 2. Return a function which should be called later to actually execute the changes. This
+    //    function will be called once the journal entry for this change has been synced to disk.
+    //
+    // No other methods of LockedObject will be called after commit(), and the LockedObject will
+    // be destroyed before the returned callback is called, therefore the callback should take
+    // ownership of anything it needs.
+
+    if (changeCount == 0 || (created && removed)) return [](BlobLayer& blobLayer) {};
 
     object->update(getXattr(),
         newContent.map([](auto& t) -> BlobLayer::Content& { return t->getContent(); }),
         changeCount);
 
+    TemporaryXattr xattr = getXattr();
+
     if (created) {
-      committer.createTemporary(kj::mv(object), getXattr(), kj::mv(KJ_ASSERT_NONNULL(newContent)));
+      auto content = kj::mv(KJ_ASSERT_NONNULL(newContent));
+      return [KJ_MVCAP(object),KJ_MVCAP(content),xattr](BlobLayer& blobLayer) mutable {
+        content->setRecoveryId(object->id, xattr);
+        object->inner = kj::mv(content);
+      };
     } else if (removed) {
-      committer.removeTemporary(kj::mv(object));
+      return [KJ_MVCAP(object)](BlobLayer& blobLayer) mutable {
+        // Nothing to do here: just release the temporary.
+      };
     } else KJ_IF_MAYBE(c, newContent) {
-      committer.updateTemporary(kj::mv(object), getXattr(), kj::mv(*c));
+      auto content = kj::mv(*c);
+      return [KJ_MVCAP(object),KJ_MVCAP(content),xattr](BlobLayer& blobLayer) mutable {
+        object->inner->overwrite(xattr, kj::mv(content));
+      };
     } else {
-      committer.updateTemporaryXattr(kj::mv(object), getXattr());
+      return [KJ_MVCAP(object),xattr](BlobLayer& blobLayer) mutable {
+        object->inner->setXattr(xattr);
+      };
     }
   }
 
@@ -356,6 +363,7 @@ private:
 // =======================================================================================
 
 JournalLayer::Transaction::Transaction(JournalLayer &journal): journal(journal) {}
+JournalLayer::Transaction::~Transaction() noexcept(false) {}
 
 kj::Own<BlobLayer::Object> JournalLayer::Transaction::wrap(Object& object) {
   auto result = kj::refcounted<LockedObject>(kj::addRef(object));
@@ -389,26 +397,36 @@ kj::Promise<void> JournalLayer::Transaction::commit(
     kj::Maybe<kj::Own<RecoverableTemporary>> tempToConsume) {
   kj::Promise<void> result = nullptr;
 
+  KJ_IF_MAYBE(t, tempToConsume) {
+    auto wrapper = kj::refcounted<LockedTemporary>(kj::mv(*t));
+    wrapper->remove();
+    temporaries.add(kj::mv(wrapper));
+  }
+
   KJ_IF_MAYBE(exception, kj::runCatchingExceptions([&]() {
-    Committer committer;
+    kj::Vector<JournalEntry> entries(objects.size() + temporaries.size());
+    kj::Vector<kj::Function<void(BlobLayer&)>> executeCallbacks(
+        objects.size() + temporaries.size());
 
     // Build the transaction.
     for (auto& object: objects) {
-      object->commit(committer);
+      KJ_IF_MAYBE(entry, object->getJournalEntry(journal.stagingIdCounter++)) {
+        entries.add(*entry);
+      }
+      executeCallbacks.add(object->commit());
     }
     for (auto& temp: temporaries) {
-      temp->commit(committer);
-    }
-    KJ_IF_MAYBE(t, tempToConsume) {
-      committer.removeTemporary(kj::mv(*t));
+      KJ_IF_MAYBE(entry, temp->getJournalEntry(journal.stagingIdCounter++)) {
+        entries.add(*entry);
+      }
+      executeCallbacks.add(temp->commit());
     }
 
     // Write to the journal.
-    auto data = committer.getForWrite();
     auto& journalContent = journal.journalFile->getContent();
-    journalContent.write(journal.journalPosition, data.asBytes());
+    journalContent.write(journal.journalPosition, entries.asPtr().asBytes());
     uint64_t oldPosition = journal.journalPosition;
-    uint64_t newPosition = oldPosition + data.asBytes().size();
+    uint64_t newPosition = oldPosition + entries.asPtr().asBytes().size();
     journal.journalPosition = newPosition;
     auto& journalRef = journal;
 
@@ -421,8 +439,10 @@ kj::Promise<void> JournalLayer::Transaction::commit(
     promises.add(fork.addBranch());
     promises.add(kj::mv(journal.writeQueue));
     journal.writeQueue = kj::joinPromises(promises.finish())
-        .then([KJ_MVCAP(committer),&journalRef]() mutable {
-      committer.execute(*journalRef.blobLayer);
+        .then([KJ_MVCAP(executeCallbacks),&journalRef]() mutable {
+      for (auto& callback: executeCallbacks) {
+        callback(*journalRef.blobLayer);
+      }
 
       // We have to sync() to make sure all the effects of the transaction have hit disk.
       // TODO(now): Offload sync to another thread. It doesn't even have to sync frequently; every
@@ -442,7 +462,9 @@ kj::Promise<void> JournalLayer::Transaction::commit(
         journalRef.journalFile->getContent().zero(oldPosition, delta);
       }
     }, [](kj::Exception&& exception) {
-      // Oh no, something went terribly wrong. We should abort.
+      // It would appear that we failed to actually execute the transaction after writing it to
+      // the journal and confirming commit to the client. We should abort now and hope that things
+      // get fixed up during recovery.
       KJ_DEFER(abort());
       KJ_LOG(FATAL, "exception during journal execution; aborting", exception);
     });
