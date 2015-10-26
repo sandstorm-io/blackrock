@@ -3,13 +3,17 @@
 // All Rights Reserved
 
 #include "journal-layer.h"
+#include "blob-local.h"
 #include <blackrock/storage/journal-test-fuzzer.capnp.h>
+#include <sandstorm/util.h>
 #include <kj/main.h>
 #include <kj/debug.h>
 #include <kj/one-of.h>
 #include <capnp/message.h>
 #include <unordered_set>
 #include <sodium/crypto_stream_chacha20.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 
 namespace blackrock {
 namespace storage {
@@ -366,7 +370,7 @@ public:
   ~RecoverableCapability();
 
   virtual void recover(TestJournal::Client journal,
-                       std::map<TempLabel, TempClient>& recovered);
+                       std::map<TempLabel, TempClient>& recovered) = 0;
 
   capnp::Capability::Client getInner() { return inner; }
 
@@ -736,6 +740,14 @@ public:
   JournalFuzzer(TestJournal::Client journal, Random& random, uint clientId)
       : journal(kj::mv(journal)), random(random), clientId(clientId), tasks(*this) {}
 
+  kj::Promise<void> run() {
+    // TODO(now): Do verifications in parallel with transactions.
+    kj::Promise<void> promise = random.in(0, 16) == 0 ?
+        doRandomTransaction() : verify();
+
+    return promise.then([this]() { return run(); });
+  }
+
 private:
   struct ObjectState {
     ObjectState() = default;
@@ -897,7 +909,7 @@ private:
           object.content = kj::heapArray<byte>(random.exponential(16));
           random.fill(object.content.begin(), object.content.size());
 
-          auto req = txn.createObjectRequest();
+          auto req = txn.createTempRequest();
           memcpy(req.initXattr(sizeof(object.xattr)).begin(), &object.xattr, sizeof(object.xattr));
           req.setContent(object.content);
 
@@ -916,6 +928,49 @@ private:
   }
 
   kj::Promise<void> verify() {
+    kj::Vector<kj::Promise<void>> promises;
+
+    for (auto& object: objects) {
+      if (object.id != nullptr) {
+        TestJournal::Object::Client cap = nullptr;
+        KJ_IF_MAYBE(c, object.cap) {
+          cap = kj::mv(*c);
+          object.cap = nullptr;
+        } else {
+          auto req = journal.openObjectRequest();
+          object.id.copyTo(req.initId());
+          cap = req.send().getObject();
+        }
+
+        promises.add(cap.readRequest().send().then([&object](auto&& response) {
+          auto xattr = response.getXattr();
+          KJ_ASSERT(xattr.size() == sizeof(object.xattr) &&
+              memcmp(xattr.begin(), &object.xattr, sizeof(object.xattr)) == 0);
+          KJ_ASSERT(response.getContent() == object.content,
+              response.getContent().size(), object.content.size());
+        }));
+
+        auto txn = journal.newTransactionRequest().send().getTransaction();
+        auto req = txn.removeRequest();
+        req.setObject(kj::mv(cap));
+        promises.add(req.send().then([](auto&&) {}));
+      }
+    }
+
+    for (auto& object: temps) {
+      KJ_IF_MAYBE(cap, object.cap) {
+        promises.add(cap->readRequest().send().then([&object](auto&& response) {
+          auto xattr = response.getXattr();
+          KJ_ASSERT(xattr.size() == sizeof(object.xattr) &&
+              memcmp(xattr.begin(), &object.xattr, sizeof(object.xattr)) == 0);
+          KJ_ASSERT(response.getContent() == object.content,
+              response.getContent().size(), object.content.size());
+        }));
+        object.cap = nullptr;
+      }
+    }
+
+    return kj::joinPromises(promises.releaseAsArray());
   }
 
   void taskFailed(kj::Exception&& exception) override {
@@ -946,21 +1001,75 @@ public:
     return kj::MainBuilder(context, "Fuse test, unknown version",
           "Creates a Sandstore at <source-dir> containing a single Volume, then mounts that "
           "volume at <mount-point>.")
-//        .addOptionWithArg({'o', "options"}, KJ_BIND_METHOD(*this, setOptions), "<options>",
-//                          "Set mount options.")
-//        .addOption({'r', "reset"}, KJ_BIND_METHOD(*this, reset),
-//                   "Reset all nbd devices, hopefully killing any processes blocked on them.")
-//        .expectArg("<mount-point>", KJ_BIND_METHOD(*this, setMountPoint))
-//        .expectArg("<soure-dir>", KJ_BIND_METHOD(*this, setStorageDir))
-//        .expectOneOrMoreArgs("<command>", KJ_BIND_METHOD(*this, addCommandArg))
-//        .callAfterParsing(KJ_BIND_METHOD(*this, run))
+        .addOption({"direct"}, [this]() {mode=DIRECT;return true;},
+            "Test directly against an in-process journal without any failures, to verify that "
+            "it produces expected results under the friendliest circumstances.")
+        .addOption({"no-fail"}, [this]() {mode=NO_FAILURES;return true;},
+            "Test with the journal in a separate process and the recovery layer in-place, but "
+            "with no actual failures occurring. If this fails but --direct passes then there "
+            "is a bug in the test, not the journal.")
+        .addOption({"proc-fail"}, [this]() {mode=PROCESS_FAILURES;return true;},
+            "Test journal behavior in the presence of random process failures, but without "
+            "killing the disk. This will not catch failures to sync().")
+        .addOption({"mach-fail"}, [this]() {mode=MACHINE_FAILURES;return true;},
+            "Test journal behavior in the presence of random power failures, simulated by "
+            "testing against an nbd volume that disconnects at the same time the process is "
+            "killed. This catches failures to sync(). This requires root privileges. It is "
+            "highly recommended that you run it in a virtual machine since it can mess "
+            "up the kernel state.")
+        .callAfterParsing(KJ_BIND_METHOD(*this, run))
         .build();
   }
 
 private:
   kj::ProcessContext& context;
 
+  enum {
+    UNSET,
+    DIRECT,
+    NO_FAILURES,
+    PROCESS_FAILURES,
+    MACHINE_FAILURES
+  } mode = UNSET;
+
   kj::MainBuilder::Validity run() {
+    switch (mode) {
+      case UNSET:
+        return "you must specify a mode";
+      case DIRECT:
+        runDirect();
+        return true;
+      case NO_FAILURES:
+      case PROCESS_FAILURES:
+      case MACHINE_FAILURES:
+        KJ_UNIMPLEMENTED("todo");
+    }
+  }
+
+  void runDirect() {
+    const char* path = "/var/tmp/blackrock-journal-fuzz-test";
+    KJ_SYSCALL(mkdir(path, 0700));
+    KJ_DEFER(sandstorm::recursivelyDelete(path));
+    auto dirfd = sandstorm::raiiOpen(path, O_RDONLY | O_DIRECTORY);
+
+    auto ioContext = kj::setupAsyncIo();
+    LocalBlobLayer blobLayer(ioContext.unixEventPort, dirfd);
+    JournalLayer::Recovery journal(blobLayer);
+
+    KJ_IF_MAYBE(exception, kj::runCatchingExceptions([&]() {
+      TestJournal::Recovery::Client client = kj::heap<TestJournalRecoveryImpl>(journal);
+      auto journalClient = client.recoverRequest().send().getJournal();
+
+      auto random = kj::heap<Random>(0);
+
+      // TODO(now): multiple fuzzer "threads"
+      JournalFuzzer fuzzer(journalClient, *random, 0);
+      fuzzer.run().wait(ioContext.waitScope);
+    })) {
+      // Avoid trying to unwind past this point because there could be tasks on the event queue
+      // still which can't be destroyed cleanly.
+      context.exitError(kj::str(*exception));
+    }
   }
 };
 

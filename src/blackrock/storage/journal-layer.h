@@ -18,6 +18,8 @@ class JournalLayer {
   // combining write operations into transactions.
 
 public:
+  ~JournalLayer() noexcept(false);
+
   class RecoverableTemporary;
   class Object;
   class Transaction;

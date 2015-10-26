@@ -80,7 +80,7 @@ class JournalLayer::Transaction::LockedObject final
     : public BlobLayer::Object, public kj::Refcounted {
 public:
   explicit LockedObject(kj::Own<JournalLayer::Object> objectParam)
-      : object(kj::mv(objectParam)), created(false) {
+      : object(kj::mv(objectParam)), changeCount(0), created(false) {
     if (object->locked) {
       kj::throwFatalException(KJ_EXCEPTION(DISCONNECTED, "transaction aborted due to conflict"));
     }
@@ -89,7 +89,7 @@ public:
 
   LockedObject(kj::Own<JournalLayer::Object> objectParam,
                kj::Own<BlobLayer::Temporary> initialContent)
-      : object(kj::mv(objectParam)), created(true),
+      : object(kj::mv(objectParam)), changeCount(1), created(true),
         newContent(kj::mv(initialContent)) {
     if (object->locked) {
       kj::throwFatalException(KJ_EXCEPTION(DISCONNECTED, "transaction aborted due to conflict"));
@@ -140,6 +140,9 @@ public:
     // No other methods of LockedObject will be called after commit(), and the LockedObject will
     // be destroyed before the returned callback is called, therefore the callback should take
     // ownership of anything it needs.
+    //
+    // TODO(now): This is wrong. We should not update the journal-layer object until after commit
+    //   has completed, otherwise reads could return uncommitted values.
 
     if (changeCount == 0 || (created && removed)) return [](BlobLayer& blobLayer) {};
 
@@ -149,23 +152,24 @@ public:
 
     Xattr xattr = getXattr();
 
+    auto objectRef = kj::addRef(*object);
     if (created) {
       auto content = kj::mv(KJ_ASSERT_NONNULL(newContent));
-      return [KJ_MVCAP(object),KJ_MVCAP(content),xattr](BlobLayer& blobLayer) mutable {
-        object->inner = blobLayer.createObject(object->id, xattr, kj::mv(content));
+      return [KJ_MVCAP(objectRef),KJ_MVCAP(content),xattr](BlobLayer& blobLayer) mutable {
+        objectRef->inner = blobLayer.createObject(objectRef->id, xattr, kj::mv(content));
       };
     } else if (removed) {
-      return [KJ_MVCAP(object)](BlobLayer& blobLayer) mutable {
-        object->inner->remove();
+      return [KJ_MVCAP(objectRef)](BlobLayer& blobLayer) mutable {
+        objectRef->inner->remove();
       };
     } else KJ_IF_MAYBE(c, newContent) {
       auto content = kj::mv(*c);
-      return [KJ_MVCAP(object),KJ_MVCAP(content),xattr](BlobLayer& blobLayer) mutable {
-        object->inner->overwrite(xattr, kj::mv(content));
+      return [KJ_MVCAP(objectRef),KJ_MVCAP(content),xattr](BlobLayer& blobLayer) mutable {
+        objectRef->inner->overwrite(xattr, kj::mv(content));
       };
     } else {
-      return [KJ_MVCAP(object),xattr](BlobLayer& blobLayer) mutable {
-        object->inner->setXattr(xattr);
+      return [KJ_MVCAP(objectRef),xattr](BlobLayer& blobLayer) mutable {
+        objectRef->inner->setXattr(xattr);
       };
     }
   }
@@ -209,7 +213,7 @@ public:
 private:
   kj::Own<JournalLayer::Object> object;
 
-  uint changeCount = 0;
+  uint changeCount;
   bool created;
   bool removed = false;
   kj::Maybe<Xattr> newXattr;
@@ -220,7 +224,7 @@ class JournalLayer::Transaction::LockedTemporary final
     : public BlobLayer::Temporary, public kj::Refcounted {
 public:
   explicit LockedTemporary(kj::Own<JournalLayer::RecoverableTemporary> objectParam)
-      : object(kj::mv(objectParam)), created(false) {
+      : object(kj::mv(objectParam)), changeCount(0), created(false) {
     if (object->locked) {
       kj::throwFatalException(KJ_EXCEPTION(DISCONNECTED, "transaction aborted due to conflict"));
     }
@@ -229,7 +233,8 @@ public:
 
   LockedTemporary(kj::Own<JournalLayer::RecoverableTemporary> objectParam,
                   kj::Own<BlobLayer::Temporary> initialContent)
-      : object(kj::mv(objectParam)), created(true), newContent(kj::mv(initialContent)) {
+      : object(kj::mv(objectParam)), changeCount(1), created(true),
+        newContent(kj::mv(initialContent)) {
     if (object->locked) {
       kj::throwFatalException(KJ_EXCEPTION(DISCONNECTED, "transaction aborted due to conflict"));
     }
@@ -293,24 +298,25 @@ public:
 
     TemporaryXattr xattr = getXattr();
 
+    auto objectRef = kj::addRef(*object);
     if (created) {
       auto content = kj::mv(KJ_ASSERT_NONNULL(newContent));
-      return [KJ_MVCAP(object),KJ_MVCAP(content),xattr](BlobLayer& blobLayer) mutable {
-        content->setRecoveryId(object->id, xattr);
-        object->inner = kj::mv(content);
+      return [KJ_MVCAP(objectRef),KJ_MVCAP(content),xattr](BlobLayer& blobLayer) mutable {
+        content->setRecoveryId(objectRef->id, xattr);
+        objectRef->inner = kj::mv(content);
       };
     } else if (removed) {
-      return [KJ_MVCAP(object)](BlobLayer& blobLayer) mutable {
+      return [KJ_MVCAP(objectRef)](BlobLayer& blobLayer) mutable {
         // Nothing to do here: just release the temporary.
       };
     } else KJ_IF_MAYBE(c, newContent) {
       auto content = kj::mv(*c);
-      return [KJ_MVCAP(object),KJ_MVCAP(content),xattr](BlobLayer& blobLayer) mutable {
-        object->inner->overwrite(xattr, kj::mv(content));
+      return [KJ_MVCAP(objectRef),KJ_MVCAP(content),xattr](BlobLayer& blobLayer) mutable {
+        objectRef->inner->overwrite(xattr, kj::mv(content));
       };
     } else {
-      return [KJ_MVCAP(object),xattr](BlobLayer& blobLayer) mutable {
-        object->inner->setXattr(xattr);
+      return [KJ_MVCAP(objectRef),xattr](BlobLayer& blobLayer) mutable {
+        objectRef->inner->setXattr(xattr);
       };
     }
   }
@@ -353,7 +359,7 @@ public:
 private:
   kj::Own<JournalLayer::RecoverableTemporary> object;
 
-  uint changeCount = 0;
+  uint changeCount;
   bool created;
   bool removed = false;
   kj::Maybe<TemporaryXattr> newXattr;
@@ -504,6 +510,14 @@ JournalLayer::RecoveredTemporary::RecoveredTemporary(
     : journal(journal), oldId(oldId), xattr(xattr), inner(kj::mv(inner)) {}
 
 // =======================================================================================
+
+JournalLayer::~JournalLayer() noexcept(false) {
+  if (openObjects.size() > 0) {
+    // This would segfault confusing later, so abort now instead.
+    KJ_LOG(FATAL, "Destroyed JournalLayer while objects still exist.");
+    abort();
+  }
+}
 
 kj::Promise<kj::Maybe<kj::Own<JournalLayer::Object>>> JournalLayer::openObject(ObjectId id) {
   // Check the openObjects map to see if this object is already open. Note that the caller is
