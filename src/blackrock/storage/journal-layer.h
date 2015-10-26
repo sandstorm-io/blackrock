@@ -56,11 +56,15 @@ public:
         ObjectId id, Xattr xattr, kj::Own<BlobLayer::Temporary> content);
     // Create a new object as part of the transaction. The given `content` must NOT have a
     // recovery ID already set.
+    //
+    // The returned object is a placeholder and cannot be used until the transaction is committed.
 
     kj::Own<RecoverableTemporary> createRecoverableTemporary(
         RecoveryId id, TemporaryXattr xattr, kj::Own<BlobLayer::Temporary> content);
     // Create a new recoverable temporary as part of the transaction. The given `content` must NOT
     // have a recovery ID already set.
+    //
+    // The returned object is a placeholder and cannot be used until the transaction is committed.
 
     kj::Promise<void> commit(
         kj::Maybe<kj::Own<RecoverableTemporary>> tempToConsume = nullptr);
@@ -71,16 +75,22 @@ public:
     //
     // `commit()` never throws an exception, because callers need to be assured that if they get
     // to the point of calling commit(), it will succeed. If something goes wrong durring
-    // `commit()`, the entire process will be aborted.
+    // `commit()`, the entire process will be aborted, simulating a machine failure.
     //
     // If `tempToConsume` is provided, it is a temporary file that should be consumed (deleted) as
     // part of this transaction. Typically this is a temporary whose presence indicates the need
     // to perform the transaction in the first place, especially backburner tasks.
+    //
+    // The Transaction object must be kept live until the returned promise completes (as usual
+    // for methods tha return promises). This implies that conflicting transactions cannot be
+    // constructed in the meantime.
 
     kj::Promise<void> saveInto(BlobLayer::Content& content);
     // Serialize this transaction into the given `content`.
 
   private:
+    class FutureObject;
+    class FutureTemporary;
     class LockedObject;
     class LockedTemporary;
 
@@ -95,24 +105,18 @@ public:
   public:
     ~Object() noexcept(false);
 
-    Xattr getXattr() { return cachedXattr; }
-    uint64_t getGeneration() { return generation; }
-    BlobLayer::Content& getContent();
+    Xattr getXattr() { return inner->getXattr(); }
+    uint64_t getGeneration() { return changeCount; }
+    BlobLayer::Content& getContent() { return inner->getContent(); }
 
   private:
     JournalLayer& journal;
     ObjectId id;
     kj::Own<BlobLayer::Object> inner;
-    uint64_t generation = 0;
-
-    Xattr cachedXattr;
-    kj::Maybe<BlobLayer::Content&> cachedContent;
+    uint64_t changeCount = 0;
     bool locked = false;
 
     Object(JournalLayer& journal, ObjectId id, kj::Own<BlobLayer::Object>&& innerParam);
-    Object(JournalLayer& journal, ObjectId id, const Xattr& xattr, BlobLayer::Content& content);
-
-    void update(Xattr newXattr, kj::Maybe<BlobLayer::Content&> newContent, uint changeCount);
 
     friend class Transaction;
     template <typename T, typename... Params>
@@ -131,27 +135,19 @@ public:
   public:
     ~RecoverableTemporary() noexcept(false);
 
-    TemporaryXattr getXattr() { return cachedXattr; }
-    uint64_t getGeneration() { return generation; }
-    BlobLayer::Content& getContent();
+    TemporaryXattr getXattr() { return inner->getXattr(); }
+    uint64_t getGeneration() { return changeCount; }
+    BlobLayer::Content& getContent() { return inner->getContent(); }
 
   private:
     JournalLayer& journal;
     RecoveryId id;
     kj::Own<BlobLayer::Temporary> inner;
-    uint64_t generation = 0;
-
-    TemporaryXattr cachedXattr;
-    kj::Maybe<BlobLayer::Content&> cachedContent;
+    uint64_t changeCount = 0;
     bool locked = false;
 
     RecoverableTemporary(JournalLayer& journal, RecoveryId id,
                          kj::Own<BlobLayer::Temporary>&& inner);
-    RecoverableTemporary(JournalLayer& journal, RecoveryId id,
-                         const TemporaryXattr& xattr, BlobLayer::Content& content);
-
-    void update(TemporaryXattr newXattr, kj::Maybe<BlobLayer::Content&> newContent,
-                uint changeCount);
 
     friend class Transaction;
     template <typename T, typename... Params>

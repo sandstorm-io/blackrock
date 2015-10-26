@@ -191,7 +191,7 @@ private:
     KJ_IF_MAYBE(r, recoveryId) {
       KJ_SYSCALL(renameat(
           blobLayer.directoryFd, toPath(*r).cStr(),
-          blobLayer.directoryFd, path.cStr()));
+          blobLayer.directoryFd, path.cStr()), toPath(*r), path);
       recoveryId = nullptr;
     } else KJ_IF_MAYBE(r2, recoveredId) {
       KJ_SYSCALL(linkat(
@@ -293,6 +293,9 @@ LocalBlobLayer::LocalBlobLayer(kj::UnixEventPort& eventPort, int directoryFd)
     // Clean up stuff that was successfully recovered in a previous run.
     sandstorm::recursivelyDeleteAt(directoryFd, "recovered");
   }
+
+  // Make main storage if it doesn't already exist.
+  mkdirat(directoryFd, "main", 0777);  // might already exist
 
   // Make the recovery directory and move all the temp directories to it. Note that there may
   // already be a recovery directory if we failed *during* recovery last time! Moreover, it's

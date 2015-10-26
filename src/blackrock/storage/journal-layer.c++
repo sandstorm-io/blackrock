@@ -12,67 +12,73 @@ namespace storage {
 
 JournalLayer::Object::Object(
     JournalLayer& journal, ObjectId id, kj::Own<BlobLayer::Object>&& innerParam)
-    : journal(journal), id(id), inner(kj::mv(innerParam)), cachedXattr(inner->getXattr()) {
-  KJ_REQUIRE(journal.openObjects.insert(std::make_pair(id, this)).second);
-}
-JournalLayer::Object::Object(
-    JournalLayer& journal, ObjectId id, const Xattr& xattr, BlobLayer::Content& content)
-    : journal(journal), id(id), cachedXattr(xattr), cachedContent(content) {
+    : journal(journal), id(id), inner(kj::mv(innerParam)) {
   KJ_REQUIRE(journal.openObjects.insert(std::make_pair(id, this)).second);
 }
 JournalLayer::Object::~Object() noexcept(false) {
   journal.openObjects.erase(id);
 }
 
-BlobLayer::Content& JournalLayer::Object::getContent() {
-  KJ_IF_MAYBE(r, cachedContent) {
-    return *r;
-  } else {
-    return inner->getContent();
-  }
-}
-
-void JournalLayer::Object::update(
-    Xattr newXattr, kj::Maybe<BlobLayer::Content&> newContent, uint changeCount) {
-  // Called when a transaction is committed to the journal (but possibly before the journaled
-  // operations have actually been written out to their final locations) to tell this object
-  // what values to return from the getters.
-
-  generation += changeCount;
-  cachedXattr = newXattr;
-  if (newContent != nullptr) {
-    cachedContent = newContent;
-  }
-}
-
 JournalLayer::RecoverableTemporary::RecoverableTemporary(
     JournalLayer& journal, RecoveryId id, kj::Own<BlobLayer::Temporary>&& inner)
-    : journal(journal), id(id), inner(kj::mv(inner)), cachedXattr(inner->getXattr()) {}
-JournalLayer::RecoverableTemporary::RecoverableTemporary(
-    JournalLayer& journal, RecoveryId id, const TemporaryXattr& xattr, BlobLayer::Content& content)
-    : journal(journal), id(id), cachedXattr(xattr), cachedContent(content) {}
+    : journal(journal), id(id), inner(kj::mv(inner)) {}
 JournalLayer::RecoverableTemporary::~RecoverableTemporary() noexcept(false) {}
 
-BlobLayer::Content& JournalLayer::RecoverableTemporary::getContent() {
-  KJ_IF_MAYBE(r, cachedContent) {
-    return *r;
-  } else {
-    return inner->getContent();
-  }
-}
+// =======================================================================================
 
-void JournalLayer::RecoverableTemporary::update(
-    TemporaryXattr newXattr, kj::Maybe<BlobLayer::Content&> newContent, uint changeCount) {
-  // Called when a transaction is committed to the journal (but possibly before the journaled
-  // operations have actually been written out to their final locations) to tell this object
-  // what values to return from the getters.
-
-  generation += changeCount;
-  cachedXattr = newXattr;
-  if (newContent != nullptr) {
-    cachedContent = newContent;
+class JournalLayer::Transaction::FutureObject final: public BlobLayer::Object {
+public:
+  void overwrite(Xattr xattr, kj::Own<BlobLayer::Temporary> content) override {
+    KJ_FAIL_REQUIRE("object does not exist yet");
   }
-}
+
+  Xattr getXattr() override {
+    KJ_FAIL_REQUIRE("object does not exist yet");
+  }
+
+  void setXattr(Xattr xattr) override {
+    KJ_FAIL_REQUIRE("object does not exist yet");
+  }
+
+  void remove() override {
+    KJ_FAIL_REQUIRE("object does not exist yet");
+  }
+
+  uint64_t getGeneration() override {
+    KJ_FAIL_REQUIRE("object does not exist yet");
+  }
+
+  BlobLayer::Content& getContent() override {
+    KJ_FAIL_REQUIRE("object does not exist yet");
+  }
+};
+
+class JournalLayer::Transaction::FutureTemporary final: public BlobLayer::Temporary {
+public:
+  void setRecoveryId(RecoveryId id) override {
+    KJ_FAIL_REQUIRE("temporary does not exist yet");
+  }
+
+  void setRecoveryId(RecoveryId id, TemporaryXattr xattr) override {
+    KJ_FAIL_REQUIRE("temporary does not exist yet");
+  }
+
+  void overwrite(TemporaryXattr xattr, kj::Own<Temporary> replacement) override {
+    KJ_FAIL_REQUIRE("temporary does not exist yet");
+  }
+
+  TemporaryXattr getXattr() override {
+    KJ_FAIL_REQUIRE("temporary does not exist yet");
+  }
+
+  void setXattr(TemporaryXattr xattr) override {
+    KJ_FAIL_REQUIRE("temporary does not exist yet");
+  }
+
+  BlobLayer::Content& getContent() override {
+    KJ_FAIL_REQUIRE("temporary does not exist yet");
+  }
+};
 
 // =======================================================================================
 
@@ -87,10 +93,10 @@ public:
     object->locked = true;
   }
 
-  LockedObject(kj::Own<JournalLayer::Object> objectParam,
+  LockedObject(kj::Own<JournalLayer::Object> objectParam, Xattr initialXattr,
                kj::Own<BlobLayer::Temporary> initialContent)
       : object(kj::mv(objectParam)), changeCount(1), created(true),
-        newContent(kj::mv(initialContent)) {
+        newXattr(initialXattr), newContent(kj::mv(initialContent)) {
     if (object->locked) {
       kj::throwFatalException(KJ_EXCEPTION(DISCONNECTED, "transaction aborted due to conflict"));
     }
@@ -116,7 +122,11 @@ public:
     }
 
     entry.object.id = object->id;
-    entry.object.xattr = getXattr();
+    KJ_IF_MAYBE(x, newXattr) {
+      entry.object.xattr = *x;
+    } else {
+      KJ_ASSERT(removed);
+    }
 
     if (created) {
       entry.type = JournalEntry::Type::CREATE_OBJECT;
@@ -131,47 +141,26 @@ public:
     return entry;
   }
 
-  kj::Function<void(BlobLayer& blobLayer)> commit() {
-    // Commit to the changes made to this object. That is:
-    // 1. Update the journal-layer object to reflect these changes.
-    // 2. Return a function which should be called later to actually execute the changes. This
-    //    function will be called once the journal entry for this change has been synced to disk.
+  void execute(BlobLayer& blobLayer) {
+    // Execute the changes made to this object, storing (but not necessarily syncing) them to disk.
+    // This is called after the journal entry has been synced to disk.
     //
-    // No other methods of LockedObject will be called after commit(), and the LockedObject will
-    // be destroyed before the returned callback is called, therefore the callback should take
-    // ownership of anything it needs.
-    //
-    // TODO(now): This is wrong. We should not update the journal-layer object until after commit
-    //   has completed, otherwise reads could return uncommitted values.
+    // No other methods of LockedObject will be called after commit().
 
-    if (changeCount == 0 || (created && removed)) return [](BlobLayer& blobLayer) {};
-
-    object->update(getXattr(),
-        newContent.map([](auto& t) -> BlobLayer::Content& { return t->getContent(); }),
-        changeCount);
-
-    Xattr xattr = getXattr();
-
-    auto objectRef = kj::addRef(*object);
     if (created) {
-      auto content = kj::mv(KJ_ASSERT_NONNULL(newContent));
-      return [KJ_MVCAP(objectRef),KJ_MVCAP(content),xattr](BlobLayer& blobLayer) mutable {
-        objectRef->inner = blobLayer.createObject(objectRef->id, xattr, kj::mv(content));
-      };
-    } else if (removed) {
-      return [KJ_MVCAP(objectRef)](BlobLayer& blobLayer) mutable {
-        objectRef->inner->remove();
-      };
+      object->inner = blobLayer.createObject(object->id, KJ_ASSERT_NONNULL(newXattr),
+          kj::mv(KJ_ASSERT_NONNULL(newContent)));
     } else KJ_IF_MAYBE(c, newContent) {
-      auto content = kj::mv(*c);
-      return [KJ_MVCAP(objectRef),KJ_MVCAP(content),xattr](BlobLayer& blobLayer) mutable {
-        objectRef->inner->overwrite(xattr, kj::mv(content));
-      };
-    } else {
-      return [KJ_MVCAP(objectRef),xattr](BlobLayer& blobLayer) mutable {
-        objectRef->inner->setXattr(xattr);
-      };
+      object->inner->overwrite(KJ_ASSERT_NONNULL(newXattr), kj::mv(*c));
+    } else KJ_IF_MAYBE(x, newXattr) {
+      object->inner->setXattr(*x);
     }
+
+    if (removed) {
+      object->inner->remove();
+    }
+
+    object->changeCount += changeCount;
   }
 
   void overwrite(Xattr xattr, kj::Own<BlobLayer::Temporary> content) override {
@@ -232,9 +221,10 @@ public:
   }
 
   LockedTemporary(kj::Own<JournalLayer::RecoverableTemporary> objectParam,
+                  TemporaryXattr initialXattr,
                   kj::Own<BlobLayer::Temporary> initialContent)
       : object(kj::mv(objectParam)), changeCount(1), created(true),
-        newContent(kj::mv(initialContent)) {
+        newXattr(initialXattr), newContent(kj::mv(initialContent)) {
     if (object->locked) {
       kj::throwFatalException(KJ_EXCEPTION(DISCONNECTED, "transaction aborted due to conflict"));
     }
@@ -265,7 +255,11 @@ public:
     }
 
     entry.temporary.id = object->id;
-    entry.temporary.xattr = getXattr();
+    KJ_IF_MAYBE(x, newXattr) {
+      entry.temporary.xattr = *x;
+    } else {
+      KJ_ASSERT(removed);
+    }
 
     if (created) {
       entry.type = JournalEntry::Type::CREATE_TEMPORARY;
@@ -280,45 +274,27 @@ public:
     return entry;
   }
 
-  kj::Function<void(BlobLayer&)> commit() {
-    // Commit to the changes made to this object. That is:
-    // 1. Update the journal-layer object to reflect these changes.
-    // 2. Return a function which should be called later to actually execute the changes. This
-    //    function will be called once the journal entry for this change has been synced to disk.
+  void execute(BlobLayer& blobLayer) {
+    // Execute the changes made to this object, storing (but not necessarily syncing) them to disk.
+    // This is called after the journal entry has been synced to disk.
     //
-    // No other methods of LockedObject will be called after commit(), and the LockedObject will
-    // be destroyed before the returned callback is called, therefore the callback should take
-    // ownership of anything it needs.
+    // No other methods of LockedObject will be called after commit().
 
-    if (changeCount == 0 || (created && removed)) return [](BlobLayer& blobLayer) {};
-
-    object->update(getXattr(),
-        newContent.map([](auto& t) -> BlobLayer::Content& { return t->getContent(); }),
-        changeCount);
-
-    TemporaryXattr xattr = getXattr();
-
-    auto objectRef = kj::addRef(*object);
     if (created) {
       auto content = kj::mv(KJ_ASSERT_NONNULL(newContent));
-      return [KJ_MVCAP(objectRef),KJ_MVCAP(content),xattr](BlobLayer& blobLayer) mutable {
-        content->setRecoveryId(objectRef->id, xattr);
-        objectRef->inner = kj::mv(content);
-      };
-    } else if (removed) {
-      return [KJ_MVCAP(objectRef)](BlobLayer& blobLayer) mutable {
-        // Nothing to do here: just release the temporary.
-      };
+      content->setRecoveryId(object->id, KJ_ASSERT_NONNULL(newXattr));
+      object->inner = kj::mv(content);
     } else KJ_IF_MAYBE(c, newContent) {
-      auto content = kj::mv(*c);
-      return [KJ_MVCAP(objectRef),KJ_MVCAP(content),xattr](BlobLayer& blobLayer) mutable {
-        objectRef->inner->overwrite(xattr, kj::mv(content));
-      };
-    } else {
-      return [KJ_MVCAP(objectRef),xattr](BlobLayer& blobLayer) mutable {
-        objectRef->inner->setXattr(xattr);
-      };
+      object->inner->overwrite(KJ_ASSERT_NONNULL(newXattr), kj::mv(*c));
+    } else KJ_IF_MAYBE(x, newXattr) {
+      object->inner->setXattr(*x);
     }
+
+    if (removed) {
+      // Nothing to do here: just release the temporary.
+    }
+
+    object->changeCount += changeCount;
   }
 
   void setRecoveryId(RecoveryId id) override {
@@ -385,17 +361,16 @@ kj::Own<BlobLayer::Temporary> JournalLayer::Transaction::wrap(RecoverableTempora
 
 kj::Own<JournalLayer::Object> JournalLayer::Transaction::createObject(
     ObjectId id, Xattr xattr, kj::Own<BlobLayer::Temporary> content) {
-  auto result = kj::refcounted<JournalLayer::Object>(
-      journal, id, xattr, content->getContent());
-  objects.add(kj::refcounted<LockedObject>(kj::addRef(*result), kj::mv(content)));
+  auto result = kj::refcounted<JournalLayer::Object>(journal, id, kj::heap<FutureObject>());
+  objects.add(kj::refcounted<LockedObject>(kj::addRef(*result), xattr, kj::mv(content)));
   return kj::mv(result);
 }
 
 kj::Own<JournalLayer::RecoverableTemporary> JournalLayer::Transaction::createRecoverableTemporary(
     RecoveryId id, TemporaryXattr xattr, kj::Own<BlobLayer::Temporary> content) {
   auto result = kj::refcounted<JournalLayer::RecoverableTemporary>(
-      journal, id, xattr, content->getContent());
-  temporaries.add(kj::refcounted<LockedTemporary>(kj::addRef(*result), kj::mv(content)));
+      journal, id, kj::heap<FutureTemporary>());
+  temporaries.add(kj::refcounted<LockedTemporary>(kj::addRef(*result), xattr, kj::mv(content)));
   return kj::mv(result);
 }
 
@@ -411,21 +386,17 @@ kj::Promise<void> JournalLayer::Transaction::commit(
 
   KJ_IF_MAYBE(exception, kj::runCatchingExceptions([&]() {
     kj::Vector<JournalEntry> entries(objects.size() + temporaries.size());
-    kj::Vector<kj::Function<void(BlobLayer&)>> executeCallbacks(
-        objects.size() + temporaries.size());
 
     // Build the transaction.
     for (auto& object: objects) {
       KJ_IF_MAYBE(entry, object->getJournalEntry(journal.stagingIdCounter++)) {
         entries.add(*entry);
       }
-      executeCallbacks.add(object->commit());
     }
     for (auto& temp: temporaries) {
       KJ_IF_MAYBE(entry, temp->getJournalEntry(journal.stagingIdCounter++)) {
         entries.add(*entry);
       }
-      executeCallbacks.add(temp->commit());
     }
 
     // Write to the journal.
@@ -436,20 +407,25 @@ kj::Promise<void> JournalLayer::Transaction::commit(
     journal.journalPosition = newPosition;
     auto& journalRef = journal;
 
-    // Sync the journal. As soon as this is done, we can safely return success to the caller.
-    auto fork = journalContent.sync().fork();
+    // Sync the journal, then execute the transaction (only to kernel cache).
+    auto fork = journalContent.sync().then([this]() mutable {
+      for (auto& object: objects) {
+        object->execute(*journal.blobLayer);
+      }
+      for (auto& temp: temporaries) {
+        temp->execute(*journal.blobLayer);
+      }
+    }).fork();
+
+    // The transaction is committed at this point.
     result = fork.addBranch();
 
-    // Sequence the actual execution of this transaction into the write queue.
+    // Schedule journal cleanup to happen later, making sure of course that we remove journal
+    // entries strictly in the order that we created them.
     auto promises = kj::heapArrayBuilder<kj::Promise<void>>(2);
     promises.add(fork.addBranch());
     promises.add(kj::mv(journal.writeQueue));
-    journal.writeQueue = kj::joinPromises(promises.finish())
-        .then([KJ_MVCAP(executeCallbacks),&journalRef]() mutable {
-      for (auto& callback: executeCallbacks) {
-        callback(*journalRef.blobLayer);
-      }
-
+    journal.writeQueue = kj::joinPromises(promises.finish()).then([]() {
       // We have to sync() to make sure all the effects of the transaction have hit disk.
       // TODO(now): Offload sync to another thread. It doesn't even have to sync frequently; every
       //   30 seconds would be fine.
