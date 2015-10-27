@@ -134,7 +134,7 @@ public:
   TemporaryXattr getTemporaryXattr() {
     TemporaryXattr xattr;
     memset(&xattr, 0, sizeof(xattr));
-    KJ_SYSCALL(fgetxattr(content->getFd(), Xattr::NAME, &xattr, sizeof(xattr)));
+    KJ_SYSCALL(fgetxattr(content->getFd(), TemporaryXattr::NAME, &xattr, sizeof(xattr)));
     return xattr;
   }
 
@@ -146,7 +146,7 @@ public:
 
   void setRecoveryId(RecoveryId id, TemporaryXattr xattr) override {
     KJ_REQUIRE(id.type == RecoveryType::BACKBURNER, "only backburner has temporary xattrs");
-    KJ_SYSCALL(fsetxattr(content->getFd(), Xattr::NAME, &xattr, sizeof(xattr), 0));
+    KJ_SYSCALL(fsetxattr(content->getFd(), TemporaryXattr::NAME, &xattr, sizeof(xattr), 0));
     moveTo(toPath(id));
     recoveryId = id;
   }
@@ -167,7 +167,7 @@ public:
   TemporaryXattr getXattr() override {
     TemporaryXattr xattr;
     memset(&xattr, 0, sizeof(xattr));
-    KJ_SYSCALL(fgetxattr(content->getFd(), Xattr::NAME, &xattr, sizeof(xattr)));
+    KJ_SYSCALL(fgetxattr(content->getFd(), TemporaryXattr::NAME, &xattr, sizeof(xattr)));
     return xattr;
   }
 
@@ -233,7 +233,8 @@ public:
 
   void remove() override {
     ++generation;
-    KJ_SYSCALL(unlinkat(blobLayer.directoryFd, id.filename('o').begin(), 0));
+    KJ_SYSCALL(unlinkat(blobLayer.directoryFd,
+        kj::str("main/", id.filename('o').begin()).cStr(), 0), id);
   }
 
   uint64_t getGeneration() override {

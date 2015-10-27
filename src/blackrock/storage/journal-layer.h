@@ -97,6 +97,7 @@ public:
     JournalLayer& journal;
     kj::Vector<kj::Own<LockedObject>> objects;
     kj::Vector<kj::Own<LockedTemporary>> temporaries;
+    bool committed = false;
   };
 
   class Object: private kj::Refcounted {

@@ -14,6 +14,7 @@
 #include <sodium/crypto_stream_chacha20.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <time.h>
 
 namespace blackrock {
 namespace storage {
@@ -743,7 +744,7 @@ public:
   kj::Promise<void> run() {
     // TODO(now): Do verifications in parallel with transactions.
     kj::Promise<void> promise = random.in(0, 16) == 0 ?
-        doRandomTransaction() : verify();
+        verify() : doRandomTransaction();
 
     return promise.then([this]() { return run(); });
   }
@@ -780,8 +781,43 @@ private:
 
   kj::TaskSet tasks;
 
+  void logCreate(ObjectId id, capnp::Data::Reader xattr, capnp::Data::Reader content) {
+    auto message = kj::str(id, " <= ", sandstorm::hexEncode(xattr), " : ", content.size(), '\n');
+    kj::FdOutputStream(STDOUT_FILENO).write(message.begin(), message.size());
+  }
+
+  void logCreate(uint id, capnp::Data::Reader xattr, capnp::Data::Reader content) {
+    auto message = kj::str(id, " <= ", sandstorm::hexEncode(xattr), " : ", content.size(), '\n');
+    kj::FdOutputStream(STDOUT_FILENO).write(message.begin(), message.size());
+  }
+
+  void logUpdate(ObjectId id, capnp::Data::Reader xattr, capnp::Data::Reader content) {
+    auto message = kj::str(
+        id, " <- ", xattr.size() == 0 ? "?" : sandstorm::hexEncode(xattr).cStr(),
+            " : ", content.size() == 0 ? "" : kj::str(content.size()).cStr(), '\n');
+    kj::FdOutputStream(STDOUT_FILENO).write(message.begin(), message.size());
+  }
+
+  void logUpdate(uint id, capnp::Data::Reader xattr, capnp::Data::Reader content) {
+    auto message = kj::str(
+        id, " <- ", xattr.size() == 0 ? "?" : sandstorm::hexEncode(xattr).cStr(),
+            " : ", content.size() == 0 ? "" : kj::str(content.size()).cStr(), '\n');
+    kj::FdOutputStream(STDOUT_FILENO).write(message.begin(), message.size());
+  }
+
+  void logDelete(ObjectId id) {
+    auto message = kj::str(id, " X\n");
+    kj::FdOutputStream(STDOUT_FILENO).write(message.begin(), message.size());
+  }
+
+  void logDelete(uint id) {
+    auto message = kj::str(id, " X\n");
+    kj::FdOutputStream(STDOUT_FILENO).write(message.begin(), message.size());
+  }
+
   kj::Promise<void> doRandomTransaction() {
     TestJournal::Transaction::Client txn = journal.newTransactionRequest().send().getTransaction();
+    kj::Vector<kj::Promise<void>> promises;
 
     uint8_t deck[256];
     for (uint i = 0; i < 256; i++) {
@@ -805,7 +841,9 @@ private:
           // Open the object first.
           auto req = journal.openObjectRequest();
           object.id.copyTo(req.initId());
-          object.cap = req.send().getObject();
+          auto promise = req.send();
+          object.cap = promise.getObject();
+          promises.add(promise.then([](auto&&) {}));
         }
 
         KJ_IF_MAYBE(cap, object.cap) {
@@ -813,11 +851,13 @@ private:
           if (random.flip()) {
             // Close or delete it.
 
+            logDelete(object.id);
+
             if (random.flip()) {
               // Delete it.
               auto req = txn.removeRequest();
               req.setObject(kj::mv(*cap));
-              tasks.add(req.send().then([](auto&&) {}));
+              promises.add(req.send().then([](auto&&) {}));
               object.id = nullptr;
             }
 
@@ -841,7 +881,9 @@ private:
               req.setContent(object.content);
             }
 
-            tasks.add(req.send().then([](auto&&) {}));
+            logUpdate(object.id, req.getXattr(), req.getContent());
+
+            promises.add(req.send().then([](auto&&) {}));
           }
         } else {
           // Create a new object!
@@ -860,9 +902,11 @@ private:
           memcpy(req.initXattr(sizeof(object.xattr)).begin(), &object.xattr, sizeof(object.xattr));
           req.setContent(object.content);
 
+          logCreate(object.id, req.getXattr(), req.getContent());
+
           auto promise = req.send();
           object.cap = promise.getObject();
-          tasks.add(promise.then([](auto&&) {}));
+          promises.add(promise.then([](auto&&) {}));
         }
       } else {
         // Choose a temporary.
@@ -878,6 +922,8 @@ private:
             //
             // Deleting a temporary is actually a matter of dropping the cap, but let's hold on
             // to one cap to consume as part of the transaction, too.
+            logDelete(object.xattr.id);
+
             tempToConsume = kj::mv(*cap);
             object.cap = nullptr;
           } else {
@@ -899,7 +945,9 @@ private:
               req.setContent(object.content);
             }
 
-            tasks.add(req.send().then([](auto&&) {}));
+            logUpdate(object.xattr.id, req.getXattr(), req.getContent());
+
+            promises.add(req.send().then([](auto&&) {}));
           }
         } else {
           // Create a new temporary!
@@ -913,18 +961,23 @@ private:
           memcpy(req.initXattr(sizeof(object.xattr)).begin(), &object.xattr, sizeof(object.xattr));
           req.setContent(object.content);
 
+          logCreate(object.xattr.id, req.getXattr(), req.getContent());
+
           auto promise = req.send();
           object.cap = promise.getObject();
-          tasks.add(promise.then([](auto&&) {}));
+          promises.add(promise.then([](auto&&) {}));
         }
       }
     }
 
-    auto req = txn.commitRequest();
-    KJ_IF_MAYBE(t, tempToConsume) {
-      req.setTempToConsume(kj::mv(*t));
-    }
-    return req.send().then([](auto&&) {});
+    return kj::joinPromises(promises.releaseAsArray())
+        .then([KJ_MVCAP(txn),KJ_MVCAP(tempToConsume)]() mutable {
+      auto req = txn.commitRequest();
+      KJ_IF_MAYBE(t, tempToConsume) {
+        req.setTempToConsume(kj::mv(*t));
+      }
+      return req.send().then([](auto&&) {});
+    });
   }
 
   kj::Promise<void> verify() {
@@ -945,9 +998,13 @@ private:
         promises.add(cap.readRequest().send().then([&object](auto&& response) {
           auto xattr = response.getXattr();
           KJ_ASSERT(xattr.size() == sizeof(object.xattr) &&
-              memcmp(xattr.begin(), &object.xattr, sizeof(object.xattr)) == 0);
-          KJ_ASSERT(response.getContent() == object.content,
-              response.getContent().size(), object.content.size());
+              memcmp(xattr.begin(), &object.xattr, sizeof(object.xattr)) == 0,
+              object.id, sandstorm::hexEncode(xattr),
+              sandstorm::hexEncode(kj::arrayPtr(&object.xattr, 1).asBytes()));
+          auto actualContent = response.getContent();
+          KJ_ASSERT(actualContent.size() == object.content.size() &&
+              memcmp(actualContent.begin(), object.content.begin(), object.content.size()) == 0,
+              object.id, actualContent.size(), object.content.size());
         }));
 
         auto txn = journal.newTransactionRequest().send().getTransaction();
@@ -962,9 +1019,13 @@ private:
         promises.add(cap->readRequest().send().then([&object](auto&& response) {
           auto xattr = response.getXattr();
           KJ_ASSERT(xattr.size() == sizeof(object.xattr) &&
-              memcmp(xattr.begin(), &object.xattr, sizeof(object.xattr)) == 0);
-          KJ_ASSERT(response.getContent() == object.content,
-              response.getContent().size(), object.content.size());
+              memcmp(xattr.begin(), &object.xattr, sizeof(object.xattr)) == 0,
+              object.xattr.id, sandstorm::hexEncode(xattr),
+              sandstorm::hexEncode(kj::arrayPtr(&object.xattr, 1).asBytes()));
+          auto actualContent = response.getContent();
+          KJ_ASSERT(actualContent.size() == object.content.size() &&
+              memcmp(actualContent.begin(), object.content.begin(), object.content.size()) == 0,
+              actualContent.size(), object.content.size());
         }));
         object.cap = nullptr;
       }
@@ -998,9 +1059,9 @@ public:
   JournalFuzzerMain(kj::ProcessContext& context): context(context) {}
 
   kj::MainFunc getMain() {
-    return kj::MainBuilder(context, "Fuse test, unknown version",
-          "Creates a Sandstore at <source-dir> containing a single Volume, then mounts that "
-          "volume at <mount-point>.")
+    return kj::MainBuilder(context, "Blackrock storage fuzzer",
+          "Randomly fuzzes the storage stack, possibly in an environment involving machine "
+          "failures. It is a good idea for <storage-location> to be a ramdisk.")
         .addOption({"direct"}, [this]() {mode=DIRECT;return true;},
             "Test directly against an in-process journal without any failures, to verify that "
             "it produces expected results under the friendliest circumstances.")
@@ -1017,7 +1078,7 @@ public:
             "killed. This catches failures to sync(). This requires root privileges. It is "
             "highly recommended that you run it in a virtual machine since it can mess "
             "up the kernel state.")
-        .callAfterParsing(KJ_BIND_METHOD(*this, run))
+        .expectArg("<storage-location>", KJ_BIND_METHOD(*this, run))
         .build();
   }
 
@@ -1032,12 +1093,12 @@ private:
     MACHINE_FAILURES
   } mode = UNSET;
 
-  kj::MainBuilder::Validity run() {
+  kj::MainBuilder::Validity run(kj::StringPtr path) {
     switch (mode) {
       case UNSET:
         return "you must specify a mode";
       case DIRECT:
-        runDirect();
+        runDirect(path);
         return true;
       case NO_FAILURES:
       case PROCESS_FAILURES:
@@ -1046,9 +1107,8 @@ private:
     }
   }
 
-  void runDirect() {
-    const char* path = "/var/tmp/blackrock-journal-fuzz-test";
-    KJ_SYSCALL(mkdir(path, 0700));
+  void runDirect(kj::StringPtr path) {
+    KJ_SYSCALL(mkdir(path.cStr(), 0700));
     KJ_DEFER(sandstorm::recursivelyDelete(path));
     auto dirfd = sandstorm::raiiOpen(path, O_RDONLY | O_DIRECTORY);
 

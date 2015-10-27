@@ -6,6 +6,7 @@
 #include <kj/debug.h>
 #include <unistd.h>
 #include <kj/function.h>
+#include <sandstorm/util.h>
 
 namespace blackrock {
 namespace storage {
@@ -348,12 +349,16 @@ JournalLayer::Transaction::Transaction(JournalLayer &journal): journal(journal) 
 JournalLayer::Transaction::~Transaction() noexcept(false) {}
 
 kj::Own<BlobLayer::Object> JournalLayer::Transaction::wrap(Object& object) {
+  KJ_REQUIRE(!committed);
+
   auto result = kj::refcounted<LockedObject>(kj::addRef(object));
   objects.add(kj::addRef(*result));
   return kj::mv(result);
 }
 
 kj::Own<BlobLayer::Temporary> JournalLayer::Transaction::wrap(RecoverableTemporary& object) {
+  KJ_REQUIRE(!committed);
+
   auto result = kj::refcounted<LockedTemporary>(kj::addRef(object));
   temporaries.add(kj::addRef(*result));
   return kj::mv(result);
@@ -361,6 +366,8 @@ kj::Own<BlobLayer::Temporary> JournalLayer::Transaction::wrap(RecoverableTempora
 
 kj::Own<JournalLayer::Object> JournalLayer::Transaction::createObject(
     ObjectId id, Xattr xattr, kj::Own<BlobLayer::Temporary> content) {
+  KJ_REQUIRE(!committed);
+
   auto result = kj::refcounted<JournalLayer::Object>(journal, id, kj::heap<FutureObject>());
   objects.add(kj::refcounted<LockedObject>(kj::addRef(*result), xattr, kj::mv(content)));
   return kj::mv(result);
@@ -368,6 +375,8 @@ kj::Own<JournalLayer::Object> JournalLayer::Transaction::createObject(
 
 kj::Own<JournalLayer::RecoverableTemporary> JournalLayer::Transaction::createRecoverableTemporary(
     RecoveryId id, TemporaryXattr xattr, kj::Own<BlobLayer::Temporary> content) {
+  KJ_REQUIRE(!committed);
+
   auto result = kj::refcounted<JournalLayer::RecoverableTemporary>(
       journal, id, kj::heap<FutureTemporary>());
   temporaries.add(kj::refcounted<LockedTemporary>(kj::addRef(*result), xattr, kj::mv(content)));
@@ -376,6 +385,9 @@ kj::Own<JournalLayer::RecoverableTemporary> JournalLayer::Transaction::createRec
 
 kj::Promise<void> JournalLayer::Transaction::commit(
     kj::Maybe<kj::Own<RecoverableTemporary>> tempToConsume) {
+  KJ_REQUIRE(!committed);
+  committed = true;
+
   kj::Promise<void> result = nullptr;
 
   KJ_IF_MAYBE(t, tempToConsume) {
