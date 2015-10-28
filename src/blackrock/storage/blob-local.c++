@@ -193,14 +193,15 @@ private:
           blobLayer.directoryFd, toPath(*r).cStr(),
           blobLayer.directoryFd, path.cStr()), toPath(*r), path);
       recoveryId = nullptr;
-    } else KJ_IF_MAYBE(r2, recoveredId) {
-      KJ_SYSCALL(linkat(
-          blobLayer.directoryFd, toPath(*r2).cStr(),
-          blobLayer.directoryFd, path.cStr(), AT_SYMLINK_FOLLOW));
     } else {
+      if (!blobLayer.recoveryFinished && recoveredId != nullptr) {
+        // Looks like we're recovering, so it's safe to be non-atomic, since we'll reach this
+        // point again.
+        unlinkat(blobLayer.directoryFd, path.cStr(), 0);
+      }
       KJ_SYSCALL(linkat(
           AT_FDCWD, kj::str("/proc/self/fd/", content->getFd()).cStr(),
-          blobLayer.directoryFd, path.cStr(), AT_SYMLINK_FOLLOW));
+          blobLayer.directoryFd, path.cStr(), AT_SYMLINK_FOLLOW), path);
     }
   }
 
@@ -353,10 +354,7 @@ LocalBlobLayer::recoverTemporaries(RecoveryType type) {
 
   auto typeName = kj::str(type);
 
-  // Create directory if it doesn't already exist.
-  mkdirat(directoryFd, typeName.cStr(), 0777);
-
-  return KJ_MAP(name, sandstorm::listDirectoryAt(directoryFd, typeName))
+  return KJ_MAP(name, sandstorm::listDirectoryAt(directoryFd, kj::str("recovery/", typeName)))
       -> kj::Own<BlobLayer::RecoveredTemporary> {
     uint64_t number = KJ_ASSERT_NONNULL(sandstorm::parseUInt(name, 10));
     RecoveryId id = { type, number };

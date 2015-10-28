@@ -292,7 +292,9 @@ public:
     }
 
     if (removed) {
-      // Nothing to do here: just release the temporary.
+      // Force immediate deletion. We know that no one has a reference to the object since
+      // transactionally deleting temporaries requires giving up your reference.
+      object->inner = nullptr;
     }
 
     object->changeCount += changeCount;
@@ -409,6 +411,10 @@ kj::Promise<void> JournalLayer::Transaction::commit(
       KJ_IF_MAYBE(entry, temp->getJournalEntry(journal.stagingIdCounter++)) {
         entries.add(*entry);
       }
+    }
+
+    for (auto i: kj::indices(entries)) {
+      entries[i].txSize = entries.size() - i;
     }
 
     // Write to the journal.
@@ -600,10 +606,10 @@ void JournalLayer::Recovery::commitSavedTransaction(BlobLayer::Content& content)
 
   content.read(start, entries.asBytes());
 
-  uint32_t expectedTxSize = 0;
+  uint32_t expectedTxSize = 0;  // 0 = expect new transaction; non-zero = expect that txSize next
   JournalEntry* txnStart = entries.begin();
   for (auto& entry: entries) {
-    if (expectedTxSize > 0 && entry.txSize != expectedTxSize) {
+    if ((expectedTxSize > 0 && entry.txSize != expectedTxSize) || entry.txSize == 0) {
       // It would seem that the journal is invalid starting here, perhaps because the last
       // transaction had only been partially flushed to disk. In particular it's possible for
       // the file end pointer to be updated before the actual content has been flushed, leaving
@@ -633,6 +639,7 @@ JournalLayer& JournalLayer::Recovery::finish() {
   // Init JournalLayer members.
   blobLayer = &blobLayerRecovery.finish();
   journalFile = blobLayer->newTemporary();
+  journalFile->setRecoveryId(RecoveryId(RecoveryType::JOURNAL, 0));
   writeQueue = kj::READY_NOW;
 
   return *this;
@@ -640,7 +647,7 @@ JournalLayer& JournalLayer::Recovery::finish() {
 
 void JournalLayer::Recovery::replayEntry(
     BlobLayer::Recovery& blobLayer, const JournalEntry& entry) {
-  kj::Own<BlobLayer::RecoveredTemporary> staging;
+  kj::Maybe<kj::Own<BlobLayer::RecoveredTemporary>> staging;
 
   switch (entry.type) {
     case JournalEntry::Type::CREATE_OBJECT:
@@ -648,13 +655,10 @@ void JournalLayer::Recovery::replayEntry(
     case JournalEntry::Type::CREATE_TEMPORARY:
     case JournalEntry::Type::UPDATE_TEMPORARY: {
       auto iter = recoveredStaging.find(entry.stagingId);
-      if (iter == recoveredStaging.end()) {
-        // This operation must have already been carried out, as the source staging file is
-        // absent.
-        return;
+      if (iter != recoveredStaging.end()) {
+        staging = kj::mv(iter->second);
+        recoveredStaging.erase(iter);
       }
-      staging = kj::mv(iter->second);
-      recoveredStaging.erase(iter);
       break;
     }
 
@@ -667,14 +671,26 @@ void JournalLayer::Recovery::replayEntry(
 
   switch (entry.type) {
     case JournalEntry::Type::CREATE_OBJECT:
-      staging->keepAs(entry.object.id, entry.object.xattr);
+      KJ_IF_MAYBE(s, staging) {
+        s->get()->keepAs(entry.object.id, entry.object.xattr);
+      } else {
+        // Staging file is gone, so this object creation must have already happened. No need
+        // to `goto updateXattr` as we know there can't be any previous op applying to this object.
+      }
       return;
 
     case JournalEntry::Type::UPDATE_OBJECT:
-      staging->keepAs(entry.object.id, entry.object.xattr);
+      KJ_IF_MAYBE(s, staging) {
+        s->get()->keepAs(entry.object.id, entry.object.xattr);
+      } else {
+        // Staging file is missing, probably indicating this op already happend. However, we must
+        // still update the xattr as replaying a previous op might have reverted it.
+        goto updateXattr;
+      }
       return;
 
     case JournalEntry::Type::UPDATE_XATTR:
+    updateXattr:
       KJ_IF_MAYBE(object, blobLayer.getObject(entry.object.id)) {
         object->get()->setXattr(entry.object.xattr);
       }
@@ -687,24 +703,36 @@ void JournalLayer::Recovery::replayEntry(
       return;
 
     case JournalEntry::Type::CREATE_TEMPORARY: {
-      if (recoveredTemporaries.count(entry.temporary.id) == 0) {
-        JournalLayer& super = *this;
-        recoveredTemporaries[entry.temporary.id] =
-            kj::heap<JournalLayer::RecoveredTemporary>(super,
-                entry.temporary.id, entry.temporary.xattr, kj::mv(staging));
+      KJ_IF_MAYBE(s, staging) {
+        if (recoveredTemporaries.count(entry.temporary.id) == 0) {
+          JournalLayer& super = *this;
+          recoveredTemporaries[entry.temporary.id] =
+              kj::heap<JournalLayer::RecoveredTemporary>(super,
+                  entry.temporary.id, entry.temporary.xattr, kj::mv(*s));
+        }
+      } else {
+        // Staging file is gone, so this temp creation must have already happened. No need
+        // to `goto updateXattr` as we know there can't be any previous op applying to this temp.
       }
       return;
     }
 
     case JournalEntry::Type::UPDATE_TEMPORARY: {
-      auto iter = recoveredTemporaries.find(entry.temporary.id);
-      if (iter != recoveredTemporaries.end()) {
-        iter->second->overwrite(entry.temporary.xattr, kj::mv(staging));
+      KJ_IF_MAYBE(s, staging) {
+        auto iter = recoveredTemporaries.find(entry.temporary.id);
+        if (iter != recoveredTemporaries.end()) {
+          iter->second->overwrite(entry.temporary.xattr, kj::mv(*s));
+        }
+      } else {
+        // Staging file is missing, probably indicating this op already happend. However, we must
+        // still update the xattr as replaying a previous op might have reverted it.
+        goto updateTemporaryXattr;
       }
       return;
     }
 
-    case JournalEntry::Type::UPDATE_TEMPORARY_XATTR: {
+    case JournalEntry::Type::UPDATE_TEMPORARY_XATTR:
+    updateTemporaryXattr: {
       auto iter = recoveredTemporaries.find(entry.temporary.id);
       if (iter != recoveredTemporaries.end()) {
         iter->second->setXattr(entry.temporary.xattr);

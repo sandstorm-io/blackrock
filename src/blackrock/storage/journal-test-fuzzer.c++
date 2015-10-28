@@ -16,6 +16,7 @@
 #include <sys/types.h>
 #include <time.h>
 #include <signal.h>
+#include <set>
 
 namespace blackrock {
 namespace storage {
@@ -475,18 +476,36 @@ private:
   ObjectId id;
 };
 
+std::set<uint64_t> tempsBeingDeleted;
+// HACK: The temporaries which are currently pending a deletion request. We will inconsistencies
+//   in these during recovery.
+
 class RecoverableTemp: public RecoverableCapability, public TestJournal::Object::Server {
 public:
   RecoverableTemp(RecoverySet& recoverySet, uint64_t id, TestJournal::Object::Client inner)
-      : RecoverableCapability(recoverySet, kj::mv(inner)), id(id) {}
+      : RecoverableCapability(recoverySet, kj::mv(inner)), id(id) {
+//    auto msg = kj::str(id >> 48, ": ", id & ((1ull << 48) - 1), " !!!\n");
+//    kj::FdOutputStream(STDOUT_FILENO).write(msg.begin(), msg.size());
+  }
+  ~RecoverableTemp() noexcept(false) {
+//    auto msg = kj::str(id >> 48, ": ", id & ((1ull << 48) - 1), " XXX\n");
+//    kj::FdOutputStream(STDOUT_FILENO).write(msg.begin(), msg.size());
+  }
 
   void recover(TestJournal::Client journal,
                std::map<TempLabel, TempClient>& recovered) override {
+//    auto msg = kj::str(id >> 48, ": ", id & ((1ull << 48) - 1), " RECOVER\n");
+//    kj::FdOutputStream(STDOUT_FILENO).write(msg.begin(), msg.size());
+
     TempLabel label;
     memset(&label, 0, sizeof(label));
     label.isTransaction = false;
     label.id = id;
     auto iter = recovered.find(label);
+    if (iter == recovered.end() && tempsBeingDeleted.count(id)) {
+      // ignore
+      return;
+    }
     KJ_ASSERT(iter != recovered.end(), "temporary was not recovered",
               (id >> 48), (id & ((1ull << 48) - 1)));
     setInner(kj::mv(iter->second.client));
@@ -508,14 +527,14 @@ class RecoverableTransaction
 public:
   RecoverableTransaction(RecoverySet& recoverySet, uint64_t id,
                          TestJournal::Transaction::Client inner)
-      : RecoverableCapability(recoverySet, kj::mv(inner)), id(id),
-        tasks(*this) {}
+      : RecoverableCapability(recoverySet, kj::cp(inner)), id(id),
+        tasks(*this), commitSentinel(makeCommitSentinel(kj::mv(inner))) {}
 
   void recover(TestJournal::Client journal,
                std::map<TempLabel, TempClient>& recovered) override {
     auto newInner = journal.newTransactionRequest().send().getTransaction();
 
-    if (commitCalled && !committed) {
+    if (!committed) {
       // Check if commit succeeded.
       TempLabel label;
       memset(&label, 0, sizeof(label));
@@ -525,23 +544,63 @@ public:
       if (iter != recovered.end()) {
         committed = true;
         recovered.erase(iter);
-      }
-    }
 
-    if (!committed) {
-      // Repelay previous calls before continuing current ones.
-      auto promises = kj::heapArrayBuilder<kj::Promise<void>>(calls.size());
-      for (auto& call: calls) {
-        promises.add(replayCall(newInner, *call));
-      }
+        for (auto& call: calls) {
+          if (call->methodId == 0) {
+            // createObject
+            auto req = journal.openObjectRequest();
+            auto id = call->params.getReader().as<CreateObjectParams>().getId();
+            req.setId(id);
 
-      // Make sure any new calls to the inner capability are delayed until all replayed calls
-      // finish, otherwise we might call commit too early.
-      setInner(kj::joinPromises(promises.finish()).then([KJ_MVCAP(newInner)]() mutable {
-        return kj::mv(newInner);
-      }));
-    } else {
-      setInner(kj::mv(newInner));
+            // We need to delay creation of the RecoverableObject to prevent it from becoming
+            // part of this recovery cycle.
+            auto replacement = req.send().getObject();
+            call->resultFulfiller->fulfill(kj::evalLater(
+                [this,id,KJ_MVCAP(replacement)]() mutable -> TestJournal::Object::Client {
+                  return kj::heap<RecoverableObject>(getRecoverySet(), id, kj::mv(replacement));
+                }));
+          } else if (call->methodId == 1) {
+            // createTemp
+            auto label = dataTo<TempLabel>(
+                call->params.getReader().as<CreateTempParams>().getXattr());
+            auto iter = recovered.find(label);
+            KJ_ASSERT(iter != recovered.end(),
+                "failed to recover temporary that was just committed");
+
+            // We need to delay creation of the RecoverableTemp to prevent it from becoming
+            // part of this recovery cycle.
+            auto replacement = kj::mv(iter->second.client);
+            call->resultFulfiller->fulfill(kj::evalLater(
+                [this,label,KJ_MVCAP(replacement)]() mutable -> TestJournal::Object::Client {
+                  return kj::heap<RecoverableTemp>(getRecoverySet(), label.id, kj::mv(replacement));
+                }));
+
+            recovered.erase(iter);
+          } else {
+            call->resultFulfiller->fulfill(nullptr);
+          }
+        }
+
+        setInner(kj::mv(newInner));
+      } else {
+        // Replay previous calls before continuing current ones.
+        commitSentinel = makeCommitSentinel(newInner);
+        auto promises = kj::heapArrayBuilder<kj::Promise<void>>(calls.size());
+        for (auto& call: calls) {
+          auto& callRef = *call;
+          // Delay replaying the call until later because first we need to finish recovering all
+          // the input object references.
+          promises.add(kj::evalLater([this,newInner,&callRef]() mutable {
+            return replayCall(kj::mv(newInner), callRef);
+          }));
+        }
+
+        // Make sure any new calls to the inner capability are delayed until all replayed calls
+        // finish, otherwise we might call commit too early.
+        setInner(kj::joinPromises(promises.finish()).then([KJ_MVCAP(newInner)]() mutable {
+          return kj::mv(newInner);
+        }));
+      }
     }
   }
 
@@ -585,15 +644,25 @@ private:
   capnp::MallocMessageBuilder arena;
   kj::Vector<kj::Own<ReplayableCall>> calls;
   bool committed = false;
-  bool commitCalled = false;
 
   kj::TaskSet tasks;
+  TestJournal::Object::Client commitSentinel;
 
   void taskFailed(kj::Exception&& exception) override {
     if (exception.getType() != kj::Exception::Type::DISCONNECTED) {
       KJ_DEFER(abort());
       KJ_LOG(FATAL, exception);
     }
+  }
+
+  TestJournal::Object::Client makeCommitSentinel(TestJournal::Transaction::Client inner) {
+    TempLabel label;
+    memset(&label, 0, sizeof(label));
+    label.isTransaction = true;
+    label.id = id;
+    auto req = inner.createTempRequest();
+    memcpy(req.initXattr(sizeof(label)).begin(), &label, sizeof(label));
+    return req.send().getObject();
   }
 
   kj::Promise<void> doReplayable(uint16_t methodId, capnp::AnyStruct::Reader params,
@@ -618,10 +687,7 @@ private:
 
     return req.send()
         .then([this, &call](capnp::Response<capnp::AnyPointer>&& response) -> kj::Promise<void> {
-      RecoverySetCapTableReader capTable(
-          getRecoverySet(), capnp::typeId<TestJournal::Transaction>(), call.methodId,
-          call.params.getReader());
-      auto pointers = capTable.imbue(response).getAs<capnp::AnyStruct>().getPointerSection();
+      auto pointers = response.getAs<capnp::AnyStruct>().getPointerSection();
       if (pointers.size() > 0) {
         call.lastResult = pointers[0].getAs<TestJournal::Object>();
       } else {
@@ -670,8 +736,9 @@ public:
       }
 
       for (auto& entry: recovered) {
-        KJ_ASSERT(entry.first.isTransaction,
-            "recovered unexpected temporaries");
+        KJ_ASSERT(entry.first.isTransaction || tempsBeingDeleted.count(entry.first.id) > 0,
+            "recovered unexpected temporaries",
+            (entry.first.id >> 48), (entry.first.id & ((1ull << 48) - 1)));
       }
     });
   }
@@ -698,6 +765,9 @@ public:
         return serverSet.add(kj::heap<RecoverableTemp>(*this,
           dataTo<TempLabel>(params.as<TestJournal::Transaction::CreateTempParams>().getXattr()).id,
           inner.castAs<TestJournal::Object>()));
+      case capnp::typeId<TestJournal::Transaction>() + 2:
+      case capnp::typeId<TestJournal::Transaction>() + 3:
+        return nullptr;
 
       default:
         KJ_FAIL_ASSERT("unknown method", creatingInterfaceId, creatingMethodId);
@@ -740,24 +810,29 @@ RecoverableCapability::~RecoverableCapability() {
 }
 
 kj::Promise<void> RecoverableTransaction::commit(CommitContext context) {
-  commitCalled = true;
-
-  auto req = getInner().castAs<TestJournal::Transaction>().commitRequest();
-  auto params = context.getParams();
-  if (params.hasTempToConsume()) {
-    req.setTempToConsume(getRecoverySet().unwrap(params.getTempToConsume())
-        .castAs<TestJournal::Object>());
-  }
-
   uint oldGen = getGeneration();
-  return req.send().then([this,context](auto&& response) mutable -> kj::Promise<void> {
-    committed = true;
 
-    for (auto& call: calls) {
-      call->resultFulfiller->fulfill(kj::mv(call->lastResult));
+  return commitSentinel.whenResolved().then([this,context]() mutable {
+    auto req = getInner().castAs<TestJournal::Transaction>().commitRequest();
+    auto params = context.getParams();
+    if (params.hasTempToConsume()) {
+      req.setTempToConsume(getRecoverySet().unwrap(params.getTempToConsume())
+          .castAs<TestJournal::Object>());
     }
-    return kj::READY_NOW;
-  }, [this,oldGen,context](kj::Exception&& e) mutable -> kj::Promise<void> {
+
+    return req.send().then([this,context](auto&& response) mutable -> kj::Promise<void> {
+      committed = true;
+
+      for (auto& call: calls) {
+        call->resultFulfiller->fulfill(
+            getRecoverySet()
+                .wrap(capnp::typeId<TestJournal::Transaction>(), call->methodId,
+                      call->params.getReader(), kj::mv(call->lastResult))
+                .castAs<TestJournal::Object>());
+      }
+      return kj::READY_NOW;
+    });
+  }).catch_([this,oldGen,context](kj::Exception&& e) mutable -> kj::Promise<void> {
     if (e.getType() == kj::Exception::Type::DISCONNECTED) {
       return reconnect(oldGen).then([this,context]() mutable {
         return commit(context);
@@ -794,7 +869,7 @@ public:
   uint64_t exponential(uint maxBits) {
     uint64_t result;
     fill(result);
-    return result >> (64 - maxBits);
+    return result >> (63 - in(0, maxBits));
   }
 
   void fill(void* buf, size_t size) {
@@ -900,6 +975,11 @@ private:
     kj::FdOutputStream(STDOUT_FILENO).write(message.begin(), message.size());
   }
 
+  void logClose(ObjectId id) {
+    auto message = kj::str(clientId, ": ",id, " x\n");
+    kj::FdOutputStream(STDOUT_FILENO).write(message.begin(), message.size());
+  }
+
   void logDelete(ObjectId id) {
     auto message = kj::str(clientId, ": ",id, " X\n");
     kj::FdOutputStream(STDOUT_FILENO).write(message.begin(), message.size());
@@ -925,6 +1005,7 @@ private:
     }
 
     kj::Maybe<TestJournal::Object::Client> tempToConsume;
+    kj::Vector<uint64_t> myTempsBeingDeleted;
 
     uint count = random.in(0, 16);
     for (uint i = 0; i < count; i++) {
@@ -951,14 +1032,15 @@ private:
           if (random.flip()) {
             // Close or delete it.
 
-            logDelete(object.id);
-
             if (random.flip()) {
               // Delete it.
+              logDelete(object.id);
               auto req = txn.removeRequest();
               req.setObject(kj::mv(*cap));
               promises.add(req.send().then([](auto&&) {}));
               object.id = nullptr;
+            } else {
+              logClose(object.id);
             }
 
             object.cap = nullptr;
@@ -1023,6 +1105,8 @@ private:
             // Deleting a temporary is actually a matter of dropping the cap, but let's hold on
             // to one cap to consume as part of the transaction, too.
             logDelete(object.xattr.id);
+            KJ_ASSERT(tempsBeingDeleted.insert(object.xattr.id).second);
+            myTempsBeingDeleted.add(object.xattr.id);
 
             tempToConsume = kj::mv(*cap);
             object.cap = nullptr;
@@ -1071,13 +1155,16 @@ private:
     }
 
     return kj::joinPromises(promises.releaseAsArray())
-        .then([this,KJ_MVCAP(txn),KJ_MVCAP(tempToConsume)]() mutable {
+        .then([this,KJ_MVCAP(txn),KJ_MVCAP(tempToConsume),KJ_MVCAP(myTempsBeingDeleted)]() mutable {
       auto req = txn.commitRequest();
       KJ_IF_MAYBE(t, tempToConsume) {
         req.setTempToConsume(kj::mv(*t));
       }
-      return req.send().then([this](auto&&) {
+      return req.send().then([this,KJ_MVCAP(myTempsBeingDeleted)](auto&&) {
         logCommit();
+        for (auto id: myTempsBeingDeleted) {
+          KJ_ASSERT(tempsBeingDeleted.erase(id));
+        }
       });
     });
   }
@@ -1089,8 +1176,7 @@ private:
       if (object.id != nullptr) {
         TestJournal::Object::Client cap = nullptr;
         KJ_IF_MAYBE(c, object.cap) {
-          cap = kj::mv(*c);
-          object.cap = nullptr;
+          cap = *c;
         } else {
           auto req = journal.openObjectRequest();
           object.id.copyTo(req.initId());
@@ -1129,7 +1215,6 @@ private:
               memcmp(actualContent.begin(), object.content.begin(), object.content.size()) == 0,
               actualContent.size(), object.content.size());
         }));
-        object.cap = nullptr;
       }
     }
 
@@ -1158,7 +1243,9 @@ class JournalFuzzerMain {
   // correctly syncing underlying storage.
 
 public:
-  JournalFuzzerMain(kj::ProcessContext& context): context(context) {}
+  JournalFuzzerMain(kj::ProcessContext& context): context(context) {
+    kj::_::Debug::setLogLevel(kj::LogSeverity::INFO);
+  }
 
   kj::MainFunc getMain() {
     return kj::MainBuilder(context, "Blackrock storage fuzzer",
@@ -1344,6 +1431,8 @@ private:
     Random random(time(nullptr));
     auto killer = atRandomIntervals(ioContext, random, [&]() {
       context.warning("**** KILL KILL KILL ****");
+      kj::StringPtr msg("**** KILL KILL KILL ****\n");
+      kj::FdOutputStream(STDOUT_FILENO).write(msg.begin(), msg.size());
       child->kill();
       child = nullptr;
       child = kj::heap<ChildProc>(path, ioContext);
