@@ -15,6 +15,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <time.h>
+#include <signal.h>
 
 namespace blackrock {
 namespace storage {
@@ -410,14 +411,6 @@ protected:
     });
   }
 
-private:
-  RecoverySet& recoverySet;
-  uint generation = 0;
-  bool waitingForReconnect = false;
-  capnp::Capability::Client inner;
-  kj::Own<kj::PromiseFulfiller<void>> reconnectDoneFulfiller;
-  kj::ForkedPromise<void> reconnectDonePromise = nullptr;
-
   kj::Promise<void> reconnect(uint oldGeneration) {
     if (generation > oldGeneration) {
       // Already advanced to next generation.
@@ -432,6 +425,17 @@ private:
 
     return reconnectDonePromise.addBranch();
   }
+
+  uint getGeneration() { return generation; }
+  RecoverySet& getRecoverySet() { return recoverySet; }
+
+private:
+  RecoverySet& recoverySet;
+  uint generation = 0;
+  bool waitingForReconnect = false;
+  capnp::Capability::Client inner;
+  kj::Own<kj::PromiseFulfiller<void>> reconnectDoneFulfiller;
+  kj::ForkedPromise<void> reconnectDonePromise = nullptr;
 };
 
 class RecoverableJournal: public RecoverableCapability, public TestJournal::Server {
@@ -483,7 +487,8 @@ public:
     label.isTransaction = false;
     label.id = id;
     auto iter = recovered.find(label);
-    KJ_ASSERT(iter != recovered.end(), "temporary was not recovered");
+    KJ_ASSERT(iter != recovered.end(), "temporary was not recovered",
+              (id >> 48), (id & ((1ull << 48) - 1)));
     setInner(kj::mv(iter->second.client));
     recovered.erase(iter);
   }
@@ -525,50 +530,60 @@ public:
 
     if (!committed) {
       // Repelay previous calls before continuing current ones.
+      auto promises = kj::heapArrayBuilder<kj::Promise<void>>(calls.size());
       for (auto& call: calls) {
-        auto req = newInner.typelessRequest(call.interfaceId, call.methodId, nullptr);
-        req.setAs<capnp::AnyStruct>(call.params.getAsReader<capnp::AnyStruct>());
-        tasks.add(req.send().then([](auto) {}));
+        promises.add(replayCall(newInner, *call));
       }
+
+      // Make sure any new calls to the inner capability are delayed until all replayed calls
+      // finish, otherwise we might call commit too early.
+      setInner(kj::joinPromises(promises.finish()).then([KJ_MVCAP(newInner)]() mutable {
+        return kj::mv(newInner);
+      }));
+    } else {
+      setInner(kj::mv(newInner));
     }
-
-    setInner(kj::mv(newInner));
   }
 
-  kj::Promise<void> dispatchCall(uint64_t interfaceId, uint16_t methodId,
-      capnp::CallContext<capnp::AnyPointer, capnp::AnyPointer> context) override {
-    KJ_REQUIRE(!commitCalled);
-
-    bool isCommit = interfaceId == capnp::typeId<TestJournal::Transaction>() &&
-                    methodId == 4;
-    commitCalled = isCommit;
-
-    ReplayableCall replay = {
-      interfaceId, methodId,
-      arena.getOrphanage().newOrphanCopy(context.getParams())
-    };
-
-    return doCall(interfaceId, methodId, context).then([this,isCommit,KJ_MVCAP(replay)]() mutable {
-      if (isCommit) {
-        committed = true;
-        calls = kj::Vector<ReplayableCall>();
-      } else {
-        calls.add(kj::mv(replay));
-      }
-    });
+  kj::Promise<void> createObject(CreateObjectContext context) override {
+    auto paf = kj::newPromiseAndFulfiller<TestJournal::Object::Client>();
+    context.getResults().setObject(kj::mv(paf.promise));
+    return doReplayable(0, context.getParams(), kj::mv(paf.fulfiller));
   }
+
+  kj::Promise<void> createTemp(CreateTempContext context) override {
+    auto paf = kj::newPromiseAndFulfiller<TestJournal::Object::Client>();
+    context.getResults().setObject(kj::mv(paf.promise));
+    return doReplayable(1, context.getParams(), kj::mv(paf.fulfiller));
+  }
+
+  kj::Promise<void> update(UpdateContext context) override {
+    return doReplayable(2, context.getParams());
+  }
+
+  kj::Promise<void> remove(RemoveContext context) override {
+    return doReplayable(3, context.getParams());
+  }
+
+  kj::Promise<void> commit(CommitContext context) override;
 
 private:
   uint64_t id;
 
   struct ReplayableCall {
-    uint64_t interfaceId;
     uint16_t methodId;
-    capnp::Orphan<capnp::AnyPointer> params;
+    capnp::Orphan<capnp::AnyStruct> params;
+
+    TestJournal::Object::Client lastResult;
+    kj::Own<kj::PromiseFulfiller<TestJournal::Object::Client>> resultFulfiller;
+    // Some methods return objects, but if we replay the method later then we may need to
+    // substitute a different object. So, we return promise capabilities first. `lastResult`
+    // is the capability we got the last time we made the call. Once the txn is actually
+    // committed, we must fulfill `resultFulfiller` with this capability.
   };
 
   capnp::MallocMessageBuilder arena;
-  kj::Vector<ReplayableCall> calls;
+  kj::Vector<kj::Own<ReplayableCall>> calls;
   bool committed = false;
   bool commitCalled = false;
 
@@ -580,6 +595,55 @@ private:
       KJ_LOG(FATAL, exception);
     }
   }
+
+  kj::Promise<void> doReplayable(uint16_t methodId, capnp::AnyStruct::Reader params,
+      kj::Own<kj::PromiseFulfiller<TestJournal::Object::Client>> fulfiller =
+          kj::heap<DummyFulfiller>()) {
+    auto replay = kj::heap(ReplayableCall {
+      methodId,
+      arena.getOrphanage().newOrphanCopy(params),
+      nullptr,
+      kj::mv(fulfiller)
+    });
+
+    calls.add(kj::mv(replay));
+    return replayCall(getInner(), *calls.back());
+  }
+
+  kj::Promise<void> replayCall(capnp::Capability::Client inner, ReplayableCall& call) {
+    auto req = inner.typelessRequest(capnp::typeId<TestJournal::Transaction>(),
+        call.methodId, nullptr);
+    RecoverySetCapTableBuilder capTable(getRecoverySet());
+    capTable.imbue(req).setAs<capnp::AnyStruct>(call.params.getReader());
+
+    return req.send()
+        .then([this, &call](capnp::Response<capnp::AnyPointer>&& response) -> kj::Promise<void> {
+      RecoverySetCapTableReader capTable(
+          getRecoverySet(), capnp::typeId<TestJournal::Transaction>(), call.methodId,
+          call.params.getReader());
+      auto pointers = capTable.imbue(response).getAs<capnp::AnyStruct>().getPointerSection();
+      if (pointers.size() > 0) {
+        call.lastResult = pointers[0].getAs<TestJournal::Object>();
+      } else {
+        call.lastResult = nullptr;
+      }
+      return kj::READY_NOW;
+    }, [](kj::Exception&& e) -> kj::Promise<void> {
+      if (e.getType() == kj::Exception::Type::DISCONNECTED) {
+        // Will retry later.
+        return kj::READY_NOW;
+      } else {
+        return kj::mv(e);
+      }
+    });
+  }
+
+  class DummyFulfiller: public kj::PromiseFulfiller<TestJournal::Object::Client> {
+  public:
+    void fulfill(TestJournal::Object::Client&&) override {}
+    void reject(kj::Exception&& exception) override {}
+    bool isWaiting() override { return false; }
+  };
 };
 
 class RecoverySet {
@@ -673,6 +737,35 @@ RecoverableCapability::RecoverableCapability(
 }
 RecoverableCapability::~RecoverableCapability() {
   recoverySet.remove(this);
+}
+
+kj::Promise<void> RecoverableTransaction::commit(CommitContext context) {
+  commitCalled = true;
+
+  auto req = getInner().castAs<TestJournal::Transaction>().commitRequest();
+  auto params = context.getParams();
+  if (params.hasTempToConsume()) {
+    req.setTempToConsume(getRecoverySet().unwrap(params.getTempToConsume())
+        .castAs<TestJournal::Object>());
+  }
+
+  uint oldGen = getGeneration();
+  return req.send().then([this,context](auto&& response) mutable -> kj::Promise<void> {
+    committed = true;
+
+    for (auto& call: calls) {
+      call->resultFulfiller->fulfill(kj::mv(call->lastResult));
+    }
+    return kj::READY_NOW;
+  }, [this,oldGen,context](kj::Exception&& e) mutable -> kj::Promise<void> {
+    if (e.getType() == kj::Exception::Type::DISCONNECTED) {
+      return reconnect(oldGen).then([this,context]() mutable {
+        return commit(context);
+      });
+    } else {
+      return kj::mv(e);
+    }
+  });
 }
 
 // =======================================================================================
@@ -782,36 +875,43 @@ private:
   kj::TaskSet tasks;
 
   void logCreate(ObjectId id, capnp::Data::Reader xattr, capnp::Data::Reader content) {
-    auto message = kj::str(id, " <= ", sandstorm::hexEncode(xattr), " : ", content.size(), '\n');
+    auto message = kj::str(clientId, ": ",
+        id, " <= ", sandstorm::hexEncode(xattr), " : ", content.size(), '\n');
     kj::FdOutputStream(STDOUT_FILENO).write(message.begin(), message.size());
   }
 
-  void logCreate(uint id, capnp::Data::Reader xattr, capnp::Data::Reader content) {
-    auto message = kj::str(id, " <= ", sandstorm::hexEncode(xattr), " : ", content.size(), '\n');
+  void logCreate(uint64_t id, capnp::Data::Reader xattr, capnp::Data::Reader content) {
+    auto message = kj::str(clientId, ": ", id & 0x0000FFFFFFFFFFFFull,
+        " <= ", sandstorm::hexEncode(xattr), " : ", content.size(), '\n');
     kj::FdOutputStream(STDOUT_FILENO).write(message.begin(), message.size());
   }
 
   void logUpdate(ObjectId id, capnp::Data::Reader xattr, capnp::Data::Reader content) {
-    auto message = kj::str(
+    auto message = kj::str(clientId, ": ",
         id, " <- ", xattr.size() == 0 ? "?" : sandstorm::hexEncode(xattr).cStr(),
             " : ", content.size() == 0 ? "" : kj::str(content.size()).cStr(), '\n');
     kj::FdOutputStream(STDOUT_FILENO).write(message.begin(), message.size());
   }
 
-  void logUpdate(uint id, capnp::Data::Reader xattr, capnp::Data::Reader content) {
-    auto message = kj::str(
-        id, " <- ", xattr.size() == 0 ? "?" : sandstorm::hexEncode(xattr).cStr(),
-            " : ", content.size() == 0 ? "" : kj::str(content.size()).cStr(), '\n');
+  void logUpdate(uint64_t id, capnp::Data::Reader xattr, capnp::Data::Reader content) {
+    auto message = kj::str(clientId, ": ", id & 0x0000FFFFFFFFFFFFull,
+        " <- ", xattr.size() == 0 ? "?" : sandstorm::hexEncode(xattr).cStr(),
+        " : ", content.size() == 0 ? "" : kj::str(content.size()).cStr(), '\n');
     kj::FdOutputStream(STDOUT_FILENO).write(message.begin(), message.size());
   }
 
   void logDelete(ObjectId id) {
-    auto message = kj::str(id, " X\n");
+    auto message = kj::str(clientId, ": ",id, " X\n");
     kj::FdOutputStream(STDOUT_FILENO).write(message.begin(), message.size());
   }
 
-  void logDelete(uint id) {
-    auto message = kj::str(id, " X\n");
+  void logDelete(uint64_t id) {
+    auto message = kj::str(clientId, ": ", id & 0x0000FFFFFFFFFFFFull, " X\n");
+    kj::FdOutputStream(STDOUT_FILENO).write(message.begin(), message.size());
+  }
+
+  void logCommit() {
+    auto message = kj::str(clientId, ": COMMIT\n");
     kj::FdOutputStream(STDOUT_FILENO).write(message.begin(), message.size());
   }
 
@@ -952,7 +1052,7 @@ private:
         } else {
           // Create a new temporary!
           memset(&object.xattr, 0, sizeof(object.xattr));
-          object.xattr.id = tempCount++;
+          object.xattr.id = tempCount++ | (static_cast<uint64_t>(clientId) << 48u);
           random.fill(object.xattr.other);
           object.content = kj::heapArray<byte>(random.exponential(16));
           random.fill(object.content.begin(), object.content.size());
@@ -971,12 +1071,14 @@ private:
     }
 
     return kj::joinPromises(promises.releaseAsArray())
-        .then([KJ_MVCAP(txn),KJ_MVCAP(tempToConsume)]() mutable {
+        .then([this,KJ_MVCAP(txn),KJ_MVCAP(tempToConsume)]() mutable {
       auto req = txn.commitRequest();
       KJ_IF_MAYBE(t, tempToConsume) {
         req.setTempToConsume(kj::mv(*t));
       }
-      return req.send().then([](auto&&) {});
+      return req.send().then([this](auto&&) {
+        logCommit();
+      });
     });
   }
 
@@ -1065,6 +1167,10 @@ public:
         .addOption({"direct"}, [this]() {mode=DIRECT;return true;},
             "Test directly against an in-process journal without any failures, to verify that "
             "it produces expected results under the friendliest circumstances.")
+        .addOption({"in-proc"}, [this]() {mode=IN_PROC;return true;},
+            "Test with the journal in the same process but the recovery layer in-place, but "
+            "with no actual failures occurring. If this fails but --direct passes then there "
+            "is a bug in the test, not the journal.")
         .addOption({"no-fail"}, [this]() {mode=NO_FAILURES;return true;},
             "Test with the journal in a separate process and the recovery layer in-place, but "
             "with no actual failures occurring. If this fails but --direct passes then there "
@@ -1078,20 +1184,36 @@ public:
             "killed. This catches failures to sync(). This requires root privileges. It is "
             "highly recommended that you run it in a virtual machine since it can mess "
             "up the kernel state.")
+        .addOption({"child"}, [this]() {mode=CHILD;return true;},
+            "Run child process. (For internal use only.)")
+        .addOptionWithArg({"clients"}, KJ_BIND_METHOD(*this, setClientCount), "<count>",
+            "Run <count> concurrent clients. Default: 8")
         .expectArg("<storage-location>", KJ_BIND_METHOD(*this, run))
         .build();
   }
 
 private:
   kj::ProcessContext& context;
+  uint clientCount = 8;
 
   enum {
     UNSET,
     DIRECT,
+    IN_PROC,
     NO_FAILURES,
     PROCESS_FAILURES,
-    MACHINE_FAILURES
+    MACHINE_FAILURES,
+    CHILD
   } mode = UNSET;
+
+  kj::MainBuilder::Validity setClientCount(kj::StringPtr arg) {
+    KJ_IF_MAYBE(c, sandstorm::parseUInt(arg, 0)) {
+      clientCount = *c;
+      return true;
+    } else {
+      return "couldn't parse integer";
+    }
+  }
 
   kj::MainBuilder::Validity run(kj::StringPtr path) {
     switch (mode) {
@@ -1100,36 +1222,152 @@ private:
       case DIRECT:
         runDirect(path);
         return true;
+      case IN_PROC:
+        runInProc(path);
+        return true;
       case NO_FAILURES:
+        runNoFail(path);
+        return true;
       case PROCESS_FAILURES:
+        runProcessFailures(path);
+        return true;
       case MACHINE_FAILURES:
         KJ_UNIMPLEMENTED("todo");
+      case CHILD:
+        runChild(path);
+        return true;
     }
+  }
+
+  struct JournalContext {
+    kj::AutoCloseFd dirfd;
+    LocalBlobLayer blobLayer;
+    JournalLayer::Recovery journal;
+    TestJournal::Recovery::Client client;
+
+    JournalContext(kj::StringPtr path, kj::AsyncIoContext& ioContext)
+        : dirfd(sandstorm::raiiOpen(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC)),
+          blobLayer(ioContext.unixEventPort, dirfd),
+          journal(blobLayer),
+          client(kj::heap<TestJournalRecoveryImpl>(journal)) {}
+  };
+
+  struct ChildProc {
+    sandstorm::Pipe pipe;
+    sandstorm::Subprocess subprocess;
+    kj::Own<kj::AsyncIoStream> stream;
+    capnp::TwoPartyClient rpcSystem;
+    TestJournal::Recovery::Client client;
+
+    sandstorm::Subprocess::Options makeSubprocessOptions(kj::StringPtr path) {
+      sandstorm::Subprocess::Options result({
+          "/proc/self/exe", "--child", path});
+      result.stdin = pipe.readEnd;
+      return result;
+    }
+
+    void kill() {
+      subprocess.signal(SIGKILL);
+      (void)subprocess.waitForExitOrSignal();
+    }
+
+    ChildProc(kj::StringPtr path, kj::AsyncIoContext& ioContext)
+        : pipe(sandstorm::Pipe::makeTwoWayAsync()),
+          subprocess(makeSubprocessOptions(path)),
+          stream(ioContext.lowLevelProvider->wrapSocketFd(pipe.writeEnd,
+              kj::LowLevelAsyncIoProvider::ALREADY_CLOEXEC |
+              kj::LowLevelAsyncIoProvider::ALREADY_NONBLOCK)),
+          rpcSystem(*stream),
+          client(rpcSystem.bootstrap().castAs<TestJournal::Recovery>()) {
+      pipe.readEnd = nullptr;
+    }
+  };
+
+  void runChild(kj::StringPtr path) {
+    auto ioContext = kj::setupAsyncIo();
+    JournalContext journal(path, ioContext);
+    auto socket = ioContext.lowLevelProvider->wrapSocketFd(STDIN_FILENO,
+        kj::LowLevelAsyncIoProvider::ALREADY_NONBLOCK);
+    capnp::TwoPartyClient rpc(*socket, journal.client, capnp::rpc::twoparty::Side::SERVER);
+    rpc.onDisconnect().wait(ioContext.waitScope);
+    KJ_FAIL_ASSERT("client disconnected");
   }
 
   void runDirect(kj::StringPtr path) {
     KJ_SYSCALL(mkdir(path.cStr(), 0700));
-    KJ_DEFER(sandstorm::recursivelyDelete(path));
-    auto dirfd = sandstorm::raiiOpen(path, O_RDONLY | O_DIRECTORY);
 
     auto ioContext = kj::setupAsyncIo();
-    LocalBlobLayer blobLayer(ioContext.unixEventPort, dirfd);
-    JournalLayer::Recovery journal(blobLayer);
+    JournalContext journal(path, ioContext);
+    doFuzzer(journal.client.recoverRequest().send().getJournal()).wait(ioContext.waitScope);
+  }
 
-    KJ_IF_MAYBE(exception, kj::runCatchingExceptions([&]() {
-      TestJournal::Recovery::Client client = kj::heap<TestJournalRecoveryImpl>(journal);
-      auto journalClient = client.recoverRequest().send().getJournal();
+  void runInProc(kj::StringPtr path) {
+    KJ_SYSCALL(mkdir(path.cStr(), 0700));
 
-      auto random = kj::heap<Random>(0);
+    auto ioContext = kj::setupAsyncIo();
+    JournalContext journal(path, ioContext);
+    RecoverySet recoverySet;
+    doFuzzer(recoverySet.wrap(journal.client.recoverRequest().send().getJournal()))
+        .wait(ioContext.waitScope);
+  }
 
-      // TODO(now): multiple fuzzer "threads"
-      JournalFuzzer fuzzer(journalClient, *random, 0);
-      fuzzer.run().wait(ioContext.waitScope);
-    })) {
-      // Avoid trying to unwind past this point because there could be tasks on the event queue
-      // still which can't be destroyed cleanly.
-      context.exitError(kj::str(*exception));
-    }
+  void runNoFail(kj::StringPtr path) {
+    KJ_SYSCALL(mkdir(path.cStr(), 0700));
+
+    auto ioContext = kj::setupAsyncIo();
+    ChildProc child(path, ioContext);
+    RecoverySet recoverySet;
+    doFuzzer(recoverySet.wrap(child.client.recoverRequest().send().getJournal()))
+        .wait(ioContext.waitScope);
+  }
+
+  kj::Promise<void> atRandomIntervals(
+      kj::AsyncIoContext& context, Random& random, kj::Function<kj::Promise<void>()>&& func) {
+    return context.lowLevelProvider->getTimer()
+        .afterDelay(random.exponential(14) * kj::MILLISECONDS)
+        .then([this,&context,&random,KJ_MVCAP(func)]() mutable {
+      auto promise = func();
+      return promise.then([this,&context,&random,KJ_MVCAP(func)]() mutable {
+        return atRandomIntervals(context, random, kj::mv(func));
+      });
+    });
+  }
+
+  void runProcessFailures(kj::StringPtr path) {
+    KJ_SYSCALL(mkdir(path.cStr(), 0700));
+
+    auto ioContext = kj::setupAsyncIo();
+    auto child = kj::heap<ChildProc>(path, ioContext);
+    RecoverySet recoverySet;
+    auto client = recoverySet.wrap(child->client.recoverRequest().send().getJournal());
+
+    Random random(time(nullptr));
+    auto killer = atRandomIntervals(ioContext, random, [&]() {
+      context.warning("**** KILL KILL KILL ****");
+      child->kill();
+      child = nullptr;
+      child = kj::heap<ChildProc>(path, ioContext);
+      return recoverySet.recover(child->client);
+    }).eagerlyEvaluate([this](kj::Exception&& e) {
+      context.exitError(kj::str(e));
+    });
+
+    doFuzzer(client).wait(ioContext.waitScope);
+  }
+
+  kj::Promise<void> doFuzzer(TestJournal::Client client) {
+    auto promises = KJ_MAP(i, kj::range<uint>(0, clientCount)) -> kj::Promise<void> {
+      auto random = kj::heap<Random>(i);
+      auto fuzzer = kj::heap<JournalFuzzer>(client, *random, i);
+      auto promise = fuzzer->run();
+      return promise.attach(kj::mv(random), kj::mv(fuzzer))
+          .eagerlyEvaluate([this](kj::Exception&& e) {
+        // Abort here since joinPromises() won't complete until all clients have failed.
+        context.exitError(kj::str(e));
+      });
+    };
+
+    return kj::joinPromises(kj::mv(promises));
   }
 };
 
