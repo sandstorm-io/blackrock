@@ -195,8 +195,8 @@ private:
         return transaction.commit();
       }
 
-      auto cap = kj::heap(params.getTempToConsume());
-      auto promise = journal.objects.getLocalServer(*cap);
+      auto cap = params.getTempToConsume();
+      auto promise = journal.objects.getLocalServer(cap);
       return promise.then([this,context,params,KJ_MVCAP(cap)](
           kj::Maybe<TestJournal::Object::Server&> maybeObject) mutable {
         return kj::downcast<ObjectImpl>(KJ_REQUIRE_NONNULL(maybeObject))
@@ -430,6 +430,9 @@ protected:
   uint getGeneration() { return generation; }
   RecoverySet& getRecoverySet() { return recoverySet; }
 
+  TestJournal::Object::Client wrapObject(ObjectId id, TestJournal::Object::Client inner);
+  TestJournal::Object::Client wrapTemp(uint64_t id, TestJournal::Object::Client inner);
+
 private:
   RecoverySet& recoverySet;
   uint generation = 0;
@@ -557,7 +560,7 @@ public:
             auto replacement = req.send().getObject();
             call->resultFulfiller->fulfill(kj::evalLater(
                 [this,id,KJ_MVCAP(replacement)]() mutable -> TestJournal::Object::Client {
-                  return kj::heap<RecoverableObject>(getRecoverySet(), id, kj::mv(replacement));
+                  return wrapObject(id, kj::mv(replacement));
                 }));
           } else if (call->methodId == 1) {
             // createTemp
@@ -572,7 +575,7 @@ public:
             auto replacement = kj::mv(iter->second.client);
             call->resultFulfiller->fulfill(kj::evalLater(
                 [this,label,KJ_MVCAP(replacement)]() mutable -> TestJournal::Object::Client {
-                  return kj::heap<RecoverableTemp>(getRecoverySet(), label.id, kj::mv(replacement));
+                  return wrapTemp(label.id, kj::mv(replacement));
                 }));
 
             recovered.erase(iter);
@@ -774,10 +777,19 @@ public:
     }
   }
 
-  capnp::Capability::Client unwrap(capnp::Capability::Client outer) {
-    auto cap = kj::heap(outer);
-    auto promise = serverSet.getLocalServer(*cap);
-    return promise.then([KJ_MVCAP(cap)](kj::Maybe<capnp::Capability::Server&>&& unwrapped) {
+  TestJournal::Object::Client wrapObject(ObjectId id, TestJournal::Object::Client inner) {
+    return serverSet.add(kj::heap<RecoverableObject>(*this, id, kj::mv(inner)))
+        .castAs<TestJournal::Object>();
+  }
+
+  TestJournal::Object::Client wrapTemp(uint64_t id, TestJournal::Object::Client inner) {
+    return serverSet.add(kj::heap<RecoverableTemp>(*this, id, kj::mv(inner)))
+        .castAs<TestJournal::Object>();
+  }
+
+  capnp::Capability::Client unwrap(capnp::Capability::Client cap) {
+    auto promise = serverSet.getLocalServer(cap);
+    return promise.then([KJ_MVCAP(cap)](kj::Maybe<capnp::Capability::Server&>&& unwrapped) mutable {
       return dynamic_cast<RecoverableCapability&>(KJ_REQUIRE_NONNULL(unwrapped)).getInner();
     });
   }
@@ -834,13 +846,28 @@ kj::Promise<void> RecoverableTransaction::commit(CommitContext context) {
     });
   }).catch_([this,oldGen,context](kj::Exception&& e) mutable -> kj::Promise<void> {
     if (e.getType() == kj::Exception::Type::DISCONNECTED) {
-      return reconnect(oldGen).then([this,context]() mutable {
-        return commit(context);
+      return reconnect(oldGen).then([this,context]() mutable -> kj::Promise<void> {
+        if (committed) {
+          // Recovery discovered that this was committed after all.
+          return kj::READY_NOW;
+        } else {
+          return commit(context);
+        }
       });
     } else {
       return kj::mv(e);
     }
   });
+}
+
+TestJournal::Object::Client RecoverableCapability::wrapObject(
+    ObjectId id, TestJournal::Object::Client inner) {
+  return recoverySet.wrapObject(id, kj::mv(inner));
+}
+
+TestJournal::Object::Client RecoverableCapability::wrapTemp(
+    uint64_t id, TestJournal::Object::Client inner) {
+  return recoverySet.wrapTemp(id, kj::mv(inner));
 }
 
 // =======================================================================================
