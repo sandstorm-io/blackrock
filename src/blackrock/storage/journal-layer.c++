@@ -461,7 +461,7 @@ kj::Promise<void> JournalLayer::Transaction::commit(
       if (delta > 0) {
         journalRef.journalFile->getContent().zero(oldPosition, delta);
       }
-    }, [](kj::Exception&& exception) {
+    }).eagerlyEvaluate([](kj::Exception&& exception) {
       // It would appear that we failed to actually execute the transaction after writing it to
       // the journal and confirming commit to the client. We should abort now and hope that things
       // get fixed up during recovery.

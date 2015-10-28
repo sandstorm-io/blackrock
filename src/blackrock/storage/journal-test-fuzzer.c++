@@ -30,6 +30,19 @@ T dataTo(capnp::Data::Reader data) {
   return result;
 }
 
+class DeletedObject: public capnp::Capability::Server {
+  // It's not necessarily an error to *open* a deleted object (for the purposes of this test), but
+  // it is an error to *use* it in any way, hence this capability throws on calls but does not
+  // resolve to an error. (This avoids some spurrious log messages.)
+
+public:
+  kj::Promise<void> dispatchCall(
+      uint64_t interfaceId, uint16_t methodId,
+      capnp::CallContext<capnp::AnyPointer, capnp::AnyPointer> context) override {
+    KJ_FAIL_REQUIRE("object has been deleted");
+  }
+};
+
 class TestJournalImpl: public TestJournal::Server {
 public:
   TestJournalImpl(JournalLayer& journal, uint64_t recoveredCount)
@@ -48,8 +61,14 @@ protected:
     context.releaseParams();
     return journal.openObject(id)
         .then([this,context,id](auto&& maybeObject) mutable {
-      context.getResults(capnp::MessageSize { 4, 1 }).setObject(
-          wrap(kj::mv(KJ_REQUIRE_NONNULL(maybeObject, id))));
+      auto results = context.getResults(capnp::MessageSize { 4, 1 });
+      KJ_IF_MAYBE(o, maybeObject) {
+        results.setObject(
+            wrap(kj::mv(KJ_REQUIRE_NONNULL(maybeObject, id))));
+      } else {
+        results.setObject(capnp::Capability::Client(kj::heap<DeletedObject>())
+            .castAs<TestJournal::Object>());
+      }
     });
   }
 
@@ -1380,9 +1399,10 @@ private:
       return result;
     }
 
-    void kill() {
+    kj::Promise<void> kill() {
       subprocess.signal(SIGKILL);
       (void)subprocess.waitForExitOrSignal();
+      return rpcSystem.onDisconnect();
     }
 
     ChildProc(kj::StringPtr path, kj::AsyncIoContext& ioContext)
@@ -1456,14 +1476,16 @@ private:
     auto client = recoverySet.wrap(child->client.recoverRequest().send().getJournal());
 
     Random random(time(nullptr));
+    uint counter = 0;
     auto killer = atRandomIntervals(ioContext, random, [&]() {
-      context.warning("**** KILL KILL KILL ****");
+      context.warning(kj::str("**** KILL KILL KILL ", counter++, " ****"));
       kj::StringPtr msg("**** KILL KILL KILL ****\n");
       kj::FdOutputStream(STDOUT_FILENO).write(msg.begin(), msg.size());
-      child->kill();
-      child = nullptr;
-      child = kj::heap<ChildProc>(path, ioContext);
-      return recoverySet.recover(child->client);
+      return child->kill().then([&]() {
+        child = nullptr;
+        child = kj::heap<ChildProc>(path, ioContext);
+        return recoverySet.recover(child->client);
+      });
     }).eagerlyEvaluate([this](kj::Exception&& e) {
       context.exitError(kj::str(e));
     });
