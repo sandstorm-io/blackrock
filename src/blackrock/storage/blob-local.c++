@@ -188,6 +188,7 @@ private:
   // Recovery ID from a previous run, recovered during this process's recovery phase.
 
   void moveTo(kj::StringPtr path) {
+    KJ_SYSCALL(fdatasync(content->getFd()));
     KJ_IF_MAYBE(r, recoveryId) {
       KJ_SYSCALL(renameat(
           blobLayer.directoryFd, toPath(*r).cStr(),

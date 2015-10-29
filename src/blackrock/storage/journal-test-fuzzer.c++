@@ -17,6 +17,11 @@
 #include <time.h>
 #include <signal.h>
 #include <set>
+#include <blackrock/storage.capnp.h>
+#include <blackrock/nbd-bridge.h>
+#include <kj/async-unix.h>
+#include <sys/mount.h>
+#undef BLOCK_SIZE
 
 namespace blackrock {
 namespace storage {
@@ -890,7 +895,7 @@ TestJournal::Object::Client RecoverableCapability::wrapTemp(
 }
 
 // =======================================================================================
-// The fuzzing!
+// Fake disk
 
 class Random {
 public:
@@ -916,6 +921,12 @@ public:
     uint64_t result;
     fill(result);
     return result >> (63 - in(0, maxBits));
+  }
+
+  uint64_t exponential(uint minBits, uint maxBits) {
+    uint64_t result;
+    fill(result);
+    return result >> (63 - in(minBits, maxBits));
   }
 
   void fill(void* buf, size_t size) {
@@ -949,6 +960,149 @@ private:
     pos = 0;
   }
 };
+
+class RamVolume: public Volume::Server, public kj::Refcounted {
+public:
+  RamVolume(kj::Timer& timer, Random& random): timer(timer), random(random) {}
+
+  kj::Promise<void> runFor(uint count) {
+    if (writeCount == 0) {
+      unsyncedBlocks.clear();
+    }
+
+    writeCount = count;
+    auto paf = kj::newPromiseAndFulfiller<void>();
+    brokenFulfiller = kj::mv(paf.fulfiller);
+    return kj::mv(paf.promise);
+  }
+
+  bool isBroken() { return writeCount == 0; }
+
+  kj::Promise<void> read(ReadContext context) override {
+    auto params = context.getParams();
+    auto start = params.getBlockNum();
+    auto count = params.getCount();
+    auto end = start + count;
+    context.releaseParams();
+
+    auto data = context.getResults().initData(count * Volume::BLOCK_SIZE);
+    byte* ptr = data.begin();
+    for (auto i = start; i < end; i++, ptr += Volume::BLOCK_SIZE) {
+      auto iter1 = unsyncedBlocks.find(i);
+      if (iter1 == unsyncedBlocks.end()) {
+        // Not in unsyncedBlocks, fall back to blocks.
+        auto iter2 = blocks.find(i);
+        if (iter2 == blocks.end()) {
+          // Not found, leave zero.
+        } else {
+          memcpy(ptr, iter2->second.begin(), Volume::BLOCK_SIZE);
+        }
+      } else {
+        // Found in usyncedBlocks.
+        KJ_IF_MAYBE(b, iter1->second) {
+          memcpy(ptr, b->begin(), Volume::BLOCK_SIZE);
+        } else {
+          // This block has been zeroed.
+        }
+      }
+    }
+    return kj::READY_NOW;
+  }
+
+  kj::Promise<void> write(WriteContext context) override {
+    if (writeCount > 0) {
+      if (--writeCount == 0) break_();
+    }
+
+    auto params = context.getParams();
+    auto start = params.getBlockNum();
+    auto data = params.getData();
+    auto count = data.size() / Volume::BLOCK_SIZE;
+    auto end = start + count;
+
+    const byte* ptr = data.begin();
+    for (auto i = start; i < end; i++, ptr += Volume::BLOCK_SIZE) {
+      auto block = kj::heapArray<byte>(Volume::BLOCK_SIZE);
+      memcpy(block.begin(), ptr, Volume::BLOCK_SIZE);
+      unsyncedBlocks[i] = kj::mv(block);
+    }
+
+    return kj::READY_NOW;
+  }
+
+  kj::Promise<void> zero(ZeroContext context) override {
+    if (writeCount > 0) {
+      if (--writeCount == 0) break_();
+    }
+
+    auto params = context.getParams();
+    auto start = params.getBlockNum();
+    auto count = params.getCount();
+    auto end = start + count;
+
+    for (auto i = start; i < end; i++) {
+      unsyncedBlocks[i] = nullptr;
+    }
+
+    return kj::READY_NOW;
+  }
+
+  kj::Promise<void> sync(SyncContext context) override {
+    // Randomly delay sometimes.
+    if (random.in(0, 16) == 0) {
+      return timer.afterDelay(4 * kj::MILLISECONDS).then([this,context]() mutable {
+        return sync(context);
+      });
+    }
+
+    if (writeCount > 0) {
+      for (auto& block: unsyncedBlocks) {
+        KJ_IF_MAYBE(b, block.second) {
+          blocks[block.first] = kj::mv(*b);
+        } else {
+          blocks.erase(block.first);
+        }
+      }
+      unsyncedBlocks.clear();
+    }
+
+    return kj::READY_NOW;
+  }
+
+private:
+  kj::Timer& timer;
+  Random& random;
+
+  std::unordered_map<uint32_t, kj::Array<byte>> blocks;
+  std::unordered_map<uint32_t, kj::Maybe<kj::Array<byte>>> unsyncedBlocks;
+
+  uint writeCount = 0;
+  // Number of writes we'll accept before we stop syncing, effectively snapshotting thne disk
+  // at that point.
+
+  kj::Own<kj::PromiseFulfiller<void>> brokenFulfiller;
+
+  void break_() {
+    // Randomly sync blocks.
+    decltype(unsyncedBlocks) replacement;
+    for (auto& block: unsyncedBlocks) {
+      if (random.flip()) {
+        KJ_IF_MAYBE(b, block.second) {
+          blocks[block.first] = kj::mv(*b);
+        } else {
+          blocks.erase(block.first);
+        }
+      } else {
+        replacement[block.first] = kj::mv(block.second);
+      }
+    }
+    unsyncedBlocks = kj::mv(replacement);
+    brokenFulfiller->fulfill();
+  }
+};
+
+// =======================================================================================
+// The fuzzing!
 
 class JournalFuzzer: private kj::TaskSet::ErrorHandler {
 public:
@@ -1319,6 +1473,8 @@ public:
             "up the kernel state.")
         .addOption({"child"}, [this]() {mode=CHILD;return true;},
             "Run child process. (For internal use only.)")
+        .addOption({"child-nbd"}, [this]() {mode=CHILD_NBD;return true;},
+            "Run NBD child process. (For internal use only.)")
         .addOptionWithArg({"clients"}, KJ_BIND_METHOD(*this, setClientCount), "<count>",
             "Run <count> concurrent clients. Default: 8")
         .expectArg("<storage-location>", KJ_BIND_METHOD(*this, run))
@@ -1336,7 +1492,8 @@ private:
     NO_FAILURES,
     PROCESS_FAILURES,
     MACHINE_FAILURES,
-    CHILD
+    CHILD,
+    CHILD_NBD
   } mode = UNSET;
 
   kj::MainBuilder::Validity setClientCount(kj::StringPtr arg) {
@@ -1365,9 +1522,13 @@ private:
         runProcessFailures(path);
         return true;
       case MACHINE_FAILURES:
-        KJ_UNIMPLEMENTED("todo");
+        runMachineFailures();
+        return true;
       case CHILD:
         runChild(path);
+        return true;
+      case CHILD_NBD:
+        runNbdLayer(path);
         return true;
     }
   }
@@ -1386,17 +1547,28 @@ private:
   };
 
   struct ChildProc {
+    int scratch;
     sandstorm::Pipe pipe;
     sandstorm::Subprocess subprocess;
     kj::Own<kj::AsyncIoStream> stream;
     capnp::TwoPartyClient rpcSystem;
     TestJournal::Recovery::Client client;
 
-    sandstorm::Subprocess::Options makeSubprocessOptions(kj::StringPtr path) {
-      sandstorm::Subprocess::Options result({
-          "/proc/self/exe", "--child", path});
-      result.stdin = pipe.readEnd;
-      return result;
+    sandstorm::Subprocess::Options makeSubprocessOptions(
+        kj::StringPtr path, kj::Maybe<int> nbdKernelEnd) {
+      KJ_IF_MAYBE(fd, nbdKernelEnd) {
+        sandstorm::Subprocess::Options result({
+            "/proc/self/exe", "--child-nbd", path});
+        result.stdin = pipe.readEnd;
+        scratch = *fd;
+        result.moreFds = kj::arrayPtr(&scratch, 1);
+        return result;
+      } else {
+        sandstorm::Subprocess::Options result({
+            "/proc/self/exe", "--child", path});
+        result.stdin = pipe.readEnd;
+        return result;
+      }
     }
 
     kj::Promise<void> kill() {
@@ -1405,9 +1577,10 @@ private:
       return rpcSystem.onDisconnect();
     }
 
-    ChildProc(kj::StringPtr path, kj::AsyncIoContext& ioContext)
+    ChildProc(kj::StringPtr path, kj::AsyncIoContext& ioContext,
+              kj::Maybe<int> nbdKernelEnd = nullptr)
         : pipe(sandstorm::Pipe::makeTwoWayAsync()),
-          subprocess(makeSubprocessOptions(path)),
+          subprocess(makeSubprocessOptions(path, nbdKernelEnd)),
           stream(ioContext.lowLevelProvider->wrapSocketFd(pipe.writeEnd,
               kj::LowLevelAsyncIoProvider::ALREADY_CLOEXEC |
               kj::LowLevelAsyncIoProvider::ALREADY_NONBLOCK)),
@@ -1427,12 +1600,41 @@ private:
     KJ_FAIL_ASSERT("client disconnected");
   }
 
+  void runNbdLayer(kj::StringPtr path) {
+    kj::UnixEventPort::captureSignal(SIGTERM);
+    kj::UnixEventPort::captureSignal(SIGINT);
+    auto ioContext = kj::setupAsyncIo();
+    sandstorm::SubprocessSet subprocs(ioContext.unixEventPort);
+
+    KJ_SYSCALL(fcntl(3, F_SETFD, FD_CLOEXEC));
+
+    KJ_SYSCALL(unshare(CLONE_NEWNS));
+    KJ_SYSCALL(mount("none", "/", nullptr, MS_REC | MS_PRIVATE, nullptr));
+
+    NbdDevice device;
+    NbdBinding binding(device, kj::AutoCloseFd(3), NbdAccessType::READ_WRITE);
+    if (path == "format") device.format();
+    Mount mount(device.getPath(), "/mnt", MS_NOATIME, "discard");
+
+    sandstorm::Subprocess child2({"/proc/self/exe", "--child", "/mnt"});
+    auto task = ioContext.unixEventPort.onSignal(SIGTERM)
+        .exclusiveJoin(ioContext.unixEventPort.onSignal(SIGINT))
+        .then([&](siginfo_t) {
+      child2.signal(SIGKILL);
+    }).eagerlyEvaluate(nullptr);
+
+    subprocs.waitForExitOrSignal(child2).wait(ioContext.waitScope);
+  }
+
   void runDirect(kj::StringPtr path) {
     KJ_SYSCALL(mkdir(path.cStr(), 0700));
 
     auto ioContext = kj::setupAsyncIo();
     JournalContext journal(path, ioContext);
-    doFuzzer(journal.client.recoverRequest().send().getJournal()).wait(ioContext.waitScope);
+    doFuzzer(journal.client.recoverRequest().send().getJournal())
+        .catch_([&](kj::Exception&& e) {
+      context.exitError(kj::str(e));
+    }).wait(ioContext.waitScope);
   }
 
   void runInProc(kj::StringPtr path) {
@@ -1442,7 +1644,9 @@ private:
     JournalContext journal(path, ioContext);
     RecoverySet recoverySet;
     doFuzzer(recoverySet.wrap(journal.client.recoverRequest().send().getJournal()))
-        .wait(ioContext.waitScope);
+        .catch_([&](kj::Exception&& e) {
+      context.exitError(kj::str(e));
+    }).wait(ioContext.waitScope);
   }
 
   void runNoFail(kj::StringPtr path) {
@@ -1452,18 +1656,15 @@ private:
     ChildProc child(path, ioContext);
     RecoverySet recoverySet;
     doFuzzer(recoverySet.wrap(child.client.recoverRequest().send().getJournal()))
-        .wait(ioContext.waitScope);
+        .catch_([&](kj::Exception&& e) {
+      context.exitError(kj::str(e));
+    }).wait(ioContext.waitScope);
   }
 
-  kj::Promise<void> atRandomIntervals(
-      kj::AsyncIoContext& context, Random& random, kj::Function<kj::Promise<void>()>&& func) {
-    return context.lowLevelProvider->getTimer()
-        .afterDelay(random.exponential(14) * kj::MILLISECONDS)
-        .then([this,&context,&random,KJ_MVCAP(func)]() mutable {
-      auto promise = func();
-      return promise.then([this,&context,&random,KJ_MVCAP(func)]() mutable {
-        return atRandomIntervals(context, random, kj::mv(func));
-      });
+  static kj::Promise<void> loop(kj::Function<kj::Promise<void>()>&& func) {
+    auto promise = func();
+    return promise.then([KJ_MVCAP(func)]() mutable {
+      return loop(kj::mv(func));
     });
   }
 
@@ -1477,11 +1678,15 @@ private:
 
     Random random(time(nullptr));
     uint counter = 0;
-    auto killer = atRandomIntervals(ioContext, random, [&]() {
-      context.warning(kj::str("**** KILL KILL KILL ", counter++, " ****"));
-      kj::StringPtr msg("**** KILL KILL KILL ****\n");
-      kj::FdOutputStream(STDOUT_FILENO).write(msg.begin(), msg.size());
-      return child->kill().then([&]() {
+    auto killer = loop([&]() {
+      return ioContext.lowLevelProvider->getTimer()
+          .afterDelay(random.exponential(14) * kj::MILLISECONDS)
+          .then([&]() mutable {
+        context.warning(kj::str("**** KILL KILL KILL ", counter++, " ****"));
+        kj::StringPtr msg("**** KILL KILL KILL ****\n");
+        kj::FdOutputStream(STDOUT_FILENO).write(msg.begin(), msg.size());
+        return child->kill();
+      }).then([&]() {
         child = nullptr;
         child = kj::heap<ChildProc>(path, ioContext);
         return recoverySet.recover(child->client);
@@ -1490,7 +1695,86 @@ private:
       context.exitError(kj::str(e));
     });
 
-    doFuzzer(client).wait(ioContext.waitScope);
+    doFuzzer(client).catch_([&](kj::Exception&& e) {
+      context.exitError(kj::str(e));
+    }).wait(ioContext.waitScope);
+  }
+
+  struct NbdChildProc {
+    kj::AutoCloseFd userEnd;
+    NbdVolumeAdapter nbdAdapter;
+    kj::ForkedPromise<void> runTask;
+    ChildProc child;
+    kj::ForkedPromise<int> childTask;
+
+    kj::Promise<void> kill() {
+      child.subprocess.signal(SIGTERM);
+      return childTask.addBranch().then([this](int) {
+        return child.rpcSystem.onDisconnect();
+      }).then([this]() {
+        return runTask.addBranch();
+      });
+    }
+
+    NbdChildProc(kj::AsyncIoContext& ioContext, Volume::Client volume, bool format,
+                 sandstorm::SubprocessSet& subprocs,
+                 sandstorm::Pipe socketpair = sandstorm::Pipe::makeTwoWayAsync())
+        : userEnd(kj::mv(socketpair.readEnd)),
+          nbdAdapter(
+              ioContext.lowLevelProvider->wrapSocketFd(userEnd.get(),
+                  kj::LowLevelAsyncIoProvider::ALREADY_CLOEXEC |
+                  kj::LowLevelAsyncIoProvider::ALREADY_NONBLOCK),
+              kj::mv(volume), NbdAccessType::READ_WRITE),
+          runTask(nbdAdapter.run().eagerlyEvaluate([](kj::Exception&& e) {
+            KJ_LOG(ERROR, e);
+          }).fork()),
+          child(format ? "format" : "", ioContext, socketpair.writeEnd.get()),
+          childTask(subprocs.waitForExitOrSignal(child.subprocess).fork()) {}
+  };
+
+  void runMachineFailures() {
+    NbdDevice::loadKernelModule();
+
+    kj::UnixEventPort::captureSignal(SIGINT);
+    auto ioContext = kj::setupAsyncIo();
+    sandstorm::SubprocessSet subprocs(ioContext.unixEventPort);
+
+    Random random(time(nullptr));
+    kj::Own<RamVolume> volume = kj::refcounted<RamVolume>(
+        ioContext.lowLevelProvider->getTimer(), random);
+    auto child = kj::heap<NbdChildProc>(ioContext, kj::addRef(*volume), true, subprocs);
+    RecoverySet recoverySet;
+    auto client = recoverySet.wrap(child->child.client.recoverRequest().send().getJournal());
+    kj::Promise<void> volumeRunner = volume->runFor(500);
+
+    uint counter = 0;
+    auto killer = loop([&]() {
+      return volumeRunner.then([&]() mutable {
+        context.warning(kj::str("**** KILL KILL KILL ", counter++, " ****"));
+        kj::StringPtr msg("**** KILL KILL KILL ****\n");
+        kj::FdOutputStream(STDOUT_FILENO).write(msg.begin(), msg.size());
+        return child->kill();
+      }).then([&]() {
+        child = nullptr;
+
+        volumeRunner = volume->runFor(random.exponential(4, 11) + 1);
+
+        child = kj::heap<NbdChildProc>(ioContext, kj::addRef(*volume), false, subprocs);
+        return recoverySet.recover(child->child.client);
+      });
+    }).eagerlyEvaluate([this](kj::Exception&& e) {
+      context.exitError(kj::str(e));
+    });
+
+    doFuzzer(client).catch_([&](kj::Exception&& e) {
+      context.error(kj::str(e));
+      return child->kill();
+    }).exclusiveJoin(ioContext.unixEventPort.onSignal(SIGINT).then([&](siginfo_t) {
+      context.error("interrupted, attempting shutdown...");
+      return child->kill();
+    })).wait(ioContext.waitScope);
+
+    context.exitInfo("exited (gracefully)");
   }
 
   kj::Promise<void> doFuzzer(TestJournal::Client client) {
@@ -1498,14 +1782,14 @@ private:
       auto random = kj::heap<Random>(i);
       auto fuzzer = kj::heap<JournalFuzzer>(client, *random, i);
       auto promise = fuzzer->run();
-      return promise.attach(kj::mv(random), kj::mv(fuzzer))
-          .eagerlyEvaluate([this](kj::Exception&& e) {
-        // Abort here since joinPromises() won't complete until all clients have failed.
-        context.exitError(kj::str(e));
-      });
+      return promise.attach(kj::mv(random), kj::mv(fuzzer));
     };
 
-    return kj::joinPromises(kj::mv(promises));
+    kj::Promise<void> result = kj::NEVER_DONE;
+    for (auto& promise: promises) {
+      result = result.exclusiveJoin(kj::mv(promise));
+    }
+    return kj::mv(result);
   }
 };
 
