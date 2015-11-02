@@ -347,8 +347,16 @@ interface Transaction {
   # Allows several operations within the same storage system to be performed atomically.
 
   commit @0 ();
-  # Commit the transaction atomically. Throws a DISCONNECTED exception if the transaction has been
-  # invalidated by concurrent writes.
+  # Commit the transaction atomically. Throws a "disconnected" exception if the transaction has been
+  # invalidated by concurrent writes -- effectively, the concurrent write revoked this transaction.
+  # Of course, a "disconnected" exception could also indicate that the connection was disconnected
+  # after commit() completed. The caller should not retry the transaction unless it is idempotent.
+  #
+  # TODO(someday): We could allow inter-datastore transactions if we offered the caller a way to
+  #   specify a persistent callback object which could be used to determine if the transaction was
+  #   ultimately committed or aborted in the case of disconnect. However, any objects involved in
+  #   the transaction could end up deadlocked if the remote database disappeared, so this would
+  #   require careful security considerations. Perhaps if the object owner opts in, it is OK?
 
   getTransactional @1 [T] (object :T) -> (transactionalObject :T);
   # Given any storage object capability `object`, get an alternate version of the object where any

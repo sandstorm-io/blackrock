@@ -100,15 +100,17 @@ struct Xattr {
   // either the stream is still uploading, or it failed to fully upload). Once set this
   // can never be unset.
 
-  byte reserved[2];
-  // Must be zero.
-
-  uint32_t accountedBlockCount;
-  // The number of 4k blocks consumed by this object the last time we considered it for
-  // accounting/quota purposes. The on-disk size could have changed in the meantime.
+  uint16_t versionHigh;  // bits 32-47
+  uint32_t versionLow;   // bits 0-31
+  // The object's version number. This monotonically increases as transactions are committed that
+  // affect this object.
 
   uint64_t transitiveBlockCount;
   // The number of 4k blocks in this object and all child objects.
+  //
+  // Note that for Volumes, which are written non-transactionally, we don't update this on every
+  // write, therefore the value may drift from the actual storage used. Periodically, we update
+  // this value to match the real amount, and schedule to update parents at that time.
 
   ObjectId owner;
   // What object owns this one?
@@ -168,13 +170,18 @@ struct TemporaryXattr {
   union {
     struct {
       BackburnerType type;
-      uint8_t reserved[7];
+      uint8_t reserved;
 
-      ObjectId ojbectId;
-      // Affected object ID.
+      uint16_t versionHigh;  // bits 32-47
+      uint32_t versionLow;   // bits 0-31
+      // The version number of the target object at which this backburner task was scheduled.
+      // Useful as a unique identifier.
 
       int64_t blockCountDelta;
       // For UPDATE_TRANSITIVE_SIZE. Can be negative.
+
+      ObjectId ojbectId;
+      // Affected object ID.
     } backburner;
   };
 };
