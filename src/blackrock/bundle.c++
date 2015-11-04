@@ -81,14 +81,16 @@ void enterSandstormBundle() {
   KJ_SYSCALL(mount("/dev/urandom", "dev/urandom", nullptr, MS_BIND, nullptr));
 
   // Mount a tmpfs at /etc and copy over necessary config files from the host.
+  // Note that unlike regular Sandstorm, we don't bother bind-mounting in the host etc, because
+  // we don't expect to have to deal with dynamic network configs.
   KJ_SYSCALL(mount("tmpfs", "etc", "tmpfs", MS_NOSUID | MS_NOEXEC,
                    kj::str("size=2m,nr_inodes=128,mode=755,uid=0,gid=0").cStr()));
   {
-    auto files = sandstorm::splitLines(sandstorm::readAll("etc.list"));
+    auto files = sandstorm::splitLines(sandstorm::readAll("host.list"));
 
     // Now copy over each file.
     for (auto& file: files) {
-      if (access(file.cStr(), R_OK) == 0) {
+      if (access(file.cStr(), R_OK) == 0 && !sandstorm::isDirectory(file)) {
         auto in = sandstorm::raiiOpen(file, O_RDONLY);
         auto out = sandstorm::raiiOpen(kj::str(".", file), O_WRONLY | O_CREAT | O_EXCL);
         ssize_t n;
