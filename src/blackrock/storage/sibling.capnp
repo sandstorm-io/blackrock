@@ -30,8 +30,12 @@ interface Replica {
   # replicas of an object are assigned to storage machines based on a pure function of the
   # object ID.
 
-  getObject @0 (key :ObjectKey) -> (cap :OwnedStorage);
+  getObject @0 (key :ObjectKey) -> GetObjectResults;
   # Open an object for which this sibling is expected to be the leader.
+
+  struct GetObjectResults {
+    cap @0 :OwnedStorage;
+  }
 
   # ----------------------------------------------------------------------------
   # Distributed transactions
@@ -65,7 +69,7 @@ interface Replica {
   # Among the replicas of an object, one must be chosen as the "leader" in order for changes
   # to be made.
 
-  getLeaderStatus @4 (key :ObjectKey) -> (version :UInt64, capIfLeader :OwnedStorage);
+  getLeaderStatus @4 (key :ObjectKey) -> (version :UInt64, isLeading :Bool);
   # Called by one of the replicas of the given object when it needs to open the object but does
   # not know who the current leader is.
   #
@@ -85,7 +89,7 @@ interface Replica {
   # - If multiple replicas claim to be leader, then the caller chooses the one with the lowest
   #   replica number and calls lead() on it while calling abdicate() on the other.
 
-  lead @5 (key :ObjectKey) -> (cap :OwnedStorage);
+  lead @5 (key :ObjectKey) -> GetObjectResults;
   # Tells the target replica to become leader.
   #
   # If the callee was already a follower, it disconnects from that follower role, as if it had
@@ -95,8 +99,8 @@ interface Replica {
   # Tells the target replica that it is not the leader and should immediately cease pretending to
   # be. No effect if the callee doesn't think it is the leader.
 
-  follow @7 (cap :OwnedStorage) -> (follower :Follower, version :UInt64,
-                                    maybeStaged :RawTransaction);
+  follow @7 (leader :Leader) -> (follower :Follower, version :UInt64,
+                                 maybeStaged :RawTransaction);
   # Tells the callee to begin following the caller.
   #
   # The returned `version` indicates the follower's object version as of the last committed
@@ -111,6 +115,12 @@ interface Replica {
   # leader, although it could be that a staged transaction is only returned by a single follower.
   # In any case, the new leader must consider each of these transactions and look for proof that
   # it was either committed or aborted.
+}
+
+interface Leader {
+  # Interface exposed by leaders to followers.
+
+  getObject @0 (key :ObjectKey) -> Replica.GetObjectResults;
 }
 
 interface Follower {
@@ -186,17 +196,6 @@ struct TransactionId {
   # ID can be reused so long as the old ID has been globally forgotten.
 }
 
-enum ObjectType {
-  invalid @0;  # helps detect errors
-  blob @1;
-  volume @2;
-  immutable @3;
-  assignable @4;
-  collection @5;
-  opaque @6;
-  reference @7;
-}
-
 struct RawTransaction {
   id @0 :TransactionId;
 
@@ -207,7 +206,8 @@ struct RawTransaction {
 
   struct Op {
     union {
-      create @0 :ObjectType;
+      create @0 :UInt8;
+      # Type is ObjectType enum from basics.h.
 
       setContent @1 :Data;
 

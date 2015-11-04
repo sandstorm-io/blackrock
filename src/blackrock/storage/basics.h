@@ -105,6 +105,14 @@ struct Xattr {
   // The object's version number. This monotonically increases as transactions are committed that
   // affect this object.
 
+  inline uint64_t getVersion() const {
+    return (static_cast<uint64_t>(versionHigh) << 32) | versionLow;
+  }
+  inline void setVersion(uint64_t value) {
+    versionLow = static_cast<uint32_t>(value);
+    versionHigh = static_cast<uint16_t>(value >> 32);
+  }
+
   uint64_t transitiveBlockCount;
   // The number of 4k blocks in this object and all child objects.
   //
