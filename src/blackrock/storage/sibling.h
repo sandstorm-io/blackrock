@@ -34,6 +34,7 @@ protected:
 private:
   class ReplicaImpl;
   class StorageFactoryImpl;
+  class WeakLeaderImpl;
   class LeaderImpl;
   class FollowerImpl;
   class TransactionBuilderImpl;

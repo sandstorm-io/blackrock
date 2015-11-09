@@ -4,6 +4,7 @@
 
 #include "sibling.h"
 #include <kj/debug.h>
+#include <capnp/message.h>
 
 namespace blackrock {
 namespace storage {
@@ -49,13 +50,8 @@ protected:
     bool isLeading;
   };
 
-  kj::Promise<void> getLeader(GetLeaderContext context) override;
-
-  kj::Promise<void> getLeaderStatus(GetLeaderStatusContext context) override {
-  }
-
-  kj::Promise<void> follow(FollowContext context) override {
-  }
+  kj::Promise<void> getStatus(GetStatusContext context) override;
+  kj::Promise<void> follow(FollowContext context) override;
 
 private:
   Sibling::Client siblingCap;
@@ -69,10 +65,9 @@ private:
   // Allows recognizing our own objects when they come back to us, mainly for implementing
   // TransactionBuilder.
 
-  kj::OneOf<capnp::Void, LeaderImpl*, FollowerImpl*> state;
-  // Current state.
+  kj::Maybe<FollowerImpl&> localFollower;
+  // If this replica is following a leader, this is the Follower implementation.
 
-  friend class LeaderImpl;
   friend class FollowerImpl;
 };
 
@@ -111,69 +106,171 @@ private:
   ObjectId id;
 };
 
+class SiblingImpl::WeakLeaderImpl: public WeakLeader::Server, public kj::Refcounted {
+public:
+  WeakLeaderImpl(LeaderImpl& leader): leader(leader) {}
+
+protected:
+  kj::Promise<void> get(GetContext context) override;
+
+private:
+  kj::Maybe<LeaderImpl&> leader;
+
+  friend class LeaderImpl;
+};
+
 class SiblingImpl::LeaderImpl: public Leader::Server {
 public:
-  LeaderImpl(ReplicaImpl& replica)
-      : replica(replica) {
-    KJ_REQUIRE(replica.state.is<capnp::Void>());
-    replica.state.init<LeaderImpl*>(this);
-  }
+  LeaderImpl(ObjectKey key, SiblingImpl& localSibling, ReplicaImpl& localReplica,
+             Replica::Client localReplicaCap)
+      : key(key), id(key), localSibling(localSibling), localReplica(localReplica),
+        localReplicaCap(kj::mv(localReplicaCap)), weak(kj::refcounted<WeakLeaderImpl>(*this)),
+        ready(kj::joinPromises(KJ_MAP(siblingId, localSibling.distributor.getDistribution(id))
+                -> kj::Promise<FollowResponseRecord> {
+              auto replicaSibling = localSibling.getSibling(siblingId, 0);
+              Replica::Client replica = ({
+                auto req = replicaSibling.cap.getReplicaRequest(capnp::MessageSize {8, 0});
+                id.copyTo(req.initId());
+                req.send().getReplica();
+              });
+              auto req = replica.followRequest(capnp::MessageSize {4, 1});
+              // TODO(perf): Use a wrapper around `weak` that can proactively warn us when the
+              //   follower disconnects.
+              req.setLeader(kj::addRef(*weak));
+              uint generation = replicaSibling.generation;
+              return req.send().then([generation](auto&& response) {
+                return FollowResponseRecord { kj::mv(response), generation };
+              });
+            }).then([this](kj::Array<FollowResponseRecord>&& followers) {
+              // TODO(someday): Don't require *all* replicas to respond; accept a quorum. But note
+              //   that starting from a non-unanimous quorum requries more setup work.
+
+              uint64_t maxVersion = 0;
+              uint64_t startVersion = 0;
+              for (auto& follower: followers) {
+                maxVersion = kj::max(maxVersion, follower.response.getVersion());
+                startVersion = kj::max(startVersion, follower.response.getStartVersion());
+              }
+              this->version = kj::max(startVersion, maxVersion);
+
+              bool needRecovery = false;
+              for (auto& follower: followers) {
+                if (follower.response.getVersion() < maxVersion ||
+                    !follower.response.isClean()) {
+                  needRecovery = true;
+                  break;
+                }
+              }
+
+              if (needRecovery) {
+                // We need to commit a transaction on each replica bringing it up-to-date.
+                #error todo
+              } else {
+                // Everything is clean. Let's get started.
+                this->followers = KJ_MAP(follower, followers) {
+                  return FollowerRecord {
+                    follower.response.getFollower(),
+                    follower.generation,
+                    kj::READY_NOW
+                  };
+                };
+              }
+            }).fork()) {}
 
   ~LeaderImpl() noexcept(false) {
-    abdicate();
-  }
-
-  void abdicate() {
-    KJ_IF_MAYBE(r, replica) {
-      if (r->state.is<LeaderImpl*>() && r->state.get<LeaderImpl*>() == this) {
-        r->state.init<capnp::Void>(capnp::VOID);
-      } else {
-        KJ_FAIL_REQUIRE("inconsistent state");
-      }
-      replica = nullptr;
-    }
+    weak->leader = nullptr;
   }
 
   using Leader::Server::thisCap;
 
-protected:
-  kj::Promise<void> getObject(GetObjectContext context) override {
-    context.allowCancellation();
+  JournalLayer::Object& getLocalObject();
 
-    // Check that key matches.
-    ObjectKey inputKey = context.getParams().getKey();
-    KJ_REQUIRE(ObjectId(inputKey) == localReplica().getId(), "key mismatch");
-    key = inputKey;
+  void write(uint64_t offset, kj::Array<const byte> data) {
+    queueOp([this,offset,KJ_MVCAP(data)](FollowerRecord& follower) {
+      auto req = follower.cap.writeRequest();
+      req.setOffset(offset);
+      req.setData(data);
 
-    if (!electionStarted) {
-      // We can't start the election in the constructor because thisCap() doesn't work yet.
+      // We only need to send the writes in order. We don't care when they return; that's what
+      // sync() is for.
+      tasks.add(req.send().then([](auto&&) {}));
+      return kj::READY_NOW;
+    });
+  }
 
-      electionStarted = true;
-      auto paf = kj::newPromiseAndFulfiller<OwnedStorage<>::Client>();
-      electedFulfiller = kj::mv(paf.fulfiller);
-      elected = paf.promise.fork();
+  kj::Promise<void> sync() {
+    uint64_t syncVersion = ++version;
+    queueOp([syncVersion](FollowerRecord& follower) {
+      auto req = follower.cap.syncRequest();
+      req.setVersion(syncVersion);
+      return req.send().then([](auto&&) {});
+    });
 
-      auto replicas = localReplica().getOtherReplicas();
-      votes = kj::heapArray<bool>(replicas.size());
+    // TODO(perf): It would be OK to allow additional write()s before sync() has returned, as
+    //   long as a replica can't get two syncs ahead. It could even be OK to reorder writes before
+    //   a sync, if we adjusted how FollowResults.direct is counted.
+    return awaitQuorum();
+  }
 
-      uint i = 0;
-      followers = KJ_MAP(replica, replicas) {
-        uint index = i++;
-        votes[index] = false;
-        return addFollower(index, kj::mv(replica));
-      };
+  class LocalModification {
+  public:
+    LocalModification(): builder(message.getRoot<ObjectModification>()) {}
 
-      if (localReplica().getSibling().getConfig().getQuorumSize() == 1) {
-        // The leader itself forms a quorum.
-        electedFulfiller->fulfill(newOwnedStorageImpl(thisCap()));
-      }
+    ObjectModification::Builder get() { return builder; }
+    ObjectModification::Reader get() const { return builder; }
+
+  private:
+    capnp::MallocMessageBuilder message;
+    ObjectModification::Builder builder;
+  };
+
+  kj::Maybe<kj::Promise<void>> modify(kj::Own<LocalModification> mod, uint64_t againstVersion) {
+    if (version != againstVersion) {
+      return nullptr;
     }
 
-    context.getResults(capnp::MessageSize {4, 1}).setCap(elected.addBranch());
+    ++version;
+
+    queueOp([KJ_MVCAP(mod),againstVersion](FollowerRecord& follower) {
+      auto req = follower.cap.stageRequest();
+      auto txn = req.initTxn();
+      txn.setVersion(againstVersion + 1);
+      txn.setFromVersion(againstVersion);
+      txn.setModification(mod->get());
+      auto promise = req.send();
+      follower.staged = promise.getStaged();
+      return promise.then([](auto&&) {});
+    });
+    awaitQuorum();
+
+    queueOp([](FollowerRecord& follower) {
+      auto txn = kj::mv(KJ_ASSERT_NONNULL(follower.staged));
+      follower.staged = nullptr;
+      return txn.commitRequest().send().then([](auto&&){});
+    });
+
+    // TODO(perf): In theory the transaction is complete as soon as a quorum has staged it, but
+    //   we also want the local copy of the object to reflect the transaction before we report
+    //   success, so modify() returns when a quorum have acknowledged commit. We could reduce
+    //   latency by either:
+    //   1. Consider modify() done when only the local replica acknowledges commit.
+    //   2. Don't promise that the transaction is on-disk; requiure the caller to have their own
+    //      cache. It may be that this is fine for all callers!
+    // TODO(perf): Independently of the above, I'm not sure if a quorum barrier is strictly needed
+    //   between commit and the next stage. commit() is really a hint that the transaction is now
+    //   reliably stored, therefore can be permanently merged. But the follower can also just
+    //   assume that on the next commit.
+    return awaitQuorum();
+  }
+
+protected:
+  kj::Promise<void> getObject(GetObjectContext context) override {
+    context.getResults(capnp::MessageSize {4,1}).setCap(kj::heap<TransactionBuilderImpl>(*this));
     return kj::READY_NOW;
   }
 
   kj::Promise<void> startTransaction(StartTransactionContext context) override {
+    context.setResults();
   }
 
   kj::Promise<void> cleanupTransaction(CleanupTransactionContext context) override {
@@ -183,69 +280,78 @@ protected:
   }
 
 private:
-  kj::Maybe<ReplicaImpl&> replica;
-  // If null, disconnected.
-
   ObjectKey key;
+  ObjectId id;
+  SiblingImpl& localSibling;
+  ReplicaImpl& localReplica;
+  Replica::Client localReplicaCap;
+  kj::Own<WeakLeaderImpl> weak;
+  kj::TaskSet tasks;
 
-  bool electionStarted = false;
-  uint voteCount = 1;  // vote for self
-  kj::Array<Follower::Client> followers;
-  kj::Array<bool> votes;
-  kj::Own<kj::PromiseFulfiller<OwnedStorage<>::Client>> electedFulfiller;
-  kj::ForkedPromise<OwnedStorage<>::Client> elected = nullptr;
+  struct FollowerRecord {
+    Follower::Client cap;
+    uint generation;
+    kj::Promise<void> opQueue;
+    kj::Maybe<StagedTransaction::Client> staged;
+  };
+  struct FollowResponseRecord {
+    capnp::Response<Replica::FollowResults> response;
+    uint generation;
+  };
 
-  ReplicaImpl& localReplica() {
-    KJ_IF_MAYBE(r, replica) {
-      return *r;
-    } else {
-      kj::throwFatalException(KJ_EXCEPTION(DISCONNECTED, "object leader has been deposed"));
+  kj::Array<FollowerRecord> followers;
+
+  uint64_t version = 0;
+  // Version after all queued operations complete.
+
+  kj::ForkedPromise<void> ready;
+
+  template <typename T>
+  struct RefcountedWrapper: public kj::Refcounted {
+    T value;
+
+    template <typename... Params>
+    RefcountedWrapper(Params&&... params)
+        : value(kj::fwd<Params>(params)...) {}
+  };
+
+  void queueOp(kj::Function<kj::Promise<void>(FollowerRecord&)>&& func) {
+    // Perform the giver operation on every connected follower.
+
+    auto rcFunc = kj::refcounted<RefcountedWrapper<
+        kj::Function<kj::Promise<void>(FollowerRecord&)>>>(kj::mv(func));
+
+    for (auto& follower: followers) {
+      auto f = kj::addRef(*rcFunc);
+      follower.opQueue = follower.opQueue.then([KJ_MVCAP(f),&follower]() mutable {
+        return f->value(follower);
+      });
     }
   }
 
-  Follower::Client addFollower(uint index, ReplicaImpl::ReplicaRecord&& followerReplica) {
-    auto req = followerReplica.cap.followRequest(capnp::MessageSize {4,1});
-    req.setLeader(thisCap());
-    uint generation = followerReplica.generation;
-    return req.send().then([this,index](auto&& response) {
-      auto followerVersion = response.getVersion();
-      if (followerVersion > localReplica().getVersion()) {
-        // Oh crap, this replica is newer than us. We can't possibly lead.
-        // Note: It should be impossible for the election to have completed at this point because
-        //   if one replica is at a newer version then a quorum of them would have to be.
-        abdicate();
-        KJ_LOG(WARNING, "RARE: We tried to be leader but found another node is newer than us.",
-                        index, votes);
-        auto exception = KJ_EXCEPTION(DISCONNECTED,
-            "lost leadership election because a voter had a newer version of the "
-            "object than the nominated leader did");
-        electedFulfiller->reject(kj::cp(exception));
-        kj::throwFatalException(kj::mv(exception));
-      }
+  kj::Promise<void> awaitQuorum() {
+    // Wait for a quorum to have completed the last-queued operation before allowing futher
+    // operations to be performed on any node. Also, returns a promise which resolves when both
+    // a quorum has been reached and the local replica has completed all operations.
 
-      #error "todo: replay missing versions"
-      #error "todo: decide whether to act on staged transaction"
+    // TODO(perf): Actually await a quorum rather than unanimity.
+    auto forked = kj::joinPromises(KJ_MAP(f, followers) { return kj::mv(f.opQueue); }).fork();
 
-      if (!votes[index]) {
-        votes[index] = true;
-        ++voteCount;
-        if (voteCount == localReplica().getSibling().getConfig().getQuorumSize()) {
-          // CNN can now project that this replica will be elected next leader of the object.
-          electedFulfiller->fulfill(newOwnedStorageImpl(thisCap()));
-        }
-      }
-
-      return response.getFollower();
-    }, [this,index,generation](kj::Exception&& e) {
-      if (e.getType() == kj::Exception::Type::DISCONNECTED) {
-        // Attempt reconnect.
-        return addFollower(index, localReplica().getOtherReplica(index, generation + 1));
-      }
-
-      kj::throwFatalException(kj::mv(e));
-    });
+    for (auto& follower: followers) {
+      follower.opQueue = forked.addBranch();
+    }
+    return forked.addBranch();
   }
 };
+
+kj::Promise<void> SiblingImpl::WeakLeaderImpl::get(GetContext context) {
+  KJ_IF_MAYBE(l, leader) {
+    context.getResults(capnp::MessageSize {4,1}).setLeader(l->thisCap());
+    return kj::READY_NOW;
+  } else {
+    return KJ_EXCEPTION(DISCONNECTED, "object leader is gone");
+  }
+}
 
 class SiblingImpl::FollowerImpl: public Follower::Server {
 public:
@@ -299,85 +405,12 @@ protected:
 
 };
 
-kj::Promise<void> SiblingImpl::ReplicaImpl::getLeader(GetLeaderContext context) {
-  if (state.is<LeaderImpl*>()) {
-    context.getResults(capnp::MessageSize {4,1}).setLeader(state.get<LeaderImpl*>()->thisCap());
-    return kj::READY_NOW;
-  } else if (state.is<FollowerImpl*>()) {
-    context.getResults(capnp::MessageSize {4,1}).setLeader(state.get<FollowerImpl*>()->getLeader());
-    return kj::READY_NOW;
-  } else {
-    // Ping all other replicas for leadership status.
-    auto promises = KJ_MAP(replicaRecord, getOtherReplicas()) {
-      auto replica = kj::mv(replicaRecord.cap);
-      auto req = replica.getLeaderStatusRequest();
-      return req.send().then([replica](auto&& response) mutable {
-        return LeaderStatus {
-          replica,
-          response.getVersion(),
-          true,
-          response.getIsLeading()
-        };
-      }, [replica](kj::Exception&& e) mutable {
-        if (e.getType() == kj::Exception::Type::DISCONNECTED ||
-            e.getType() == kj::Exception::Type::OVERLOADED) {
-          return LeaderStatus { replica, 0, false, false };
-        } else {
-          kj::throwFatalException(kj::mv(e));
-        }
-      });
-    };
+kj::Promise<void> SiblingImpl::ReplicaImpl::getStatus(GetStatusContext context) {
+  #error todo
+}
 
-    // TODO(now): Only wait for a quorum, plus maybe some timeout thereafter, so that a dead node
-    //   doesn't block progress. Maybe getLeaderStatus() should return the replica's current leader
-    //   capability...
-    return kj::joinPromises(kj::mv(promises))
-        .then([this,context](kj::Array<LeaderStatus> results) mutable
-           -> kj::Promise<void> {
-      if (state.is<LeaderImpl*>() || state.is<FollowerImpl*>()) {
-        // Oh, things resolved while we were waiting. Never mind.
-        return getLeader(context);
-      }
-
-      uint64_t version = getVersion();
-
-      LeaderStatus newestReplica = {thisCap(), version, true, false};
-      // The replica that has the highest version number, among all replicas. Prefer ourselves,
-      // otherwise prefer the lowest-numbered replica as a tiebreaker.
-      //
-      // TODO(perf): Prefer the least-loaded replica as a tiebreaker.
-
-      LeaderStatus newestLeader = {nullptr, newestReplica.version - 1, false, false};
-      // The replica that has the highest version number and claims to be a leader, among all
-      // replicas at least as new as us.
-
-      uint availableCount = 1;
-      for (auto& result: results) {
-        availableCount += result.isAvailable;
-        if (result.isLeading && result.version > newestLeader.version) {
-          newestLeader = result;
-        }
-        if (result.version > newestReplica.version) {
-          newestReplica = kj::mv(result);
-        }
-      }
-
-      // If some other replica claimed to be leading and has a sufficiently new version, defer
-      // to it.
-      if (newestLeader.isLeading) {
-        return context.tailCall(newestLeader.replica.getLeaderRequest(capnp::MessageSize {2,0}));
-      }
-
-      // If some other replica claimed to be a newer version, defer to it.
-      if (newestReplica.version > version) {
-        return context.tailCall(newestReplica.replica.getLeaderRequest(capnp::MessageSize {2,0}));
-      }
-
-      // There is no leader, and we have the newest version, so become the leader ourselves.
-      context.getResults(capnp::MessageSize {4,1}).setLeader(kj::heap<LeaderImpl>(*this));
-      return kj::READY_NOW;
-    });
-  }
+kj::Promise<void> SiblingImpl::ReplicaImpl::follow(FollowContext context) {
+  #error todo
 }
 
 } // namespace storage

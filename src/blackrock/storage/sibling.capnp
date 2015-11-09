@@ -150,16 +150,11 @@ interface Replica {
   # replicas of an object are assigned to storage machines based on a pure function of the
   # object ID.
 
-  getLeader @0 () -> (leader :Leader);
-  # Determine which replica is the leader for this object and return a capability to it.
+  getStatus @0 () -> (version :UInt64, maybeLeader :Leader);
+  # Returns this replica's version of the object as well as the leader it is following (or null
+  # if it is not currently following any leader).
 
-  getLeaderStatus @1 () -> (version :UInt64, isLeading :Bool);
-  # Called by one of the replicas of the given object when it needs to open the object but does
-  # not know who the current leader is. The results are used only as hints for the caller to decide
-  # whether it should attempt to become leader or defer to some other replica's getLeader().
-
-  follow @2 (leader :Leader) -> (follower :Follower, version :UInt64,
-                                 maybeStaged :RawTransaction, startVersion :UInt64);
+  follow @1 (leader :WeakLeader) -> FollowResults;
   # Tells the callee to begin following the caller.
   #
   # The returned `version` indicates the follower's object version as of the last committed
@@ -170,11 +165,56 @@ interface Replica {
   # `maybeStaged`, if not null, is a transaction which had been staged on this replica previously
   # but neither committed nor aborted.
   #
-  # `startVersion` is the suggested version number for the leader's first transaction. The leader
-  # must choose an initial version that is greater than or equal to `startVersion` for a quorum's
-  # worth of followers. Normally `startVersion` is equal to the version of the most-recently-staged
-  # transaction plus one, but will be different if a previous leader called setStartVersion()
-  # on the Follower and failed to actually stage any transaction after that.
+  # `startVersion` is
+
+  struct FollowResults {
+    # The state of a follower, at the time that it begins following a new leader.
+
+    follower @0 :Follower;
+
+    version @1 :UInt64;
+    # The version number as of the last committed transaction or sync. If this is not the newest
+    # version, the leader will need to replay later transactions to catch it up.
+    #
+    # A version number of zero indicates that the replica has no data at all about this object.
+
+    startVersion @2 :UInt64;
+    # The suggested version number for the leader's first transaction. The leader must choose an
+    # initial version that is greater than or equal to `startVersion` for a quorum's worth of
+    # followers. Normally `startVersion` is equal to the version of the most-recently-staged
+    # transaction plus one, but will be different if a previous leader called setStartVersion()
+    # on the Follower and failed to actually stage any transaction after that.
+
+    union {
+      clean @3 :Void;
+      # This replica is in pristine state at exactly the version specified.
+
+      staged @4 :RawTransaction;
+      # This replica had a transaction staged but not committed.
+
+      direct @5 :UInt64;
+      # Currently in direct mode. Value is the number of write()s that have been received since
+      # the last sync. The number can be used by the leader to determine the newest replica, so
+      # that it can replay its recent writes to other replicas.
+
+      dirty @6 :Void;
+      # This replica is in direct mode but forgot how many write()s have occurred due to a crash
+      # (for performance reasons, the write counter is not itself be persisted), so it does not
+      # know how many writes had occurred. In order to get this replica back in sync with others,
+      # either its entire contents will need to be replaced by some other replica's contents, or
+      # all other replicas' contents will need to be replaced by this one.
+    }
+  }
+
+  reFollow @2 (leader :WeakLeader, verison :UInt64, lastTxn :RawTransaction)
+           -> (maybeFollower :Follower);
+  # Called by a leader who was leading this replica before but lost contact, in order to regain
+  # followership. `version` is the version the leader expects the follower to be at. `lastTxn`, if
+  # not null, is the last transaction (i.e. bringing the object to `version`), provided if the
+  # leader is unsure whether the follower had received said transaction.
+  #
+  # The method returns null if the replica has begun following a new leader. In this case the
+  # previous leader should immediately abdicate.
 }
 
 interface Leader {
@@ -184,8 +224,7 @@ interface Leader {
   # Get the high-level representation of the object.
 
   startTransaction @1 () -> (builder :TransactionBuilder);
-  # Starts a transaction on the object. Throws "disconnected" if there is another transaction
-  # already occurring.
+  # Starts a transaction on the object.
 
   cleanupTransaction @2 (id :TransactionId, aborted :Bool);
   # Requests that the callee please complete the given transaction if it is still staged. This is
@@ -204,12 +243,19 @@ interface Leader {
   # used to recover in the case of a crash / partition.
 }
 
+interface WeakLeader {
+  # A weak reference to a Leader. Each Follower holds one of these. It has to be a weak reference
+  # because otherwise it would be cyclic.
+
+  get @0 () -> (leader :Leader);
+}
+
 interface Follower {
   # Interface that an object leader uses to broadcast transactions to replicas. A `Replica`
   # is associated with a specific object, not a machine.
 
-  stage @0 (txn :RawTransaction, version :UInt64) -> (staged :StagedTransaction);
-  # Stage a transaction. Upon committing this transaction, the object will reach the given version.
+  stage @0 (txn :RawTransaction) -> (staged :StagedTransaction);
+  # Stage a transaction.
   #
   # A quorum of replicas must respond successfully to this call before the transaction can be
   # safely committed. Otherwise, it's possible that the caller is no longer leader, therefore
@@ -228,7 +274,26 @@ interface Follower {
   # follower replica saves the version specified and makes sure that future calls to `follow()`
   # return at least this version plus one for `startVersion`.
 
-  # TODO(soon): write/sync for non-transactional access
+  replayTo @3 (other :Follower, fromVersion :UInt64);
+  # Replays writes against `other` in order to bring it up-to-date with this follower's state.
+  # This may involve completely overwriting `other` with new data if the callee doesn't know more
+  # precisely what to update.
+
+  write @4 (offset :UInt64, data :Data);
+  # Perform a non-transactional write.
+  #
+  # Performing a write also implicitly switches the follower into "direct mode", which is only
+  # allowed when no transaction is staged. Staging a transaction changes the follower back into
+  # "transactional mode".
+  #
+  # It is a bad idea to disconnect from the follower while still in direct mode, because expensive
+  # recovery may be needed to ensure consistency between replicas the next time the object is
+  # opened. Therefore, a leader should always commit a no-op transaction to return the object to
+  # a clean state before dropping it.
+
+  sync @5 (version :UInt64);
+  # Ensures all previous writes have completed, then sets the object version to `version`. The
+  # object remains in direct mode.
 }
 
 interface TransactionBuilder {
@@ -241,8 +306,8 @@ interface TransactionBuilder {
   # Once either `stage()` is called or the `Transaction` is dropped, `transactionalObject` will be
   # revoked.
 
-  addOps @1 (ops :List(RawTransaction.Op));
-  # Add some direct low-level ops.
+  addModification @1 (mod :ObjectModification);
+  # Add some direct low-level modifications.
 
   stage @2 (id :TransactionId) -> (staged :StagedTransaction);
   # Prepare to commit the transaction. If this succeeds, then the underlying object has been
@@ -291,6 +356,34 @@ struct TransactionId {
   # ID can be reused so long as the old ID has been globally forgotten.
 }
 
+struct ObjectModification {
+  create @0 :UInt8 = 0;
+  # Type is ObjectType enum from basics.h. 0 means to open, not create.
+
+  setContent @1 :Data;
+  # Overwrite content. null = don't overwrite.
+
+  shouldDelete @2 :Bool = false;
+
+  shouldBecomeReadOnly @3 :Bool = false;
+
+  adjustTransitiveBlockCount @4 :Int64 = 0;
+  # Delta vs. current value.
+
+  setParent @5 :ObjectId;
+  # null = don't change
+
+  backburnerModifyTransitiveBlockCount @6 :Int64 = 0;
+  # Schedule backburner task to modify this object's transitive block count and recurse to its
+  # parent.
+
+  backburnerRecursivelyDelete @7 :Bool = false;
+  # Schedule backburner task to eventually delete this object and recurse to its children.
+
+  shouldClearBackburner @8 :Bool = false;
+  # Remove all backburner tasks attached to this object.
+}
+
 struct RawTransaction {
   id @0 :TransactionId;
   # The distributed transaction ID, or null for a single-object transaction.
@@ -303,7 +396,6 @@ struct RawTransaction {
 
   version @1 :UInt64;
   # Version we'll transition to if this transaction goes through.
-  #
 
   fromVersion @2 :UInt64;
   # The transaction can be safely applied to any object whose version is at least `fromVersion`,
@@ -314,36 +406,7 @@ struct RawTransaction {
   # i.e. applying both the transactions -- without any external knowledge, because all of the
   # operations are idempotent.
 
-  ops @3 :List(Op);
-
-  struct Op {
-    union {
-      create @0 :UInt8;
-      # Type is ObjectType enum from basics.h.
-
-      setContent @1 :Data;
-
-      delete @2 :Void;
-
-      becomeReadOnly @3 :Void;
-
-      setAccountedBlockCount @4 :UInt32;
-
-      setTransitiveBlockCount @5 :UInt64;
-
-      setParent @6 :ObjectId;
-
-      backburnerModifyTransitiveBlockCount @7 :Int64;
-      # Schedules a backburner task to eventually modify this object's transitive block count and
-      # recurse to its parent. The value is applied as a delta.
-
-      backburnerRecursivelyDelete @8 :Void;
-      # Schedules a backburner task to eventually delete this object and recurse to its children.
-
-      clearBackburner @9 :Void;
-      # Remove all backburner tasks attached to this object.
-    }
-  }
+  modification @3 :ObjectModification;
 }
 
 struct StorageConfig {
