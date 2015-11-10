@@ -140,6 +140,10 @@ enum class RecoveryType: uint8_t {
   SYNC_STATE,
   // Information about a blob which is in a state of being only partially downloaded to local
   // storage.
+
+  TERM_INFO,
+  // A serialized TermInfo identifying the start time of the leadership term of the last
+  // leader who wrote to a particular object (the object being identified in the TemporaryXattr).
 };
 constexpr uint RECOVERY_TYPE_COUNT = static_cast<uint>(RecoveryType::SYNC_STATE) + 1;
 constexpr auto ALL_RECOVERY_TYPES = transformCollection(
@@ -191,6 +195,11 @@ struct TemporaryXattr {
       ObjectId ojbectId;
       // Affected object ID.
     } backburner;
+
+    struct {
+      byte reserved[16];
+      ObjectId objectId;
+    } termInfo;
   };
 };
 

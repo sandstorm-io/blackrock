@@ -70,6 +70,7 @@ kj::StringPtr KJ_STRINGIFY(RecoveryType type) {
     case RecoveryType::BACKBURNER: return "backburner";
     case RecoveryType::SWITCH:     return "switch";
     case RecoveryType::SYNC_STATE: return "sync-state";
+    case RecoveryType::TERM_INFO:  return "term-info";
   }
 }
 

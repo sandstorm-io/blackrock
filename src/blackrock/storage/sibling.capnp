@@ -11,8 +11,7 @@
 #   several versions at once.
 # * A "local" or "single-object" transaction is one which affects only one object.
 # * A "distributed" or "multi-object" transaction is one which is coordinated between multiple
-#   objects. The infrastructure needed for distributed transactions is a superset of that needed
-#   for local transactions.
+#   object.
 # * A "replica" is a copy of an object stored on one machine. Different replicas of an object
 #   are stored on different machines. Every object has the same number of replicas, but the set
 #   of machines hosting those replicas is chosen differently for every object.
@@ -23,27 +22,21 @@
 #   leader. The number of replicas needed to represent a quorum is configurable but must be at
 #   least a majority.
 # * Every transaction performed by the leader must be accepted by a "quorum" of followers
-#   before it is considered completed. Note that the quorum needed to elect a leader and the
+#   before it is considered "complete". Note that the quorum needed to elect a leader and the
 #   quorum needed to accept a transaction are actually slightly different: The latter need not
 #   necessarily be a majority, but just large enough that there cannot be a quorum of replicas
 #   electing one leader at the same time as another quorum of replicas is still accepting a
 #   previous leader. That is, the quorum required for election plus the quorum required to
 #   complete a transaction must add up to more than the number of replicas per object.
-# * We use two-phase commit: A transaction is first "staged" and then "committed" (or "aborted").
-#   Each phase requires a quorum before moving on to the next.
-# * Only distributed transactions can be "aborted". Local transactions will always be committed
-#   after being staged, unless they are lost in a failure before being staged by a quorum.
-# * A transaction is "complete" if it has been accepted by a quorum and (for distributed
-#   transactions) it has been decided whether to commit or abort.
-#
-# The sequence of transactions applying to one object must follow these rules:
-# 1. A leader must number the transactions it proposes sequentially with no gaps.
-# 2. A leader may not stage a transaction until any previous transaction from the same leader
-#    has been acknowledged as complete by a quorum of replicas.
-# 3. A leader may not ask for acknowledgment of completion from any replica until the transaction
-#    has been staged on a quorum of replicas.
-# 4. There must be a gap in version numbers between the last transaction completed by a previous
-#    leader and the first staged by a new leader, to prevent any overlap in transaction numbers.
+# * Multi-object transaction require two-phase commit: A transaction is first "staged" and then
+#   "committed" (or "aborted"). The staging phase requires a quorum of followers of each affected
+#   object to acknowledge the transaction before it can be safely committed; if such consensus
+#   cannot be achieved, the transaction must be aborted.
+# * A "term" is the time during which a particular leader is leading. Each term has a start time
+#   expressed as a vector clock. Since a term requires a quorum to start, there is always some
+#   overlap between any two terms' vector clock start times, making them easily comparable. Every
+#   write is associated with a term; the term during which an object's most-recent write occurred
+#   is tracked by each replica.
 #
 # A replica becomes leader by the following process:
 # 1. A replica is nominated. (The method by which the replica is chosen, and the state of the
@@ -57,72 +50,42 @@
 # 4. Each replica receiving a follow request similarly disconnects from its previous role,
 #    creates a new Follower interface, and returns it to the nominee. The follower also tells
 #    the nominee what version its copy of the object is at (as of the last transaction it knows
-#    to have been completed) and gives the nominee a copy of any transaction that was staged
-#    by the previous leader but not completed.
-# 5. If any follower claims to be at a version which is newer than the nominee's version before
-#    a quorum is gathered, then the nominee immediately concedes the election and disconnects
-#    from the leadership role. The process should be restarted with the newer replica as the
-#    nominee.
-# 6. If *all* replicas reply (not just a quorum), they are all at the same version, and none have
-#    leftover staged transactions, then we can take the fast path: The leader picks up right where
-#    the last left off. Skip to step 8.
-# 7. If some replicas time out, are at inconsistent versions, or have leftover staged transactions,
-#    but at least a quorum do in fact respond, then the nominee must work to fix them.
-#   7a. The nominee chooses a version for its initial transaction that is at least two more than
-#       the version of any observed transaction (completed or staged) and any `startVersion`
-#       returned by any of the followers.
-#   7b. The nominee calls `setStartVersion()` on each follower to inform them of its planned start
-#       version and waits for at least a quorum of these calls to succeed. This ensures that if
-#       the current recovery attempt does not complete (does not commit any transactions), a future
-#       recovery attempt will know to use a later version number, avoiding possible ambiguity.
-#   7c. If any uncommitted staged transactions were reported (with version numbers higher than any
-#       observed committed transaction), the nominee chooses the one with the highest version
-#       number to restore.
-#   7d. For each follower in the quorum (including the nominee itself), the nominee stages a
-#       transaction which represents the merge of all committed transactions between the follower's
-#       version and the nominee's version as well as the staged transaction chosen in 7c (if any).
-#       This batch transaction's version number is the start version chosen in 7a. Note that the
-#       nominee stages such a transaction on itself, too!
-#   7e. The transaction from 7d is staged and committed in the same manner transactions normally
-#       are.
-# 8. The nominee is now officially the leader. It may now respond to the getObject() method,
-#    returning the high-level storage object for use by a client.
-# 9. When followers disconnect, the leader attempts to reconnect and then replay missed
-#    transactions. If, upon reconnect, the leader finds that the follower has advanced beyond the
-#    leader's version, then the leader immediately abdicates. This makes it impossible for two
-#    leaders to make progress concurrently: for a new leader to be elected, at least one foller
-#    of the old leader would have to defect. The new leader would commit its initial transaction
-#    to the follower, bringing its version number past that of the old leader, while the old leader
-#    would be stuck without a quorum doing nothing. If the follewer somehow returned to the old
-#    leader, the old leader would see the verison number andgive up.
-# 10. When all clients disconnect from the high-level object, the leader steps down. The next time
-#     the object is opened, a new leader will be chosen.
+#    to have been completed), in what term that version was written, and whether it is "dirty"
+#    (meaning non-transactional writes may have occurred since the last version bump).
+# 5. The leader waits for a quorum before going any further, then waits an additional timeout for
+#    the rest of the replicas to join.
+# 6. The leader forms its term time vector based on the replicas that have responded.
+# 7. Among all the responding followers, the leader looks for the one which was most-recently
+#    written. It first compares replicas by term in which they were last written (since terms
+#    are strictly orderable), and then by version number, and finally prefers clean replicas over
+#    dirty ones (technically dirty ones are newer, but their changes have not been synced and can
+#    therefore be discarded; a clean replica is preferred due to the next step).
+# 8. If any followers are *not* at the same version as the chosen replica, then those followers
+#    must be completely replaced with a copy of the chosen replica. Note that any replica marked
+#    "dirty" cannot be determined to be at exactly the same version as *any* other replica; if the
+#    chosen replica is dirty then all others must be cloned from it. If the leader must replace
+#    a replica, it does so as part of the first transaction it commits.
 #
-# All of the above should be straightforward except 7c. Why is it safe to apply just the newest
-# of the straggler staged transactions? To answer, we break it down into several possibilities,
-# based on when exactly the previous leader was deposed:
-# * If the previous leader was deposed between transactions, then the new leader will not observe
-#   any incomplete staged transactions.
-# * If the previous leader was deposed after having partially staged a transaction, the new leader
-#   may or may not observe that staged transaction. However, since the staging was incomplete, it
-#   is safe both to replay the transaction or to ignore it.
-# * If the previous leader was deposed after staging a transaction to a quorum but before having
-#   sent commit() to the entire quorum, then the new leader may or may not observe that commit()
-#   occurred, but the new leader definitely will at least observe the transaction as staged and
-#   the transaction before it as committed, and will not observe any other staged transactions.
-#   So all the staged transactions it sees are copies, and it can choose any of them.
-# * If the previous leader was deposed _during step 7_ (i.e. it was itself performing recovery),
-#   it may have staged its initial transaction on some replicas while a previous staged transaction
-#   was still present on other replicas. Since this previous leader was itself following the rules
-#   for recovery, we know that any transaction it produced is sufficient for full recovery, having
-#   already merged in any necessary staged transactions from leaders before it. Therefore if we
-#   see any copies of the previous leader's staged transaction attempt, we should use them.
-#   If we don't see any such copies, then we know for sure that the previous leader did not
-#   commit its initial transaction, and therefore it's safe for us to pretend it never happened
-#   and instead look for the previous previous leader's leftovers. Note that our use of
-#   setStartVersion() prevents any two recovery attempts from choosing the same version number
-#   for their initial transaction, because before staging the transaction at all, the leader
-#   ensures that the next leader has the information it needs to choose a higher version number.
+# Note that there is no requirement that followers are kept in lockstep. The leader will not
+# acknowledge a transaction to the client until a quorum accepts it, but it is perfectly allowable
+# for one follower to be several transactions ahead of another. If there is a failure and then
+# the next leader starts with a quorum that doesn't include the replica that was ahead, then when
+# that replica rejoins later its content will be deleted and reinitialized, thus losing the
+# excess writes. That's fine because those writes were never acknowledged anyway.
+#
+# This design is important because we are optimizing for volume I/O to be fast, meaning in
+# particular write()s and sync()s need to be fast. It is reasonably normal for apps to issue
+# overlapping sync()s, e.g. due to separate threads performing fdatasync() on independent files.
+# If we serialized them at the back-end, we could hurt performance.
+#
+# On the other hand, you could imagine a strategy in which a quorum of followers must acknowledge
+# each version bump before the leader can schedule the next one on any of them. This strategy has
+# the advantage that if each replica stored the most-recent transaction as a diff and only
+# committed it upon the next arriving, then it would always be possible to roll back the most
+# recent transaction without rewriting the whole content, which would possibly reduce the frequency
+# with which such full replacements are needed during recovery. In practice, though, the only
+# cases where full replacements are particularly onerous are volumes (which can be large), and
+# volumes are not written transactionally anyway, so we don't gain anything.
 
 $import "/capnp/c++.capnp".namespace("blackrock::storage");
 using Storage = import "/blackrock/storage.capnp";
@@ -130,6 +93,13 @@ using FsStorage = import "/blackrock/fs-storage.capnp";
 using ObjectId = FsStorage.StoredObjectId;
 using ObjectKey = FsStorage.StoredObjectKey;
 using OwnedStorage = Storage.OwnedStorage;
+
+const maxVersionSkew :UInt64 = 1024;
+# How many versions ahead one follower is allowed to be compared to the quorum. The leader must
+# stop committing to a follower that gets this far ahead while waiting for the others to catch up.
+#
+# When a new leader is elected, it starts by incrementing all followers' versions by at least this
+# amount (without making actual changes to the data) in order to prove its leadership.
 
 interface Sibling {
   # Interface which storage nodes use to talk to each other.
@@ -142,6 +112,27 @@ interface Sibling {
   getReplica @1 (id :ObjectId) -> (replica :Replica);
   # Get the replica of the given object maintained by this node. Not valid to call if this node is
   # not a member of the object's replica set.
+
+  struct Time {
+    # A monotonically-increasing value, maintained per-sibling. Aside from being
+    # monotonically-increasing, this is not related to real time.
+    #
+    # Time values are designed to be used in a vector clock. A vector time can be represented as
+    # List(Time).
+
+    siblingId @0 :UInt32;
+    # Specifies which sibling this time came from. Times from different siblings are not
+    # comparable.
+
+    generation @1 :UInt32;
+    # Increments each time the sibling process starts / restarts.
+
+    tick @2 :UInt64;
+    # Increments each time the sibling's clock is observed. Resets to zero when the process
+    # restarts.
+  }
+
+  getTime @2 () -> (time :Time);
 }
 
 interface Replica {
@@ -154,67 +145,22 @@ interface Replica {
   # Returns this replica's version of the object as well as the leader it is following (or null
   # if it is not currently following any leader).
 
-  follow @1 (leader :WeakLeader) -> FollowResults;
+  follow @1 (leader :WeakLeader) -> (follower :InitFollower, version :UInt64, dirty :Bool,
+                                     time :Sibling.Time, lastTerm :List(Sibling.Time));
   # Tells the callee to begin following the caller.
   #
-  # The returned `version` indicates the follower's object version as of the last committed
-  # transaction it saw. The leader must start by replaying any later transactions to catch the
-  # follower up. If the follower's version is somehow newer than the leader's, then the leader
-  # must immediately abdicate leadership.
+  # `version` is the version number as of the last committed transaction or sync. If this is not
+  # the newest version, the leader will need to overwrite this follower with data from the newest
+  # replica. A version number of zero indicates that the replica has no data at all about this
+  # object.
   #
-  # `maybeStaged`, if not null, is a transaction which had been staged on this replica previously
-  # but neither committed nor aborted.
+  # If `data` is true, then it is possible that some non-transactional write()s have occurred which
+  # are not reflected by `version`. This is unfortunate as it means that the replica will either
+  # need to be completely overwritten with data from another replica, or the data from this
+  # replica will need to be used to completely replace data from all other replicas.
   #
-  # `startVersion` is
-
-  struct FollowResults {
-    # The state of a follower, at the time that it begins following a new leader.
-
-    follower @0 :Follower;
-
-    version @1 :UInt64;
-    # The version number as of the last committed transaction or sync. If this is not the newest
-    # version, the leader will need to replay later transactions to catch it up.
-    #
-    # A version number of zero indicates that the replica has no data at all about this object.
-
-    startVersion @2 :UInt64;
-    # The suggested version number for the leader's first transaction. The leader must choose an
-    # initial version that is greater than or equal to `startVersion` for a quorum's worth of
-    # followers. Normally `startVersion` is equal to the version of the most-recently-staged
-    # transaction plus one, but will be different if a previous leader called setStartVersion()
-    # on the Follower and failed to actually stage any transaction after that.
-
-    union {
-      clean @3 :Void;
-      # This replica is in pristine state at exactly the version specified.
-
-      staged @4 :RawTransaction;
-      # This replica had a transaction staged but not committed.
-
-      direct @5 :UInt64;
-      # Currently in direct mode. Value is the number of write()s that have been received since
-      # the last sync. The number can be used by the leader to determine the newest replica, so
-      # that it can replay its recent writes to other replicas.
-
-      dirty @6 :Void;
-      # This replica is in direct mode but forgot how many write()s have occurred due to a crash
-      # (for performance reasons, the write counter is not itself be persisted), so it does not
-      # know how many writes had occurred. In order to get this replica back in sync with others,
-      # either its entire contents will need to be replaced by some other replica's contents, or
-      # all other replicas' contents will need to be replaced by this one.
-    }
-  }
-
-  reFollow @2 (leader :WeakLeader, verison :UInt64, lastTxn :RawTransaction)
-           -> (maybeFollower :Follower);
-  # Called by a leader who was leading this replica before but lost contact, in order to regain
-  # followership. `version` is the version the leader expects the follower to be at. `lastTxn`, if
-  # not null, is the last transaction (i.e. bringing the object to `version`), provided if the
-  # leader is unsure whether the follower had received said transaction.
-  #
-  # The method returns null if the replica has begun following a new leader. In this case the
-  # previous leader should immediately abdicate.
+  # `time` is the current time on the replica. `lastTerm` is the vector clock representing the
+  # start time of the term of the leader who most recently wrote to this replica.
 }
 
 interface Leader {
@@ -250,36 +196,35 @@ interface WeakLeader {
   get @0 () -> (leader :Leader);
 }
 
+interface InitFollower {
+  # Before a Leader can issue any write to a Follower, it must specify the term start time.
+  # This class enforces that.
+
+  startTerm @0 (vectorTime :List(Sibling.Time)) -> (follower :Follower);
+}
+
 interface Follower {
   # Interface that an object leader uses to broadcast transactions to replicas. A `Replica`
   # is associated with a specific object, not a machine.
 
-  stage @0 (txn :RawTransaction) -> (staged :StagedTransaction);
-  # Stage a transaction.
+  commit @0 (version :UInt64, txn :RawTransaction);
+  # Atomically apply a transaction.
   #
-  # A quorum of replicas must respond successfully to this call before the transaction can be
-  # safely committed. Otherwise, it's possible that the caller is no longer leader, therefore
-  # lacks the authority to commit transactions. Therefore, if this transaction is being replicated
-  # as part of a stageTransaction() call, that call cannot return success until a quorum of
-  # followers have staged the transaction.
+  # A quorum of replicas must respond successfully to this call before the change can be
+  # acknowledged to the client.
+  #
+  # If a failure occurs with less that a quorum having committed the transaction, then it is
+  # possible that the transaction will be reverted on recovery, if the next leader happens to be
+  # elected by a quorum not including the ones who committed the transaction.
 
-  free @1 (id :UInt64);
-  # Indicates that all transactions through the given one have been committed by all replicas and
-  # therefore can now be deleted from the transaction log.
+  stageDistributed @1 (id :TransactionId, version :UInt64, txn :RawTransaction)
+                   -> (staged :StagedTransaction);
+  # Stage a multi-object transaction. Subsequent commit()s will be blocked until this transaction
+  # is either committed or aborted. If `staged` is dropped without calling either commit() or
+  # abort(), then the replica will contact the transaction coordinator directly to ask it
+  # whether the transaction has completed.
 
-  setStartVersion @2 (version :UInt64);
-  # Pre-informs the follower what the version of the first transaction staged by this leader will
-  # be. This is only used in rare recovery paths, where there is concern about possible later
-  # ambiguity if another failure occurs while the leader is staging its first transaction. The
-  # follower replica saves the version specified and makes sure that future calls to `follow()`
-  # return at least this version plus one for `startVersion`.
-
-  replayTo @3 (other :Follower, fromVersion :UInt64);
-  # Replays writes against `other` in order to bring it up-to-date with this follower's state.
-  # This may involve completely overwriting `other` with new data if the callee doesn't know more
-  # precisely what to update.
-
-  write @4 (offset :UInt64, data :Data);
+  write @2 (offset :UInt64, data :Data);
   # Perform a non-transactional write.
   #
   # Performing a write also implicitly switches the follower into "direct mode", which is only
@@ -291,9 +236,18 @@ interface Follower {
   # opened. Therefore, a leader should always commit a no-op transaction to return the object to
   # a clean state before dropping it.
 
-  sync @5 (version :UInt64);
+  sync @3 (version :UInt64);
   # Ensures all previous writes have completed, then sets the object version to `version`. The
   # object remains in direct mode.
+
+  replace @4 () -> (replacer :Replacer);
+  # Initiates replacing the entire Follower contents with new data. The content will stream in over
+  # the `Replacer` capability.
+
+  interface Replacer {
+    write @0 (offset :UInt64, data :Data);
+    commit @1 (version :UInt64, changes :RawTransaction);
+  }
 }
 
 interface TransactionBuilder {
@@ -306,7 +260,7 @@ interface TransactionBuilder {
   # Once either `stage()` is called or the `Transaction` is dropped, `transactionalObject` will be
   # revoked.
 
-  addModification @1 (mod :ObjectModification);
+  applyRaw @1 (changes :RawTransaction);
   # Add some direct low-level modifications.
 
   stage @2 (id :TransactionId) -> (staged :StagedTransaction);
@@ -353,10 +307,11 @@ struct TransactionId {
 
   id @1 :UInt64;
   # The ID of this transaction among those associated with the coordinator object. Note that an
-  # ID can be reused so long as the old ID has been globally forgotten.
+  # ID can be reused so long as the old ID has been globally forgotten. The ID is not related to
+  # any other numbers and is not necessarily sequential.
 }
 
-struct ObjectModification {
+struct RawTransaction {
   create @0 :UInt8 = 0;
   # Type is ObjectType enum from basics.h. 0 means to open, not create.
 
@@ -384,29 +339,8 @@ struct ObjectModification {
   # Remove all backburner tasks attached to this object.
 }
 
-struct RawTransaction {
-  id @0 :TransactionId;
-  # The distributed transaction ID, or null for a single-object transaction.
-  #
-  # Single-object transactions cannot be explicitly aborted, and are guaranteed committed once
-  # they have been staged on a majority of replicas; see StagedTransaction.abort().
-  #
-  # Distributed transactions *can* be aborted by the transaction coordinator, even after being
-  # staged on any number of replicas.
-
-  version @1 :UInt64;
-  # Version we'll transition to if this transaction goes through.
-
-  fromVersion @2 :UInt64;
-  # The transaction can be safely applied to any object whose version is at least `fromVersion`,
-  # in order to bring it to `toVersion`.
-  #
-  # Note that it is possible to merge any two transaction A and B where A.version == B.fromVersion
-  # into a merged transaction C where C.fromVersion == A.fromVersion and C.version == B.version --
-  # i.e. applying both the transactions -- without any external knowledge, because all of the
-  # operations are idempotent.
-
-  modification @3 :ObjectModification;
+struct TermInfo {
+  startTime @0 :List(Sibling.Time);
 }
 
 struct StorageConfig {
