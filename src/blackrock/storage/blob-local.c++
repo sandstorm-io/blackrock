@@ -233,6 +233,14 @@ public:
     content->setXattr(xattr);
   }
 
+  kj::Promise<void> setXattrAndSync(Xattr xattr) override {
+    ++generation;
+    content->setXattr(xattr);
+    // TODO(perf): Asynchronous sync.
+    KJ_SYSCALL(fsync(content->getFd()));
+    return kj::READY_NOW;
+  }
+
   void remove() override {
     ++generation;
     KJ_SYSCALL(unlinkat(blobLayer.directoryFd,

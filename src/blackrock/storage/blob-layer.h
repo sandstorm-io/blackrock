@@ -125,6 +125,9 @@ public:
     virtual void setXattr(Xattr xattr) = 0;
     // Overwrite the attributes on this object.
 
+    virtual kj::Promise<void> setXattrAndSync(Xattr xattr) = 0;
+    // Overwrite the attributes on this object and then wait for the changes to hit disk.
+
     virtual void remove() = 0;
     // Delete this object permanently.
 

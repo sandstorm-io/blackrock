@@ -46,14 +46,14 @@ private:
 
     Sibling::Client cap;
 
-    uint generation;
+    uint connectionNumber;
     // Incremented every time we lose a connection and have to reconnect.
 
     KJ_DISALLOW_COPY(SiblingRecord);
     SiblingRecord(SiblingRecord&&) = default;
     SiblingRecord& operator=(SiblingRecord&&) = default;
-    SiblingRecord(Sibling::Client cap, uint generation)
-        : cap(kj::mv(cap)), generation(generation) {}
+    SiblingRecord(Sibling::Client cap, uint connectionNumber)
+        : cap(kj::mv(cap)), connectionNumber(connectionNumber) {}
   };
 
   JournalLayer& journal;
@@ -62,10 +62,8 @@ private:
   std::unordered_map<uint, SiblingRecord> siblings;
   std::unordered_map<ObjectId, ReplicaImpl*, ObjectId::Hash> replicas;
 
-  SiblingRecord getSibling(uint id, uint minGeneration);
-  // Get the given sibling. If the current open capability has generation less than
-  // `minGeneration`, reconnect to the sibling, because the current generation is known to be
-  // disconnected.
+  Sibling::Client getSibling(uint id);
+  // Get the given sibling, reconnecting if necessary.
 
   StorageConfig::Reader getConfig();
 };

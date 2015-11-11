@@ -110,12 +110,19 @@ public:
     uint64_t getGeneration() { return changeCount; }
     BlobLayer::Content& getContent() { return inner->getContent(); }
 
+    kj::Promise<void> sync(uint64_t version);
+    // Calls getContent()->sync() and then updates the object's version (in Xattr) to be at least
+    // `version`, and syncs that to disk.
+
   private:
     JournalLayer& journal;
     ObjectId id;
     kj::Own<BlobLayer::Object> inner;
     uint64_t changeCount = 0;
     bool locked = false;
+
+    Xattr pendingXattr;
+    // The most-recently-written copy of the xattr, not necessarily synced to disk yet.
 
     Object(JournalLayer& journal, ObjectId id, kj::Own<BlobLayer::Object>&& innerParam);
 

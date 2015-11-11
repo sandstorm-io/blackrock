@@ -33,6 +33,13 @@ struct ObjectKey {
     builder.setKey2(key[2]);
     builder.setKey3(key[3]);
   }
+
+  inline bool operator==(const ObjectKey& other) const {
+    return sodium_memcmp(key, other.key, sizeof(key)) == 0;
+  }
+  inline bool operator!=(const ObjectKey& other) const {
+    return !operator==(other);
+  }
 };
 
 struct ObjectId {
@@ -46,7 +53,9 @@ struct ObjectId {
   ObjectId(const ObjectKey& key);
 
   inline bool operator==(const ObjectId& other) const {
-    return ((id[0] ^ other.id[0]) | (id[1] ^ other.id[1])) == 0;  // constant-time
+    // Constant-time for less branching, but note that object IDs are not secrets so we don't have
+    // to jump through hoops to prevent optimization.
+    return ((id[0] ^ other.id[0]) | (id[1] ^ other.id[1])) == 0;
   }
   inline bool operator!=(const ObjectId& other) const {
     return !operator==(other);
@@ -92,26 +101,22 @@ struct Xattr {
   // Extended attribute name. Abbreviated to be 8 bytes to avoid losing space to alignment (ext4
   // doesn't store the "user." prefix). Actually short for "sandstore", not "sandstorm". :)
 
-  ObjectType type;
+  ObjectType type :8;
 
-  bool readOnly;
+  bool readOnly :1;
   // For volumes, prevents the volume from being modified. For Blobs, indicates that initialization
   // has completed with a `done()` call, indicating the entire stream was received (otherwise,
   // either the stream is still uploading, or it failed to fully upload). Once set this
   // can never be unset.
 
-  uint16_t versionHigh;  // bits 32-47
-  uint32_t versionLow;   // bits 0-31
+  bool dirty :1;
+  // Indicates that direct writes have occurred since the last verison bump.
+
+  byte reserved :6;
+
+  uint64_t version :48;
   // The object's version number. This monotonically increases as transactions are committed that
   // affect this object.
-
-  inline uint64_t getVersion() const {
-    return (static_cast<uint64_t>(versionHigh) << 32) | versionLow;
-  }
-  inline void setVersion(uint64_t value) {
-    versionLow = static_cast<uint32_t>(value);
-    versionHigh = static_cast<uint16_t>(value >> 32);
-  }
 
   uint64_t transitiveBlockCount;
   // The number of 4k blocks in this object and all child objects.

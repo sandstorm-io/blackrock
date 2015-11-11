@@ -13,11 +13,22 @@ namespace storage {
 
 JournalLayer::Object::Object(
     JournalLayer& journal, ObjectId id, kj::Own<BlobLayer::Object>&& innerParam)
-    : journal(journal), id(id), inner(kj::mv(innerParam)) {
+    : journal(journal), id(id), inner(kj::mv(innerParam)), pendingXattr(inner->getXattr()) {
   KJ_REQUIRE(journal.openObjects.insert(std::make_pair(id, this)).second);
 }
 JournalLayer::Object::~Object() noexcept(false) {
   journal.openObjects.erase(id);
+}
+
+kj::Promise<void> JournalLayer::Object::sync(uint64_t version) {
+  return getContent().sync().then([this,version]() -> kj::Promise<void> {
+    if (pendingXattr.version < version) {
+      pendingXattr.version = version;
+      return inner->setXattrAndSync(pendingXattr);
+    } else {
+      return kj::READY_NOW;
+    }
+  });
 }
 
 JournalLayer::RecoverableTemporary::RecoverableTemporary(
@@ -38,6 +49,10 @@ public:
   }
 
   void setXattr(Xattr xattr) override {
+    KJ_FAIL_REQUIRE("object does not exist yet");
+  }
+
+  kj::Promise<void> setXattrAndSync(Xattr xattr) override {
     KJ_FAIL_REQUIRE("object does not exist yet");
   }
 
@@ -154,6 +169,7 @@ public:
     } else KJ_IF_MAYBE(c, newContent) {
       object->inner->overwrite(KJ_ASSERT_NONNULL(newXattr), kj::mv(*c));
     } else KJ_IF_MAYBE(x, newXattr) {
+      object->pendingXattr = *x;
       object->inner->setXattr(*x);
     }
 
@@ -181,6 +197,10 @@ public:
   void setXattr(Xattr xattr) override {
     ++changeCount;
     newXattr = xattr;
+  }
+
+  kj::Promise<void> setXattrAndSync(Xattr xattr) override {
+    KJ_FAIL_REQUIRE("setXattrAndSync() is not meant to be called transactionally.");
   }
 
   void remove() override {
