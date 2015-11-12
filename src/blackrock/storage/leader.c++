@@ -8,7 +8,7 @@
 namespace blackrock {
 namespace storage {
 
-class LeaderImpl::WeakLeaderImpl: public WeakLeader::Server, public kj::Refcounted {
+class LeaderImpl::WeakLeaderImpl final: public WeakLeader::Server, public kj::Refcounted {
 public:
   WeakLeaderImpl(LeaderImpl& leader): leader(leader) {}
 
@@ -28,41 +28,101 @@ private:
   friend class LeaderImpl;
 };
 
-class LeaderImpl::TransactionBuilderImpl: public TransactionBuilder::Server {
+class LeaderImpl::StagedTransactionImpl final: public StagedTransaction::Server {
+  // Implementation of StagedTransaction that fulfills a promise.
+
+public:
+  StagedTransactionImpl(LeaderImpl& leader, kj::Array<StagedTransaction::Client> stagedFollowers)
+      : leader(leader), leaderCap(leader.thisCap()), stagedFollowers(kj::mv(stagedFollowers)) {}
+  ~StagedTransactionImpl() noexcept(false);
+
+protected:
+  kj::Promise<void> commit(CommitContext context) override {
+    uint i = 0;
+    return leader.allFollowers([&](FollowerRecord& follower) {
+      return stagedFollowers[i++].commitRequest().send().then([](auto&&) {});
+    });
+  }
+
+  kj::Promise<void> abort(AbortContext context) override {
+    uint i = 0;
+    return leader.allFollowers([&](FollowerRecord& follower) {
+      return stagedFollowers[i++].abortRequest().send().then([](auto&&) {});
+    });
+  }
+
+private:
+  LeaderImpl& leader;
+  Leader::Client leaderCap;
+  kj::Array<StagedTransaction::Client> stagedFollowers;
+
+  struct QuorumWaiter: public kj::Refcounted {
+    uint needed;
+    uint waiting;
+  };
+};
+
+class LeaderImpl::TransactionBuilderImpl final: public TransactionBuilder::Server {
+public:
+  explicit TransactionBuilderImpl(LeaderImpl& leader)
+      : leader(leader), leaderCap(leader.thisCap()) {}
+
 protected:
   kj::Promise<void> getTransactional(GetTransactionalContext context) override {
     #error todo
   }
 
   kj::Promise<void> applyRaw(ApplyRawContext context) override {
-    #error todo
+    #error "todo: merge supplied transaction into ours"
   }
 
   kj::Promise<void> stage(StageContext context) override {
-    #error todo
+    auto params = context.getParams();
+    ++leader.version;
+
+    auto stagedFollowers = kj::heapArrayBuilder<StagedTransaction::Client>(leader.followers.size());
+
+    return leader.allFollowers([&](FollowerRecord& follower) {
+      auto req = follower.cap.stageDistributedRequest();
+
+      req.setCoordinator(params.getCoordinator());
+      req.setId(params.getId());
+      req.setVersion(leader.version);
+      req.setChanges(changes);
+
+      auto promise = req.send();
+      stagedFollowers.add(promise.getStaged());
+
+      // stage() returns when a quorum of followers have accepted, so here we return a promise for
+      // the follower accepting.
+      //
+      // Note that followers will block subsequent writes until the staged transaction goes
+      // through, so there's no need for us to block in the leader.
+      return promise.then([](auto&&) {});
+    });
+
+    context.getResults(capnp::MessageSize {4,1}).setStaged(
+        kj::heap<StagedTransactionImpl>(leader, stagedFollowers.finish()));
   }
 
-};
+private:
+  LeaderImpl& leader;
+  Leader::Client leaderCap;
 
-class LeaderImpl::StagedTransactionImpl: public StagedTransaction::Server {
-protected:
-  kj::Promise<void> commit(CommitContext context) override {
-    #error todo
-  }
-
-  kj::Promise<void> abort(AbortContext context) override {
-    #error todo
-  }
+  capnp::MallocMessageBuilder arena;
+  ChangeSet::Builder changes = arena.getRoot<ChangeSet>();
 };
 
 LeaderImpl::LeaderImpl(ObjectKey key, uint siblingId, uint quorumSize,
-                       JournalLayer::Object& localObject, capnp::Capability::Client capToHold,
+                       MidLevelReader& localObject, capnp::Capability::Client capToHold,
                        kj::Array<capnp::Response<Replica::GetStateResults>> voters)
     : key(key), id(key), siblingId(siblingId), quorumSize(quorumSize), localObject(localObject),
       capToHold(kj::mv(capToHold)), weak(kj::refcounted<WeakLeaderImpl>(*this)),
       termInfo(makeTermInfo(termInfoMessage, voters)),
+      tasks(*this),
       ready(kj::joinPromises(KJ_MAP(voter, voters)
             -> kj::Promise<FollowResponseRecord> {
+          // Ask the voter to follow us.
           auto req = voter.getFollowState().getIdle().voteRequest();
           req.setLeader(kj::addRef(*weak));
           req.setTerm(termInfo);
@@ -108,8 +168,9 @@ LeaderImpl::LeaderImpl(ObjectKey key, uint siblingId, uint quorumSize,
 
           KJ_ASSERT(goodReplicas.size() > 0);
 
-          if (badReplicas.size() == 0) {
-            // No recovery needed!
+          bool dirty = bestState.isExists() && bestState.getExists().getIsDirty();
+          if (badReplicas.size() == 0 && !dirty) {
+            // No recovery needed.
             return kj::READY_NOW;
           }
 
@@ -147,43 +208,44 @@ void LeaderImpl::abdicate() {
   followers = nullptr;
 }
 
-JournalLayer::Object& LeaderImpl::getLocalObject() {
-  if (weak->leader == nullptr) {
-    kj::throwFatalException(KJ_EXCEPTION(DISCONNECTED, "object leader has abdicated"));
-  }
-  return localObject;
-}
-
-void LeaderImpl::write(uint64_t offset, kj::Array<const byte> data) {
-  queueOp([this,offset,KJ_MVCAP(data)](FollowerRecord& follower) {
+void LeaderImpl::write(uint64_t offset, kj::ArrayPtr<const byte> data) {
+  allFollowers([&](FollowerRecord& follower) {
     auto req = follower.cap.writeRequest();
     req.setOffset(offset);
     req.setData(data);
-
-    // We only need to send the writes in order. We don't care when they return; that's what
-    // sync() is for.
-    tasks.add(req.send().then([](auto&&) {}));
-    return kj::READY_NOW;
+    return req.send().then([](auto&&) {});
   });
 }
 
 kj::Promise<void> LeaderImpl::sync() {
   ++version;
-  return queueOp([&](FollowerRecord& follower) {
+  return allFollowers([&](FollowerRecord& follower) {
     auto req = follower.cap.syncRequest();
     req.setVersion(version);
     return req.send().then([](auto&&) {});
   });
 }
 
-kj::Promise<void> LeaderImpl::modify(RawTransaction::Reader mod) {
+kj::Promise<void> LeaderImpl::modify(ChangeSet::Reader changes) {
   ++version;
-  return queueOp([&](FollowerRecord& follower) {
+  return allFollowers([&](FollowerRecord& follower) {
     auto req = follower.cap.commitRequest();
     req.setVersion(version);
-    req.setTxn(mod);
+    req.setChanges(changes);
     return req.send().then([](auto&&) {});
   });
+}
+
+kj::Own<MidLevelWriter::Replacer> startReplace() {
+  KJ_UNIMPLEMENTED("startReplace() over replication not implemented");
+}
+
+kj::Promise<void> LeaderImpl::setDirty() {
+  KJ_FAIL_REQUIRE("setDirty() is meant to be used by followers who care about versions");
+}
+
+void LeaderImpl::setNextVersion(uint64_t version) {
+  KJ_FAIL_REQUIRE("setNextVersion() is meant to be used by followers who care about versions");
 }
 
 kj::Promise<void> LeaderImpl::getObject(GetObjectContext context) {
@@ -195,14 +257,14 @@ kj::Promise<void> LeaderImpl::getObject(GetObjectContext context) {
     KJ_FAIL_REQUIRE("wrong key");
   }
 
-  // Wait for election to finish before creating object.
+  // Wait for election / most recent op to finish before creating object.
   return ready.addBranch().then([this,context]() mutable {
     auto results = context.getResults(capnp::MessageSize {4,1});
 
     KJ_IF_MAYBE(o, weakObject) {
       results.setCap(o->thisCap());
     } else {
-      results.setCap(localReplica.newOwnedStorage(*this, thisCap(), weakObject));
+      results.setCap(makeHighLevelObject(localObject, *this, thisCap(), weakObject));
     }
   });
 }
@@ -221,7 +283,8 @@ kj::Promise<void> LeaderImpl::getTransactionState(GetTransactionStateContext con
   #error todo
 }
 
-kj::Promise<void> LeaderImpl::queueOp(kj::Function<kj::Promise<void>(FollowerRecord&)>&& func) {
+kj::Promise<void> LeaderImpl::allFollowers(
+    kj::Function<kj::Promise<void>(FollowerRecord&)>&& func) {
   // Call the given function -- synchronously, right now -- on all followers. The returned
   // promise completes when a quorum of followers that includes the local follower have
   // completed.
@@ -278,8 +341,7 @@ kj::Promise<void> LeaderImpl::queueOp(kj::Function<kj::Promise<void>(FollowerRec
               DISCONNECTED, "local replica disconnected from leader"));
           KJ_LOG(WARNING, "quorum lost", id);
         } else {
-          // Ignore -- this follower will just keep failing, which is fine.
-          KJ_LOG(WARNING, "follower disconnected", id);
+          // Ignore. This follower will continuously throw disconnected exceptions, but oh well.
         }
       } else {
         // Pass through non-disconnected exceptions.
@@ -288,7 +350,15 @@ kj::Promise<void> LeaderImpl::queueOp(kj::Function<kj::Promise<void>(FollowerRec
     }).attach(kj::addRef(*waiter)));
   }
 
-  return kj::mv(paf.promise);
+  // Delay getObject() until last queued op completes.
+  ready = paf.promise.fork();
+  return ready.addBranch();
+}
+
+void LeaderImpl::taskFailed(kj::Exception&& exception) {
+  if (exception.getType() != kj::Exception::Type::DISCONNECTED) {
+    KJ_LOG(ERROR, exception);
+  }
 }
 
 TermInfo::Reader LeaderImpl::makeTermInfo(capnp::MessageBuilder& arena,

@@ -9,7 +9,7 @@
 namespace blackrock {
 namespace storage {
 
-class FollowerImpl::StagedTransactionImpl: public StagedTransaction::Server {
+class FollowerImpl::StagedTransactionImpl final: public StagedTransaction::Server {
 public:
   StagedTransactionImpl(kj::Own<kj::PromiseFulfiller<bool>> fulfiller)
       : fulfiller(kj::mv(fulfiller)) {}
@@ -43,27 +43,35 @@ private:
   kj::Own<kj::PromiseFulfiller<bool>> fulfiller;
 };
 
-FollowerImpl::FollowerImpl(JournalLayer& journal, JournalLayer::Object& object,
-                           capnp::Capability::Client capToHold, kj::Maybe<FollowerImpl&>& weakref,
-                           WeakLeader::Client leader)
-    : state(State {journal, object, kj::mv(capToHold), weakref, kj::mv(leader)}),
-      writeQueue(kj::READY_NOW) {}
+FollowerImpl::FollowerImpl(MidLevelWriter& object, capnp::Capability::Client capToHold,
+                           kj::Maybe<FollowerImpl&>& weakref, WeakLeader::Client leader)
+    : state(State {object, kj::mv(capToHold), weakref, kj::mv(leader)}),
+      writeQueue(kj::READY_NOW) {
+  weakref = *this;
+}
 
 void FollowerImpl::disconnect() {
   KJ_IF_MAYBE(s, state) {
     s->weakref = nullptr;
   }
   state = nullptr;
+
+  #error "this could be cyclic"
+  writeQueue = nullptr;
 }
 
 kj::Promise<void> FollowerImpl::commit(CommitContext context) {
+  #error "todo: if this is the first commit, must store term info"
   return queueOp([this,context]() mutable {
     auto params = context.getParams();
-    return commit(params.getVersion(), params.getTxn());
+    auto& object = getState().object;
+    object.setNextVersion(params.getVersion());
+    return object.modify(params.getChanges());
   });
 }
 
 kj::Promise<void> FollowerImpl::stageDistributed(StageDistributedContext context) {
+  #error "todo: if this is the first commit, must store term info"
   auto params = context.getParams();
   auto paramsCopy = kj::heap<capnp::MallocMessageBuilder>(params.totalSize().wordCount + 8);
   paramsCopy->setRoot(params);
@@ -81,7 +89,9 @@ kj::Promise<void> FollowerImpl::stageDistributed(StageDistributedContext context
     return promise.then([this,KJ_MVCAP(paramsCopy)](bool committed) mutable {
       if (committed) {
         auto params = paramsCopy->getRoot<StageDistributedParams>();
-        return commit(params.getVersion(), params.getTxn());
+        auto& object = getState().object;
+        object.setNextVersion(params.getVersion());
+        return object.modify(params.getChanges());
       }
     }, [this](kj::Exception&& e) -> kj::Promise<void> {
       if (e.getType() == kj::Exception::Type::DISCONNECTED) {
@@ -95,16 +105,17 @@ kj::Promise<void> FollowerImpl::stageDistributed(StageDistributedContext context
 }
 
 kj::Promise<void> FollowerImpl::write(WriteContext context) {
+  #error "todo: if this is the first commit, must store term info"
   return queueOp([this,context]() mutable {
-    return setDirty().then([this,context]() mutable {
+    return getState().object.setDirty().then([this,context]() mutable {
       auto params = context.getParams();
-      getState().object.getContent().write(
-          params.getOffset(), params.getData());
+      getState().object.write(params.getOffset(), params.getData());
     });
   });
 }
 
 kj::Promise<void> FollowerImpl::sync(SyncContext context) {
+  #error "todo: if this is the first commit, must store term info"
   auto paf = kj::newPromiseAndFulfiller<kj::Promise<void>>();
   uint64_t version = context.getParams().getVersion();
   context.releaseParams();
@@ -113,7 +124,9 @@ kj::Promise<void> FollowerImpl::sync(SyncContext context) {
   return queueOp([this,version,KJ_MVCAP(fulfiller)]() mutable {
     // There's no need for a sync() to block subsequent operations while we wait for it to
     // complete.
-    fulfiller->fulfill(getState().object.sync(version));
+    auto& object = getState().object;
+    object.setNextVersion(version);
+    fulfiller->fulfill(object.sync());
     return kj::READY_NOW;
   });
 }
@@ -141,24 +154,6 @@ kj::Promise<void> FollowerImpl::queueOp(kj::Function<kj::Promise<void>()>&& func
   }).fork();
   writeQueue = forked.addBranch();
   return forked.addBranch();
-}
-
-kj::Promise<void> FollowerImpl::commit(uint64_t version, RawTransaction::Reader txn) {
-  #error todo
-}
-
-kj::Promise<void> FollowerImpl::setDirty() {
-  if (isDirty) {
-    return kj::READY_NOW;
-  } else {
-    auto& state = getState();
-    JournalLayer::Transaction txn(state.journal);
-    auto wrapped = txn.wrap(state.object);
-    auto xattr = wrapped->getXattr();
-    xattr.dirty = true;
-    wrapped->setXattr(xattr);
-    return txn.commit();
-  }
 }
 
 } // namespace storage

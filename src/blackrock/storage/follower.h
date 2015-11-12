@@ -9,21 +9,15 @@
 #include <blackrock/storage/sibling.capnp.h>
 #include "basics.h"
 #include "journal-layer.h"
+#include "mid-level-object.h"
 
 namespace blackrock {
 namespace storage {
 
-class ReplicaImpl {
+class FollowerImpl final: public Follower::Server {
 public:
-  JournalLayer& getJournal();
-  JournalLayer::Object& getLocalObject();
-};
-
-class FollowerImpl: public Follower::Server {
-public:
-  FollowerImpl(JournalLayer& journal, JournalLayer::Object& object,
-               capnp::Capability::Client capToHold, kj::Maybe<FollowerImpl&>& weakref,
-               WeakLeader::Client leader);
+  FollowerImpl(MidLevelWriter& object, capnp::Capability::Client capToHold,
+               kj::Maybe<FollowerImpl&>& weakref, WeakLeader::Client leader);
   ~FollowerImpl() noexcept(false) { disconnect(); }
 
   void disconnect();
@@ -41,8 +35,7 @@ private:
   class ReplacerImpl;
 
   struct State {
-    JournalLayer& journal;
-    JournalLayer::Object& object;
+    MidLevelWriter& object;
     capnp::Capability::Client capToHold;
     kj::Maybe<FollowerImpl&>& weakref;
     WeakLeader::Client leader;
@@ -56,8 +49,6 @@ private:
 
   State& getState();
   kj::Promise<void> queueOp(kj::Function<kj::Promise<void>()>&& func);
-  kj::Promise<void> commit(uint64_t version, RawTransaction::Reader txn);
-  kj::Promise<void> setDirty();
 };
 
 } // namespace storage

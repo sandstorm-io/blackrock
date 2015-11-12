@@ -8,26 +8,32 @@
 #include <blackrock/common.h>
 #include <blackrock/storage/sibling.capnp.h>
 #include "basics.h"
-#include "journal-layer.h"
+#include "mid-level-object.h"
+#include "high-level-object.h"
 #include <capnp/message.h>
 
 namespace blackrock {
 namespace storage {
 
-class LeaderImpl: public Leader::Server {
+class LeaderImpl final: public Leader::Server, public MidLevelWriter,
+                        private kj::TaskSet::ErrorHandler {
 public:
   LeaderImpl(ObjectKey key, uint siblingId, uint quorumSize,
-             JournalLayer::Object& localObject, capnp::Capability::Client capToHold,
+             MidLevelReader& localObject, capnp::Capability::Client capToHold,
              kj::Array<capnp::Response<Replica::GetStateResults>> voters);
 
   ~LeaderImpl() noexcept(false);
 
   void abdicate();
   using Leader::Server::thisCap;  // make this public for WeakLeader
-  JournalLayer::Object& getLocalObject();
-  void write(uint64_t offset, kj::Array<const byte> data);
-  kj::Promise<void> sync();
-  kj::Promise<void> modify(RawTransaction::Reader mod);
+
+  void write(uint64_t offset, kj::ArrayPtr<const byte> data) override;
+  kj::Promise<void> sync() override;
+  kj::Promise<void> modify(ChangeSet::Reader changes) override;
+  kj::Own<Replacer> startReplace() override;
+
+  kj::Promise<void> setDirty() override;
+  void setNextVersion(uint64_t version) override;
 
 protected:
   kj::Promise<void> getObject(GetObjectContext context) override;
@@ -37,17 +43,17 @@ protected:
 
 private:
   class WeakLeaderImpl;
-  class TransactionBuilderImpl;
   class StagedTransactionImpl;
+  class TransactionBuilderImpl;
 
   ObjectKey key;
   ObjectId id;
   uint siblingId;
   uint quorumSize;
-  JournalLayer::Object& localObject;
+  MidLevelReader& localObject;
   capnp::Capability::Client capToHold;
   kj::Own<WeakLeaderImpl> weak;
-  kj::Maybe<OwnedStorage<>::Server&> weakObject;
+  kj::Maybe<OwnedStorageBase&> weakObject;
 
   capnp::MallocMessageBuilder termInfoMessage;
   TermInfo::Reader termInfo;
@@ -66,8 +72,8 @@ private:
   uint64_t version = 0;
   // Version after all queued operations complete.
 
-  kj::ForkedPromise<void> ready;
   kj::TaskSet tasks;
+  kj::ForkedPromise<void> ready;
 
   struct QuorumWaiter: public kj::Refcounted {
     uint successCount = 0;
@@ -76,7 +82,9 @@ private:
     kj::Own<kj::PromiseFulfiller<void>> fulfiller;
   };
 
-  kj::Promise<void> queueOp(kj::Function<kj::Promise<void>(FollowerRecord&)>&& func);
+  kj::Promise<void> allFollowers(kj::Function<kj::Promise<void>(FollowerRecord&)>&& func);
+
+  void taskFailed(kj::Exception&& exception) override;
 
   static TermInfo::Reader makeTermInfo(capnp::MessageBuilder& arena,
       kj::ArrayPtr<capnp::Response<Replica::GetStateResults>> voters);

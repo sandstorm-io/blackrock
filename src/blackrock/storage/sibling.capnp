@@ -93,6 +93,7 @@ using FsStorage = import "/blackrock/fs-storage.capnp";
 using ObjectId = FsStorage.StoredObjectId;
 using ObjectKey = FsStorage.StoredObjectKey;
 using OwnedStorage = Storage.OwnedStorage;
+using ChangeSet = import "basics.capnp".ChangeSet;
 
 const maxVersionSkew :UInt64 = 1024;
 # How many versions ahead one follower is allowed to be compared to the quorum. The leader must
@@ -219,7 +220,7 @@ interface Follower {
   # Interface that an object leader uses to broadcast transactions to replicas. A `Replica`
   # is associated with a specific object, not a machine.
 
-  commit @0 (version :UInt64, txn :RawTransaction);
+  commit @0 (version :UInt64, changes :ChangeSet);
   # Atomically apply a transaction.
   #
   # A quorum of replicas must respond successfully to this call before the change can be
@@ -230,7 +231,7 @@ interface Follower {
   # elected by a quorum not including the ones who committed the transaction.
 
   stageDistributed @1 (coordinator :ObjectId, id :TransactionId,
-                       version :UInt64, txn :RawTransaction)
+                       version :UInt64, changes :ChangeSet)
                    -> (staged :StagedTransaction);
   # Stage a multi-object transaction. Subsequent commit()s will be blocked until this transaction
   # is either committed or aborted. If `staged` is dropped without calling either commit() or
@@ -267,7 +268,7 @@ interface Follower {
 
   interface Replacer {
     write @0 (offset :UInt64, data :Data);
-    commit @1 (version :UInt64, changes :RawTransaction);
+    commit @1 (version :UInt64, changes :ChangeSet);
   }
 
   copyTo @5 (replacer :Replacer, version :UInt64);
@@ -284,7 +285,7 @@ interface TransactionBuilder {
   # Once either `stage()` is called or the `TransactionBuilder` is dropped, `transactionalObject`
   # will be revoked.
 
-  applyRaw @1 (changes :RawTransaction);
+  applyRaw @1 (changes :ChangeSet);
   # Add some direct low-level modifications.
 
   stage @2 (coordinator :ObjectId, id :TransactionId) -> (staged :StagedTransaction);
@@ -327,34 +328,6 @@ struct TransactionId {
 
   id0 @0 :UInt64;
   id1 @1 :UInt64;
-}
-
-struct RawTransaction {
-  create @0 :UInt8 = 0;
-  # Type is ObjectType enum from basics.h. 0 means to open, not create.
-
-  setContent @1 :Data;
-  # Overwrite content. null = don't overwrite.
-
-  shouldDelete @2 :Bool = false;
-
-  shouldBecomeReadOnly @3 :Bool = false;
-
-  adjustTransitiveBlockCount @4 :Int64 = 0;
-  # Delta vs. current value.
-
-  setParent @5 :ObjectId;
-  # null = don't change
-
-  backburnerModifyTransitiveBlockCount @6 :Int64 = 0;
-  # Schedule backburner task to modify this object's transitive block count and recurse to its
-  # parent.
-
-  backburnerRecursivelyDelete @7 :Bool = false;
-  # Schedule backburner task to eventually delete this object and recurse to its children.
-
-  shouldClearBackburner @8 :Bool = false;
-  # Remove all backburner tasks attached to this object.
 }
 
 struct TermInfo {
