@@ -24,7 +24,7 @@ clean:
 	make -f deps/sandstorm/Makefile clean
 	find shell/packages -type l | xargs -r rm
 
-continuous: tmp/.deps
+continuous: shell-env
 	make -f deps/sandstorm/Makefile continuous
 
 # These rules generate shell/.meteor by copying over files from Sandstorm and
