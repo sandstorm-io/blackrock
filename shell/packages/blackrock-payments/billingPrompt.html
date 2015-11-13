@@ -184,7 +184,7 @@ limitations under the License.
 <template name="billingUsage">
   <div class="usage">
     <h3>Usage</h3>
-    {{#with plan=myPlan used=myUsage}}{{#if plan}}
+    {{#with plan=myPlan used=myUsage referralBonus=myReferralBonus}}{{#if plan}}
       <table>
         <tr>
           <td>Compute Units</td>
@@ -200,10 +200,10 @@ limitations under the License.
           <td>Storage</td>
           <td>
             <div class="progress-bar">
-              <div style="width: {{renderPercent used.storage plan.storage}}%"></div>
+              <div style="width: {{renderPercent used.storage}}%"></div>
             </div>
             <div class="used"><span class="amount">{{renderStoragePrecise used.storage}}</span> used</div>
-            <div class="total"><span class="amount">{{renderStorage plan.storage user.referralBonus.storage}}</span> total</div>
+            <div class="total"><span class="amount">{{renderStorage plan.storage referralBonus.storage}}</span> total</div>
           </td>
         </tr>
         <tr>

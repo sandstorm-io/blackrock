@@ -229,6 +229,7 @@ var helpers = {
     // Taking two parameters allows us to pass the referral bonus
     // storage amount on the client side and use this function to
     // add & format them together.
+//    debugger;
     if (typeof additionalSize === "number") {
       size += additionalSize;
     }
@@ -285,6 +286,13 @@ var helpers = {
   },
   myUsage: function () {
     return this.db.getMyUsage();
+  },
+  myReferralBonus: function() {
+    var x = this.db.getMyReferralBonus();
+    if (Meteor.user().pseudoReferralBonus) {
+      alert(JSON.stringify(x));
+    }
+    return x;
   },
   onCompleteWrapper: function () {
     var template = Template.instance();
