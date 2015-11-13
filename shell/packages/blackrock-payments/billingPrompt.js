@@ -225,7 +225,13 @@ var helpers = {
   renderDollars: function (price) {
     return Math.floor(price / 100);
   },
-  renderStorage: function (size) {
+  renderStorage: function (size, additionalSize) {
+    // Taking two parameters allows us to pass the referral bonus
+    // storage amount on the client side and use this function to
+    // add & format them together.
+    if (typeof additionalSize === "number") {
+      size += additionalSize;
+    }
     var suffix = "B";
     if (size >= 1000000000) {
       size = size / 1000000000;
