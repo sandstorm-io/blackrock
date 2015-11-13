@@ -184,7 +184,7 @@ limitations under the License.
 <template name="billingUsage">
   <div class="usage">
     <h3>Usage</h3>
-    {{#with plan=myPlan used=myUsage}}{{#if plan}}
+    {{#with plan=myPlan used=myUsage referralBonus=myReferralBonus}}{{#if plan}}
       <table>
         <tr>
           <td>Compute Units</td>
@@ -200,22 +200,31 @@ limitations under the License.
           <td>Storage</td>
           <td>
             <div class="progress-bar">
-              <div style="width: {{renderPercent used.storage plan.storage}}%"></div>
+              <div style="width: {{renderPercent used.storage}}%"></div>
             </div>
             <div class="used"><span class="amount">{{renderStoragePrecise used.storage}}</span> used</div>
-            <div class="total"><span class="amount">{{renderStorage plan.storage}}</span> total</div>
+            <div class="total"><span class="amount">{{renderStorage plan.storage referralBonus.storage}}</span> total</div>
           </td>
         </tr>
         <tr>
           <td>Grains</td>
           <td>
-            <span class="grain-count"><span class="used">{{renderQuantity used.grains}}</span> out of <span class="total">{{renderQuantity plan.grains}}</span></span>
+            <span class="grain-count"><span class="used">{{renderQuantity used.grains}}</span> out of <span class="total">{{renderQuantity plan.grains referralBonus.grains}}</span></span>
           </td>
         </tr>
       </table>
       <hr>
+      {{#if referralBonus.storage}}
+    <p>
+      <span class="referral-bonus">Includes <a href="/referrals">referral bonus</a>: {{renderStorage referralBonus.storage}} storage
+        {{#if referralBonus.grains}}
+        and {{renderQuantity referralBonus.grains}} grains
+        {{/if}}
+      </span>
+    </p>
+    {{/if}}
       <p>Based on current plan: <span class="plan-name">{{plan._id}}</span>
-          <button class="change-plan">change plan</button></p>
+        <button class="change-plan">change plan</button></p>
     {{/if}}{{/with}}
   </div>
 

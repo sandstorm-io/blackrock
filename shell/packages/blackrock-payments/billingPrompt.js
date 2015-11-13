@@ -225,7 +225,14 @@ var helpers = {
   renderDollars: function (price) {
     return Math.floor(price / 100);
   },
-  renderStorage: function (size) {
+  renderStorage: function (size, additionalSize) {
+    // Taking two parameters allows us to pass the referral bonus
+    // storage amount on the client side and use this function to
+    // add & format them together.
+//    debugger;
+    if (typeof additionalSize === "number") {
+      size += additionalSize;
+    }
     var suffix = "B";
     if (size >= 1000000000) {
       size = size / 1000000000;
@@ -253,8 +260,12 @@ var helpers = {
     }
     return size.toPrecision(3) + suffix;
   },
-  renderQuantity: function (n) {
-    return (n === Infinity) ? "Unlimited" : n.toString();
+  renderQuantity: function (n, m) {
+    var quantity = n;
+    if (typeof m === "number") {
+      quantity += m;
+    }
+    return (quantity === Infinity) ? "unlimited" : quantity.toString();
   },
   renderPercent: function (num, denom) {
     return Math.min(100, Math.max(0, num / denom * 100)).toPrecision(3);
@@ -279,6 +290,9 @@ var helpers = {
   },
   myUsage: function () {
     return this.db.getMyUsage();
+  },
+  myReferralBonus: function() {
+    return this.db.getMyReferralBonus();
   },
   onCompleteWrapper: function () {
     var template = Template.instance();
