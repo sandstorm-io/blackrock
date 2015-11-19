@@ -84,11 +84,12 @@ protected:
 
     return leader.allFollowers([&](FollowerRecord& follower) {
       auto req = follower.cap.stageDistributedRequest();
+      auto txn = req.initTxn();
 
-      req.setCoordinator(params.getCoordinator());
-      req.setId(params.getId());
-      req.setVersion(leader.version);
-      req.setChanges(changes);
+      txn.setCoordinator(params.getCoordinator());
+      txn.setId(params.getId());
+      txn.setVersion(leader.version);
+      txn.setChanges(changes);
 
       auto promise = req.send();
       stagedFollowers.add(promise.getStaged());
@@ -126,6 +127,8 @@ LeaderImpl::LeaderImpl(ObjectKey key, uint siblingId, uint quorumSize,
           auto req = voter.getFollowState().getIdle().voteRequest();
           req.setLeader(kj::addRef(*weak));
           req.setTerm(termInfo);
+          req.setWriteQuorumSize(quorumSize);
+
           return req.send().then([KJ_MVCAP(voter)](auto&& response) mutable {
             return FollowResponseRecord { response.getFollower(), kj::mv(voter) };
           });
@@ -167,6 +170,8 @@ LeaderImpl::LeaderImpl(ObjectKey key, uint siblingId, uint quorumSize,
           }
 
           KJ_ASSERT(goodReplicas.size() > 0);
+
+          #error "todo: deal with staged transaction"
 
           bool dirty = bestState.isExists() && bestState.getExists().getIsDirty();
           if (badReplicas.size() == 0 && !dirty) {
@@ -236,16 +241,8 @@ kj::Promise<void> LeaderImpl::modify(ChangeSet::Reader changes) {
   });
 }
 
-kj::Own<MidLevelWriter::Replacer> startReplace() {
+kj::Own<MidLevelWriter::Replacer> LeaderImpl::startReplace() {
   KJ_UNIMPLEMENTED("startReplace() over replication not implemented");
-}
-
-kj::Promise<void> LeaderImpl::setDirty() {
-  KJ_FAIL_REQUIRE("setDirty() is meant to be used by followers who care about versions");
-}
-
-void LeaderImpl::setNextVersion(uint64_t version) {
-  KJ_FAIL_REQUIRE("setNextVersion() is meant to be used by followers who care about versions");
 }
 
 kj::Promise<void> LeaderImpl::getObject(GetObjectContext context) {
@@ -276,7 +273,9 @@ kj::Promise<void> LeaderImpl::startTransaction(StartTransactionContext context) 
 }
 
 kj::Promise<void> LeaderImpl::flushTransaction(FlushTransactionContext context) {
-  #error todo
+  // Any time we reach "ready", all previous transactions have been dealt with, so all we really
+  // need todo here is wait for that.
+  return ready.addBranch();
 }
 
 kj::Promise<void> LeaderImpl::getTransactionState(GetTransactionStateContext context) {
@@ -386,7 +385,8 @@ LeaderImpl::Comparison LeaderImpl::compare(
   auto righte = right.getExists();
 
   // Check terms.
-  Comparison termComparison = compare(lefte.getTerm(), righte.getTerm());
+  Comparison termComparison = compare(lefte.getExtended().getTerm(),
+                                      righte.getExtended().getTerm());
   if (termComparison != Comparison::SAME) return termComparison;
 
   // Same term. Check versions.

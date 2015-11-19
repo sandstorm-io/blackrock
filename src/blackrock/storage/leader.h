@@ -32,9 +32,6 @@ public:
   kj::Promise<void> modify(ChangeSet::Reader changes) override;
   kj::Own<Replacer> startReplace() override;
 
-  kj::Promise<void> setDirty() override;
-  void setNextVersion(uint64_t version) override;
-
 protected:
   kj::Promise<void> getObject(GetObjectContext context) override;
   kj::Promise<void> startTransaction(StartTransactionContext context) override;

@@ -151,16 +151,7 @@ interface Replica {
       doesntExist @0 :Void;
       # No object with this ID exists.
 
-      exists :group {
-        term @1 :TermInfo;
-        # Term in which the data was last written.
-
-        version @2 :UInt64;
-        # Version of the last write.
-
-        isDirty @3 :Bool;
-        # Is it possible that non-transactional writes occurred after reaching this version?
-      }
+      exists @1 :ReplicaState;
     }
   }
 
@@ -212,7 +203,7 @@ interface WeakLeader {
 }
 
 interface Voter {
-  vote @0 (leader :WeakLeader, term :TermInfo) -> (follower :Follower);
+  vote @0 (leader :WeakLeader, term :TermInfo, writeQuorumSize :UInt8) -> (follower :Follower);
   # If successful, the voter has voted for this leader and is now following it.
 }
 
@@ -230,8 +221,7 @@ interface Follower {
   # possible that the transaction will be reverted on recovery, if the next leader happens to be
   # elected by a quorum not including the ones who committed the transaction.
 
-  stageDistributed @1 (coordinator :ObjectId, id :TransactionId,
-                       version :UInt64, changes :ChangeSet)
+  stageDistributed @1 (txn :DistributedTransactionInfo)
                    -> (staged :StagedTransaction);
   # Stage a multi-object transaction. Subsequent commit()s will be blocked until this transaction
   # is either committed or aborted. If `staged` is dropped without calling either commit() or
@@ -273,6 +263,10 @@ interface Follower {
 
   copyTo @5 (replacer :Replacer, version :UInt64);
   # Copy the entire contents of this follower *into* the designated replacer.
+
+  # TODO(now): Way to add a new transaction that we're coordinating (probably as option to
+  #   commit()).
+  # TODO(now): Way to update the quorum size.
 }
 
 interface TransactionBuilder {
@@ -336,6 +330,65 @@ struct TermInfo {
   # TODO:
   # - leader info?
   # - object storage version from which we started?
+}
+
+struct ReplicaState {
+  # State of a single object replica as of the last time it was written. This includes pieces from
+  # Xattr, TemporaryXattr, and the recoverable temporary file.
+
+  type @0 :UInt8;
+  isReadOnly @1 :Bool;
+  isDirty @2 :Bool;
+  version @3 :UInt64;
+  transitiveBlockCount @4 :UInt64;
+  owner @5 :ObjectId;
+  # From Xattr.
+
+  pendingRemoval @6 :Bool;
+  # If true, a backburner task is scheduled to delete this.
+
+  pendingSizeUpdate @7 :Int64;
+  # If non-zero, a backburner task is scheduled to update the size.
+
+  extended @8 :Extended;
+  # Extended state -- this is serialized into a temporary file, hence being a separate struct.
+
+  struct Extended {
+    # The body of the temporary file storing the object state. We try to put things here that don't
+    # change often so that we don't have to transact on this file too much.
+
+    term @0 :TermInfo;
+    # The leadership term under which the last write was made.
+
+    staged @1 :DistributedTransactionInfo;
+    # If present, a distributed transaction is staged and awaiting notification of commit or abort.
+    # This is added between writes and cleared on every version bump.
+
+    coordinated @2 :List(TransactionId);
+    # Recent distributed transactions for which this object was the coordinator which were
+    # successfully committed.
+
+    effectiveWriteQuorumSize @3 :UInt8;
+    # The last completed transaction was written to at least this many replicas.
+    #
+    # Any transaction can reduce this number (assuming that the election quorum size has already
+    # been increased as needed), and can be committed under the new requirement.
+    #
+    # Increasing this size requires first completing a transaction under the new requirement, before
+    # the new requirement is actually stored in the state or the election quorum size reduced. This
+    # ensures that once the new value hits disk on a single follower, the state of the full system
+    # already complies with it.
+  }
+}
+
+struct DistributedTransactionInfo {
+  coordinator @0 :ObjectId;
+  id @1 :TransactionId;
+  version @2 :UInt64;
+  changes @3 :ChangeSet;
+
+  # TODO(now): Should the coordinator be identified by a SturdyRef rather than ObjectId and
+  #   TransactionId?
 }
 
 struct StorageConfig {

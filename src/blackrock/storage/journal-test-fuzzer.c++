@@ -178,7 +178,7 @@ private:
       temp->getContent().write(0, params.getContent());
       context.getResults(capnp::MessageSize {4,1}).setObject(
           journal.wrap(transaction.createRecoverableTemporary(
-              RecoveryId(RecoveryType::BACKBURNER, journal.tempCounter++),
+              RecoveryId(RecoveryType::OBJECT_STATE, journal.tempCounter++),
               dataTo<TemporaryXattr>(params.getXattr()), kj::mv(temp))));
       return kj::READY_NOW;
     }
@@ -243,8 +243,8 @@ protected:
   kj::Promise<void> recover(RecoverContext context) override {
     uint64_t recoveredCount = 0;
 
-    auto recovered = KJ_MAP(temp, inner.recoverTemporaries(RecoveryType::BACKBURNER)) {
-      return temp->keepAs(RecoveryId(RecoveryType::BACKBURNER, recoveredCount++));
+    auto recovered = KJ_MAP(temp, inner.recoverTemporaries(RecoveryType::OBJECT_STATE)) {
+      return temp->keepAs(RecoveryId(RecoveryType::OBJECT_STATE, recoveredCount++));
     };
 
     auto journalImpl = kj::heap<TestJournalImpl>(inner.finish(), recoveredCount);

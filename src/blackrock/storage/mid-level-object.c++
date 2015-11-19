@@ -8,17 +8,21 @@
 namespace blackrock {
 namespace storage {
 
-MidLevelObject::MidLevelObject(JournalLayer& journal, capnp::Capability::Client capToHold,
-                               kj::Own<JournalLayer::Object> object)
+MidLevelObject::MidLevelObject(JournalLayer& journal, ObjectId id,
+                               capnp::Capability::Client capToHold,
+                               kj::Own<JournalLayer::Object> object,
+                               kj::Own<JournalLayer::RecoverableTemporary> state)
     : journal(journal), capToHold(kj::mv(capToHold)),
       xattr(object->getXattr()), nextVersion(xattr.version + 1) {
-  state.init<Durable>(Durable { kj::mv(object) });
+  this->state.init<Durable>(Durable { kj::mv(object), kj::mv(state) });
 }
-MidLevelObject::MidLevelObject(JournalLayer& journal, capnp::Capability::Client capToHold,
+MidLevelObject::MidLevelObject(JournalLayer& journal, ObjectId id, uint64_t stateRecoveryId,
+                               capnp::Capability::Client capToHold,
                                kj::Own<BlobLayer::Temporary> object)
     : journal(journal), capToHold(kj::mv(capToHold)), nextVersion(0) {
   memset(&xattr, 0, sizeof(xattr));
-  state.init<Durable>(Temporary { kj::mv(object) });
+  state.init<Temporary>(Temporary {
+      kj::mv(object), journal.newDetachedTemporary(), stateRecoveryId });
 }
 
 Xattr MidLevelObject::getXattr() {
@@ -28,6 +32,20 @@ Xattr MidLevelObject::getXattr() {
   } else {
     return xattr;
   }
+}
+
+TemporaryXattr MidLevelObject::getState() {
+  if (state.is<Durable>()) {
+    // Do NOT return this->xattr as it may reflect uncommitted changes.
+    return state.get<Durable>().state->getXattr();
+  } else {
+    return basicState;
+  }
+}
+
+kj::ArrayPtr<const capnp::word> MidLevelObject::getExtendedState() {
+  KJ_REQUIRE(nextState != nullptr, "can't get extended state while it's being modified");
+  return extendedState;
 }
 
 BlobLayer::Content::Size MidLevelObject::getSize() {
@@ -114,6 +132,15 @@ kj::Promise<void> MidLevelObject::modify(ChangeSet::Reader changes) {
       wrapped->setXattr(xattr);
     }
     return txn.commit();
+  } else if (changes.hasSetOwner()) {
+    // Transition to durable when the owner is set.
+    JournalLayer::Transaction txn(journal);
+    auto newObject = txn.createObject(id, xattr, kj::mv(state.get<Temporary>().object));
+    auto newState = txn.createRecoverableTemporary(
+        RecoveryId(RecoveryType::OBJECT_STATE, state.get<Temporary>().stateRecoveryId),
+        basicState, kj::mv(state.get<Temporary>().state));
+    state.init<Durable>(Durable { kj::mv(newObject), kj::mv(newState) });
+    return txn.commit();
   } else {
     if (changes.hasSetContent()) {
       auto replacement = journal.newDetachedTemporary();
@@ -143,6 +170,29 @@ kj::Promise<void> MidLevelObject::setDirty() {
 
 void MidLevelObject::setNextVersion(uint64_t version) {
   nextVersion = version;
+}
+
+void MidLevelObject::setNextExtendedState(kj::Array<capnp::word> data) {
+  auto temp = journal.newDetachedTemporary();
+  temp->getContent().write(0, data.asBytes());
+  nextState = kj::mv(temp);
+  extendedState = kj::mv(data);
+}
+
+kj::Promise<void> MidLevelObject::modifyExtendedState(kj::Array<capnp::word> data) {
+  auto temp = journal.newDetachedTemporary();
+  temp->getContent().write(0, data.asBytes());
+  nextState = nullptr;
+  extendedState = kj::mv(data);
+
+  if (state.is<Durable>()) {
+    JournalLayer::Transaction txn(journal);
+    txn.wrap(*state.get<Durable>().state)->overwrite(basicState, kj::mv(temp));
+    return txn.commit();
+  } else {
+    state.get<Temporary>().state = kj::mv(temp);
+    return kj::READY_NOW;
+  }
 }
 
 } // namespace storage

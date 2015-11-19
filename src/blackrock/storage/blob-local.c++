@@ -139,13 +139,13 @@ public:
   }
 
   void setRecoveryId(RecoveryId id) override {
-    KJ_REQUIRE(id.type != RecoveryType::BACKBURNER, "backburner requires temporary xattrs");
+    KJ_REQUIRE(id.type != RecoveryType::OBJECT_STATE, "object state requires temporary xattrs");
     moveTo(toPath(id));
     recoveryId = id;
   }
 
   void setRecoveryId(RecoveryId id, TemporaryXattr xattr) override {
-    KJ_REQUIRE(id.type == RecoveryType::BACKBURNER, "only backburner has temporary xattrs");
+    KJ_REQUIRE(id.type == RecoveryType::OBJECT_STATE, "only object state has temporary xattrs");
     KJ_SYSCALL(fsetxattr(content->getFd(), TemporaryXattr::NAME, &xattr, sizeof(xattr), 0));
     moveTo(toPath(id));
     recoveryId = id;

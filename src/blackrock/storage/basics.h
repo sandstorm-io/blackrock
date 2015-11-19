@@ -136,21 +136,11 @@ enum class RecoveryType: uint8_t {
   JOURNAL,
   // The journal itself. There is only temporary of this type; it has number zero.
 
-  BACKBURNER,
-  // Backburner items represent some task to be completed in the future.
-
-  SWITCH,
-  // Switches gate distributed transactions.
-
-  SYNC_STATE,
-  // Information about a blob which is in a state of being only partially downloaded to local
-  // storage.
-
-  TERM_INFO,
-  // A serialized TermInfo identifying the start time of the leadership term of the last
-  // leader who wrote to a particular object (the object being identified in the TemporaryXattr).
+  OBJECT_STATE,
+  // Extra transient state about an object, such as backburner tasks currently pending against
+  // it.
 };
-constexpr uint RECOVERY_TYPE_COUNT = static_cast<uint>(RecoveryType::SYNC_STATE) + 1;
+constexpr uint RECOVERY_TYPE_COUNT = static_cast<uint>(RecoveryType::OBJECT_STATE) + 1;
 constexpr auto ALL_RECOVERY_TYPES = transformCollection(
     kj::range<uint>(0, RECOVERY_TYPE_COUNT), StaticCastFunctor<uint, RecoveryType>());
 
@@ -173,11 +163,6 @@ struct RecoveryId {
 
 static_assert(sizeof(RecoveryId) == 16, "RecoveryId format changed; consider effect on journal");
 
-enum class BackburnerType: uint8_t {
-  REMOVE_OBJECT_TREE,
-  UPDATE_TRANSITIVE_SIZE
-};
-
 struct TemporaryXattr {
   // Much like Xattr, but assigned to recoverable temporary files.
 
@@ -186,25 +171,17 @@ struct TemporaryXattr {
 
   union {
     struct {
-      BackburnerType type;
-      uint8_t reserved;
+      bool remove;
+      // If true, the object should be recursively deleted.
 
-      uint16_t versionHigh;  // bits 32-47
-      uint32_t versionLow;   // bits 0-31
-      // The version number of the target object at which this backburner task was scheduled.
-      // Useful as a unique identifier.
+      byte reserved[7];
 
       int64_t blockCountDelta;
-      // For UPDATE_TRANSITIVE_SIZE. Can be negative.
+      // This delta should be applied to the object's transitive block count.
 
       ObjectId ojbectId;
       // Affected object ID.
-    } backburner;
-
-    struct {
-      byte reserved[16];
-      ObjectId objectId;
-    } termInfo;
+    } objectState;
   };
 };
 
