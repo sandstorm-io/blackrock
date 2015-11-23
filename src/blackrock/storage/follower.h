@@ -25,7 +25,12 @@ public:
 
   kj::Promise<void> disconnect();
 
-  WeakLeader::Client getLeader();
+  struct LeaderInfo {
+    WeakLeader::Client cap;
+    TermInfo::Reader term;
+  };
+
+  LeaderInfo getLeader();
 
 protected:
   kj::Promise<void> commit(CommitContext context) override;
@@ -65,9 +70,11 @@ public:
   kj::Promise<void> disconnect();
   // Disconnect this voter from its leader, if any.
 
-  kj::Maybe<WeakLeader::Client> getLeader();
+  kj::Maybe<FollowerImpl::LeaderInfo> getLeader();
   // If the voter has voted for a leader, return that leader. If the voter has not voted yet,
   // return null. (It is an error to call this if the voter has been disconnected.)
+
+  using Voter::Server::thisCap;
 
 protected:
   kj::Promise<void> vote(VoteContext context) override;
@@ -80,6 +87,7 @@ private:
     kj::Maybe<FollowerImpl&> follower;
   };
   kj::Maybe<State> state;
+  bool voted = false;
 
   State& getState();
 };

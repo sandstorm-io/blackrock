@@ -65,8 +65,13 @@ kj::Promise<void> FollowerImpl::disconnect() {
   }
 }
 
-WeakLeader::Client FollowerImpl::getLeader() {
-  return getState().leader;
+FollowerImpl::LeaderInfo FollowerImpl::getLeader() {
+  auto& state = getState();
+  capnp::FlatArrayMessageReader reader(state.object.getExtendedState());
+  return {
+    state.leader,
+    reader.getRoot<ReplicaState::Extended>().getTerm()
+  };
 }
 
 kj::Promise<void> FollowerImpl::commit(CommitContext context) {
@@ -217,17 +222,20 @@ kj::Promise<void> VoterImpl::disconnect() {
   return kj::READY_NOW;
 }
 
-kj::Maybe<WeakLeader::Client> VoterImpl::getLeader() {
+kj::Maybe<FollowerImpl::LeaderInfo> VoterImpl::getLeader() {
   return getState().follower.map([](auto& f) { return f.getLeader(); });
 }
 
 kj::Promise<void> VoterImpl::vote(VoteContext context) {
+  if (voted) {
+    return KJ_EXCEPTION(DISCONNECTED, "already voted");
+  }
+  voted = true;
+
   auto params = context.getParams();
 
   auto& state = getState();
-  if (state.follower != nullptr) {
-    return KJ_EXCEPTION(DISCONNECTED, "already voted");
-  }
+  KJ_ASSERT(state.follower == nullptr);
 
   {
     // Update extended state.

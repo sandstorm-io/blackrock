@@ -33,6 +33,10 @@ public:
 };
 
 class MidLevelReader {
+  // Reads a MidLevelObject. Note that the methods here will read uncommitted values; it is the
+  // caller's responsibility to wait for any issued writes to complete before returning to the
+  // client.
+
 public:
   virtual Xattr getXattr() = 0;
   virtual TemporaryXattr getState() = 0;
@@ -49,12 +53,21 @@ class MidLevelObject final: public MidLevelReader, public MidLevelWriter {
   // injected into the write path.
 
 public:
-  MidLevelObject(JournalLayer& journal, ObjectId id, capnp::Capability::Client capToHold,
+  MidLevelObject(JournalLayer& journal, ObjectId id,
+                 kj::Own<JournalLayer::Object> object, uint64_t stateRecoveryId);
+  // Create a MidLevelObject around an object that exists on disk but has clean state. A state
+  // file will be written the first time the object is transacted.
+
+  MidLevelObject(JournalLayer& journal, ObjectId id,
                  kj::Own<JournalLayer::Object> object,
-                 kj::Own<JournalLayer::RecoverableTemporary> state);
-  MidLevelObject(JournalLayer& journal, ObjectId id, uint64_t stateRecoveryId,
-                 capnp::Capability::Client capToHold,
-                 kj::Own<BlobLayer::Temporary> stagingContent);
+                 kj::Own<JournalLayer::RecoverableTemporary> state,
+                 kj::Array<capnp::word> extendedState);
+  // Create a MidLevelObject around an object that exists on disk with non-clean state.
+  // `exnededState` is the body of stateTemp -- the caller is responsible for asynchronously
+  // reading it before calling this.
+
+  MidLevelObject(JournalLayer& journal, ObjectId id, uint64_t stateRecoveryId);
+  // Create a MidLevelObject for an object that does NOT already exist on-disk.
 
   Xattr getXattr() override;
   TemporaryXattr getState() override;
@@ -83,29 +96,50 @@ public:
   kj::Promise<void> modifyExtendedState(kj::Array<capnp::word> data);
   // Commit a transaction now which sets the extended state as specified.
 
+  bool exists() { return !inner.is<Uncreated>(); }
+
 private:
   JournalLayer& journal;
-  capnp::Capability::Client capToHold;
+  ObjectId id;
+
+  struct Uncreated {
+    // Object is not created. First ChangeSet must create it.
+
+    uint64_t stateRecoveryId;
+  };
 
   struct Temporary {
+    // Object is created but not yet saved to disk.
+
     kj::Own<BlobLayer::Temporary> object;
     kj::Own<BlobLayer::Temporary> state;
     uint64_t stateRecoveryId;
   };
 
   struct Durable {
+    // Object is on-disk but not clean (has state).
+
     kj::Own<JournalLayer::Object> object;
     kj::Own<JournalLayer::RecoverableTemporary> state;
   };
 
-  ObjectId id;
-  kj::OneOf<Durable, Temporary> state;
+  struct Clean {
+    // Object is on-disk and clean (no state).
+
+    kj::Own<JournalLayer::Object> object;
+    uint64_t stateRecoveryId;
+  };
+
+  kj::OneOf<Uncreated, Temporary, Durable, Clean> inner;
+
   Xattr xattr;
   TemporaryXattr basicState;
   kj::Array<capnp::word> extendedState;
+  // Cached state.
 
   uint64_t nextVersion;
   kj::Maybe<kj::Own<BlobLayer::Temporary>> nextState;
+  // For setNextVersion() / setNextExtendedState().
 };
 
 } // namespace storage

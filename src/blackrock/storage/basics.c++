@@ -65,9 +65,10 @@ kj::String KJ_STRINGIFY(ObjectId id) {
 
 kj::StringPtr KJ_STRINGIFY(RecoveryType type) {
   switch (type) {
-    case RecoveryType::STAGING:      return "staging";
-    case RecoveryType::JOURNAL:      return "journal";
-    case RecoveryType::OBJECT_STATE: return "state";
+    case RecoveryType::STAGING:       return "staging";
+    case RecoveryType::JOURNAL:       return "journal";
+    case RecoveryType::OBJECT_STATE:  return "state";
+    case RecoveryType::SIBLING_STATE: return "sibling";
   }
 }
 

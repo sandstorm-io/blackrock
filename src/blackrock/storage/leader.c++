@@ -114,10 +114,10 @@ private:
   ChangeSet::Builder changes = arena.getRoot<ChangeSet>();
 };
 
-LeaderImpl::LeaderImpl(ObjectKey key, uint siblingId, uint quorumSize,
+LeaderImpl::LeaderImpl(uint siblingId, uint quorumSize,
                        MidLevelReader& localObject, capnp::Capability::Client capToHold,
                        kj::Array<capnp::Response<Replica::GetStateResults>> voters)
-    : key(key), id(key), siblingId(siblingId), quorumSize(quorumSize), localObject(localObject),
+    : id(key), siblingId(siblingId), quorumSize(quorumSize), localObject(localObject),
       capToHold(kj::mv(capToHold)), weak(kj::refcounted<WeakLeaderImpl>(*this)),
       termInfo(makeTermInfo(termInfoMessage, voters)),
       tasks(*this),
@@ -247,21 +247,24 @@ kj::Own<MidLevelWriter::Replacer> LeaderImpl::startReplace() {
 
 kj::Promise<void> LeaderImpl::getObject(GetObjectContext context) {
   ObjectKey requestKey = context.getParams().getKey();
-  if (requestKey != key) {
-    // This check should only be possible to fail if there is a malicious (or very confused)
-    // client directly accessing the storage-sibling API.
-    KJ_LOG(ERROR, "SECURITY: detected attempt to access storage object with wrong key");
-    KJ_FAIL_REQUIRE("wrong key");
-  }
+  context.releaseParams();
 
   // Wait for election / most recent op to finish before creating object.
-  return ready.addBranch().then([this,context]() mutable {
+  return ready.addBranch().then([this,context,requestKey]() mutable {
     auto results = context.getResults(capnp::MessageSize {4,1});
 
     KJ_IF_MAYBE(o, weakObject) {
+      if (requestKey != lastKey) {
+        // This check should only be possible to fail if there is a malicious (or very confused)
+        // client directly accessing the storage-sibling API.
+        KJ_LOG(ERROR, "SECURITY: detected attempt to access storage object with wrong key");
+        KJ_FAIL_REQUIRE("wrong key");
+      }
+
       results.setCap(o->thisCap());
     } else {
-      results.setCap(makeHighLevelObject(localObject, *this, thisCap(), weakObject));
+      lastKey = requestKey;
+      results.setCap(makeHighLevelObject(localObject, *this, requestKey, thisCap(), weakObject));
     }
   });
 }

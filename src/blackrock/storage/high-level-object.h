@@ -18,7 +18,7 @@ public:
 };
 
 OwnedStorage<>::Client makeHighLevelObject(
-    MidLevelReader& reader, MidLevelWriter& writer,
+    MidLevelReader& reader, MidLevelWriter& writer, ObjectKey key,
     capnp::Capability::Client capToHold, kj::Maybe<OwnedStorageBase&>& weakref);
 
 } // namespace storage

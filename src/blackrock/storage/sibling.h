@@ -20,35 +20,30 @@ public:
   // Returns the set of siblings which replicate the given object.
 };
 
-class SiblingImpl: public Sibling::Server {
+class SiblingImpl: public Sibling::Server, private kj::TaskSet::ErrorHandler {
 public:
-  SiblingImpl(JournalLayer& journal, ObjectDistributor& distributor, uint id);
+  SiblingImpl(kj::Timer& timer, JournalLayer::Recovery& journal, ObjectDistributor& distributor,
+              uint id);
   ~SiblingImpl() noexcept(false);
 
   void setSibling(uint id, Sibling::Client cap);
 
 protected:
-  kj::Promise<void> createObject(CreateObjectContext context) override;
+  kj::Promise<void> getTime(GetTimeContext context) override;
   kj::Promise<void> getReplica(GetReplicaContext context) override;
 
 private:
   class ReplicaImpl;
-  class StorageFactoryImpl;
-  class WeakLeaderImpl;
-  class LeaderImpl;
-  class FollowerImpl;
-  class TransactionBuilderImpl;
-  class ReplicatedStagedTransaction;
-  class DistributedStagedTransaction;
 
   struct SiblingRecord {
     // Work around std::unordered_map disliking non-const copy constructor.
 
     Sibling::Client cap;
 
-    uint connectionNumber;
+    uint connectionNumber = 0;
     // Incremented every time we lose a connection and have to reconnect.
 
+    SiblingRecord() = default;
     KJ_DISALLOW_COPY(SiblingRecord);
     SiblingRecord(SiblingRecord&&) = default;
     SiblingRecord& operator=(SiblingRecord&&) = default;
@@ -56,19 +51,49 @@ private:
         : cap(kj::mv(cap)), connectionNumber(connectionNumber) {}
   };
 
+  kj::Timer& timer;
   JournalLayer& journal;
   ObjectDistributor& distributor;
+
   uint id;
+  uint generation;
+  uint64_t nextTick = 0;
+
+  kj::Own<JournalLayer::RecoverableTemporary> siblingState;
+
+  uint64_t replicaStateRecoveryIdCounter;
+
+  kj::TaskSet tasks;
+
   std::unordered_map<uint, SiblingRecord> siblings;
   std::unordered_map<ObjectId, ReplicaImpl*, ObjectId::Hash> replicas;
+
+  struct RecoveredObject {
+    ObjectId id;
+    kj::Own<JournalLayer::Object> object;
+    kj::Own<JournalLayer::RecoverableTemporary> state;
+  };
+
+  struct RecoveryResult {
+    kj::Array<RecoveredObject> objects;
+    kj::Maybe<kj::Own<JournalLayer::RecoverableTemporary>> siblingState;
+    uint generation;
+  };
+
+  static RecoveryResult recoverObjects(JournalLayer::Recovery& recovery);
+
+  SiblingImpl(kj::Timer& timer, JournalLayer::Recovery& journal, ObjectDistributor& distributor,
+              uint id, RecoveryResult recovered);
 
   Sibling::Client getSibling(uint id);
   // Get the given sibling, reconnecting if necessary.
 
   StorageConfig::Reader getConfig();
-};
 
-OwnedStorage<>::Client newOwnedStorageImpl(Leader::Client leader);
+  void getTimeImpl(Sibling::Time::Builder time);
+
+  void taskFailed(kj::Exception&& exception) override;
+};
 
 } // namespace storage
 } // namespace blackrock

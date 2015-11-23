@@ -139,8 +139,11 @@ enum class RecoveryType: uint8_t {
   OBJECT_STATE,
   // Extra transient state about an object, such as backburner tasks currently pending against
   // it.
+
+  SIBLING_STATE,
+  // State of this storage node.
 };
-constexpr uint RECOVERY_TYPE_COUNT = static_cast<uint>(RecoveryType::OBJECT_STATE) + 1;
+constexpr uint RECOVERY_TYPE_COUNT = static_cast<uint>(RecoveryType::SIBLING_STATE) + 1;
 constexpr auto ALL_RECOVERY_TYPES = transformCollection(
     kj::range<uint>(0, RECOVERY_TYPE_COUNT), StaticCastFunctor<uint, RecoveryType>());
 
@@ -182,6 +185,10 @@ struct TemporaryXattr {
       ObjectId ojbectId;
       // Affected object ID.
     } objectState;
+
+    struct {
+      // Nothing currently here.
+    } siblingState;
   };
 };
 

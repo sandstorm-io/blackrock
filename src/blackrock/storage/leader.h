@@ -18,7 +18,7 @@ namespace storage {
 class LeaderImpl final: public Leader::Server, public MidLevelWriter,
                         private kj::TaskSet::ErrorHandler {
 public:
-  LeaderImpl(ObjectKey key, uint siblingId, uint quorumSize,
+  LeaderImpl(uint siblingId, uint quorumSize,
              MidLevelReader& localObject, capnp::Capability::Client capToHold,
              kj::Array<capnp::Response<Replica::GetStateResults>> voters);
 
@@ -43,7 +43,6 @@ private:
   class StagedTransactionImpl;
   class TransactionBuilderImpl;
 
-  ObjectKey key;
   ObjectId id;
   uint siblingId;
   uint quorumSize;
@@ -51,6 +50,7 @@ private:
   capnp::Capability::Client capToHold;
   kj::Own<WeakLeaderImpl> weak;
   kj::Maybe<OwnedStorageBase&> weakObject;
+  ObjectKey lastKey;
 
   capnp::MallocMessageBuilder termInfoMessage;
   TermInfo::Reader termInfo;
