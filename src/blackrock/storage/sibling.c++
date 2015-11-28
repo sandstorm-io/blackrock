@@ -63,6 +63,9 @@ public:
   }
 
   void cleanup() {
+    // Schedules background tasks which attempt to clean-shutdown the object, such that all
+    // replicas can delete their object states.
+
     #error todo
   }
 
@@ -236,6 +239,108 @@ private:
 
 // =======================================================================================
 
+class SiblingImpl::BackendSetImpl: public BackendSet<Sibling>::Server {
+public:
+  BackendSetImpl(SiblingImpl& sibling, Sibling::Client siblingCap)
+      : sibling(sibling), siblingCap(kj::mv(siblingCap)) {}
+
+protected:
+  kj::Promise<void> reset(ResetContext context) override {
+    ++sibling.backendSetResetCount;
+
+    // Clear all existing siblings.
+    for (auto& other: sibling.siblings) {
+      other.reset();
+    }
+    sibling.siblingBackendIds.clear();
+
+    for (auto backend: context.getParams().getBackends()) {
+      addImpl(backend.getId(), backend.getShardId(), backend.getBackend());
+    }
+  }
+
+  kj::Promise<void> add(AddContext context) override {
+    auto params = context.getParams();
+    addImpl(params.getId(), params.getShardId(), params.getBackend());
+    return kj::READY_NOW;
+  }
+
+  kj::Promise<void> remove(RemoveContext context) override {
+    auto backendId = context.getParams().getId();
+    auto iter = sibling.siblingBackendIds.find(backendId);
+    KJ_REQUIRE(iter != sibling.siblingBackendIds.end());
+
+    if (backendId == sibling.siblings[iter->second].backendId) {
+      sibling.siblings[iter->second].reset();
+    }
+    sibling.siblingBackendIds.erase(iter);
+
+    return kj::READY_NOW;
+  }
+
+private:
+  SiblingImpl& sibling;
+  Sibling::Client siblingCap;
+
+  void addImpl(uint64_t backendId, uint shardId, Sibling::Client cap) {
+    KJ_REQUIRE(sibling.siblingBackendIds.insert(std::make_pair(backendId, shardId)).second);
+
+    if (shardId >= sibling.siblings.size()) {
+      sibling.siblings.resize(shardId + 1);
+    }
+
+    sibling.siblings[shardId].fulfiller->fulfill(kj::cp(cap));
+    sibling.siblings[shardId].cap = kj::mv(cap);
+  }
+};
+
+// =======================================================================================
+
+class SiblingImpl::ReconnectingCap: public Sibling::Server {
+public:
+  ReconnectingCap(SiblingImpl& localSibling, Sibling::Client localSiblingCap, uint shardId)
+      : localSibling(localSibling), localSiblingCap(kj::mv(localSiblingCap)), shardId(shardId) {}
+
+  kj::Promise<void> dispatchCall(
+      uint64_t interfaceId, uint16_t methodId,
+      capnp::CallContext<capnp::AnyPointer, capnp::AnyPointer> context) {
+    auto& other = localSibling.siblings[shardId];
+    auto backendId = other.backendId;
+    auto resetCount = localSibling.backendSetResetCount;
+
+    auto params = context.getParams();
+    auto req = other.cap.typelessRequest(interfaceId, methodId, params.targetSize());
+    req.set(params);
+
+    return req.send().then([this,context](auto&& response) mutable -> kj::Promise<void> {
+      context.initResults(response.targetSize()).set(response);
+      return kj::READY_NOW;
+    }, [this,interfaceId,methodId,context,backendId,resetCount]
+        (kj::Exception&& exception) mutable -> kj::Promise<void> {
+      if (exception.getType() != kj::Exception::Type::DISCONNECTED) {
+        return kj::mv(exception);
+      }
+
+      // If the target sibling hasn't been reset since we started the call, reset it.
+      auto& other = localSibling.siblings[shardId];
+      if (localSibling.backendSetResetCount == resetCount &&
+          other.backendId == backendId) {
+        other.reset();
+      }
+
+      // Now we can try again.
+      return dispatchCall(interfaceId, methodId, context);
+    });
+  }
+
+private:
+  SiblingImpl& localSibling;
+  Sibling::Client localSiblingCap;
+  uint shardId;
+};
+
+// =======================================================================================
+
 SiblingImpl::SiblingImpl(kj::Timer& timer, JournalLayer::Recovery& journal,
                          ObjectDistributor& distributor, uint id)
     : SiblingImpl(timer, journal, distributor, id, recoverObjects(journal)) {}
@@ -273,14 +378,8 @@ SiblingImpl::~SiblingImpl() noexcept(false) {
   }
 }
 
-void SiblingImpl::setSibling(uint id, Sibling::Client cap) {
-  #error "todo figure this out"
-
-  auto insertResult = siblings.insert(std::make_pair(id, SiblingRecord(cap, 0)));
-  if (!insertResult.second) {
-    insertResult.first->second.cap = kj::mv(cap);
-    ++insertResult.first->second.connectionNumber;
-  }
+BackendSet<Sibling>::Client SiblingImpl::getBackendSet() {
+  return kj::heap<BackendSetImpl>(*this, thisCap());
 }
 
 kj::Promise<void> SiblingImpl::getTime(GetTimeContext context) {
@@ -333,9 +432,11 @@ SiblingImpl::RecoveryResult SiblingImpl::recoverObjects(JournalLayer::Recovery& 
 }
 
 Sibling::Client SiblingImpl::getSibling(uint id) {
-  auto iter = siblings.find(id);
-  KJ_REQUIRE(iter != siblings.end());
-  return iter->second.cap;
+  if (id == this->id) return thisCap();
+  if (id >= siblings.size()) {
+    siblings.resize(id + 1);
+  }
+  return kj::heap<ReconnectingCap>(*this, thisCap(), id);
 }
 
 StorageConfig::Reader SiblingImpl::getConfig() {

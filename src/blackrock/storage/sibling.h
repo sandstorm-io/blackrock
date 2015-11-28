@@ -26,7 +26,7 @@ public:
               uint id);
   ~SiblingImpl() noexcept(false);
 
-  void setSibling(uint id, Sibling::Client cap);
+  BackendSet<Sibling>::Client getBackendSet();
 
 protected:
   kj::Promise<void> getTime(GetTimeContext context) override;
@@ -34,21 +34,23 @@ protected:
 
 private:
   class ReplicaImpl;
+  class BackendSetImpl;
+  class ReconnectingCap;
 
   struct SiblingRecord {
-    // Work around std::unordered_map disliking non-const copy constructor.
-
     Sibling::Client cap;
+    kj::Own<kj::PromiseFulfiller<Sibling::Client>> fulfiller;
 
-    uint connectionNumber = 0;
-    // Incremented every time we lose a connection and have to reconnect.
+    uint64_t backendId;
+    // Only valid if siblingBackendIds[backendId] points back to this sibling ID.
 
-    SiblingRecord() = default;
-    KJ_DISALLOW_COPY(SiblingRecord);
-    SiblingRecord(SiblingRecord&&) = default;
-    SiblingRecord& operator=(SiblingRecord&&) = default;
-    SiblingRecord(Sibling::Client cap, uint connectionNumber)
-        : cap(kj::mv(cap)), connectionNumber(connectionNumber) {}
+    SiblingRecord(kj::PromiseFulfillerPair<Sibling::Client> paf =
+                  kj::newPromiseAndFulfiller<Sibling::Client>())
+        : cap(kj::mv(paf.promise)),
+          fulfiller(kj::mv(paf.fulfiller)),
+          backendId(kj::maxValue) {}
+
+    void reset() { *this = SiblingRecord(); }
   };
 
   kj::Timer& timer;
@@ -65,7 +67,10 @@ private:
 
   kj::TaskSet tasks;
 
-  std::unordered_map<uint, SiblingRecord> siblings;
+  kj::Vector<SiblingRecord> siblings;
+  std::unordered_map<uint64_t, uint> siblingBackendIds;
+  uint backendSetResetCount = 0;
+
   std::unordered_map<ObjectId, ReplicaImpl*, ObjectId::Hash> replicas;
 
   struct RecoveredObject {
@@ -86,7 +91,10 @@ private:
               uint id, RecoveryResult recovered);
 
   Sibling::Client getSibling(uint id);
-  // Get the given sibling, reconnecting if necessary.
+  // Get the given sibling. Method calls on the returned capability will never throw "disconnected"
+  // exceptions, but will instead block until the sibling becomes available (possibly forever).
+  // Note that capabilities returned through said methods do not have this porperty, since we don't
+  // know how to restore access to a disconnected object that isn't the top level.
 
   StorageConfig::Reader getConfig();
 

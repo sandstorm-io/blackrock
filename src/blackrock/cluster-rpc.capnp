@@ -204,9 +204,13 @@ interface BackendSet(T) {
   struct IdBackendPair {
     id @0 :UInt64;
     backend @1 :T;
+
+    shardId @2 :UInt32;
+    # If different back-ends in this are not identical replicas, this indicates which shard of
+    # the back-end this capability points to.
   }
 
-  add @1 (id :UInt64, backend :T);
+  add @1 (id :UInt64, backend :T, shardId :UInt32);
   # Add a new back-end.
 
   remove @2 (id :UInt64);
