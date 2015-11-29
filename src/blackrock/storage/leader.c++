@@ -62,6 +62,8 @@ private:
   };
 };
 
+#if 0
+// TODO(now): Figure out what to do with this.
 class LeaderImpl::TransactionBuilderImpl final: public TransactionBuilder::Server {
 public:
   explicit TransactionBuilderImpl(LeaderImpl& leader)
@@ -113,13 +115,17 @@ private:
   capnp::MallocMessageBuilder arena;
   ChangeSet::Builder changes = arena.getRoot<ChangeSet>();
 };
+#endif
 
-LeaderImpl::LeaderImpl(uint siblingId, uint quorumSize,
+LeaderImpl::LeaderImpl(kj::Timer& timer, uint siblingId, uint quorumSize,
                        MidLevelReader& localObject, capnp::Capability::Client capToHold,
-                       kj::Array<capnp::Response<Replica::GetStateResults>> voters)
-    : id(key), siblingId(siblingId), quorumSize(quorumSize), localObject(localObject),
+                       kj::Array<capnp::Response<Replica::GetStateResults>> voters,
+                       bool isUnanimous)
+    : timer(timer), id(localObject.getId()),
+      siblingId(siblingId), quorumSize(quorumSize), localObject(localObject),
       capToHold(kj::mv(capToHold)), weak(kj::refcounted<WeakLeaderImpl>(*this)),
       termInfo(makeTermInfo(termInfoMessage, voters)),
+      isUnanimous(isUnanimous),
       tasks(*this),
       ready(kj::joinPromises(KJ_MAP(voter, voters)
             -> kj::Promise<FollowResponseRecord> {
@@ -127,7 +133,6 @@ LeaderImpl::LeaderImpl(uint siblingId, uint quorumSize,
           auto req = voter.getFollowState().getIdle().voteRequest();
           req.setLeader(kj::addRef(*weak));
           req.setTerm(termInfo);
-          req.setWriteQuorumSize(quorumSize);
 
           return req.send().then([KJ_MVCAP(voter)](auto&& response) mutable {
             return FollowResponseRecord { response.getFollower(), kj::mv(voter) };
@@ -171,7 +176,7 @@ LeaderImpl::LeaderImpl(uint siblingId, uint quorumSize,
 
           KJ_ASSERT(goodReplicas.size() > 0);
 
-          #error "todo: deal with staged transaction"
+          #error "todo: deal with staged transaction. be sure to block 'clean shutdown' while it is in progress"
 
           bool dirty = bestState.isExists() && bestState.getExists().getIsDirty();
           if (badReplicas.size() == 0 && !dirty) {
@@ -205,12 +210,58 @@ LeaderImpl::LeaderImpl(uint siblingId, uint quorumSize,
         }).fork()) {}
 
 LeaderImpl::~LeaderImpl() noexcept(false) {
-  weak->leader = nullptr;
+  if (weak->leader == nullptr || this->followers == nullptr || !isUnanimous) {
+    // Clean shutdown not possible.
+    return;
+  }
+
+  unwindDetector.catchExceptionsIfUnwinding([&]() {
+    // Attempt clean shutdown.
+    //
+    // In the background, try to commit a unanimous no-op change, and then signal clean shutdown.
+    // There is no rush to complete this, but we'll set a timeout to prevent building up deadlocked
+    // state.
+
+    #error "TODO: verify state is clean: backburner, coordinator"
+
+    auto followers = kj::mv(this->followers);
+    uint64_t finalVersion = ++version;
+
+    timer.timeoutAfter(1 * kj::SECONDS, kj::joinPromises(KJ_MAP(follower, followers) {
+      // Commit a no-op change.
+      auto req = follower.cap.commitRequest();
+      req.setVersion(finalVersion);
+      return req.send().then([](auto&&) {});
+    }).then([KJ_MVCAP(followers)]() mutable {
+      // OK, all followers accepted commit.
+      return kj::joinPromises(KJ_MAP(follower, followers) {
+        return follower.cap.cleanShutdownRequest().send().then([](auto&&) {});
+      });
+    })).detach([](kj::Exception&& exception) {
+      // Not the end of the world; will recover next time.
+      KJ_LOG(ERROR, "failure during object shutdown", exception);
+    });
+  });
 }
 
 void LeaderImpl::abdicate() {
   weak->leader = nullptr;
   followers = nullptr;
+}
+
+void LeaderImpl::increaseQuorumSize(uint size) {
+  if (quorumSize < size) {
+    quorumSize = size;
+    if (followers.size() < size) {
+      abdicate();
+    }
+  }
+}
+
+void LeaderImpl::decreaseQuorumSize(uint size) {
+  if (quorumSize > size) {
+    quorumSize = size;
+  }
 }
 
 void LeaderImpl::write(uint64_t offset, kj::ArrayPtr<const byte> data) {
@@ -245,6 +296,10 @@ kj::Own<MidLevelWriter::Replacer> LeaderImpl::startReplace() {
   KJ_UNIMPLEMENTED("startReplace() over replication not implemented");
 }
 
+kj::Promise<void> LeaderImpl::initObject(InitObjectContext context) {
+  #error todo;
+}
+
 kj::Promise<void> LeaderImpl::getObject(GetObjectContext context) {
   ObjectKey requestKey = context.getParams().getKey();
   context.releaseParams();
@@ -269,22 +324,6 @@ kj::Promise<void> LeaderImpl::getObject(GetObjectContext context) {
   });
 }
 
-kj::Promise<void> LeaderImpl::startTransaction(StartTransactionContext context) {
-  context.getResults(capnp::MessageSize {4,1})
-      .setBuilder(kj::heap<TransactionBuilderImpl>(*this));
-  return kj::READY_NOW;
-}
-
-kj::Promise<void> LeaderImpl::flushTransaction(FlushTransactionContext context) {
-  // Any time we reach "ready", all previous transactions have been dealt with, so all we really
-  // need todo here is wait for that.
-  return ready.addBranch();
-}
-
-kj::Promise<void> LeaderImpl::getTransactionState(GetTransactionStateContext context) {
-  #error todo
-}
-
 kj::Promise<void> LeaderImpl::allFollowers(
     kj::Function<kj::Promise<void>(FollowerRecord&)>&& func) {
   // Call the given function -- synchronously, right now -- on all followers. The returned
@@ -295,7 +334,7 @@ kj::Promise<void> LeaderImpl::allFollowers(
     return KJ_EXCEPTION(DISCONNECTED, "object leader has abdicated");
   }
 
-  auto waiter = kj::refcounted<QuorumWaiter>();
+  auto waiter = kj::refcounted<QuorumWaiter>(quorumSize);
 
   auto paf = kj::newPromiseAndFulfiller<void>();
   waiter->fulfiller = kj::mv(paf.fulfiller);
@@ -317,7 +356,7 @@ kj::Promise<void> LeaderImpl::allFollowers(
         waiterRef.sawSelf = true;
       }
 
-      if (waiterRef.successCount == quorumSize && waiterRef.sawSelf) {
+      if (waiterRef.successCount == waiterRef.quorumSize && waiterRef.sawSelf) {
         waiterRef.fulfiller->fulfill();
       } else if (waiterRef.waitingCount == 0) {
         // Eek we've lost our quorum.
@@ -336,7 +375,7 @@ kj::Promise<void> LeaderImpl::allFollowers(
       if (e.getType() == kj::Exception::Type::DISCONNECTED) {
         // This follower disconnected.
         if (follower.siblingId == siblingId ||
-            waiterRef.successCount + waiterRef.waitingCount < quorumSize) {
+            waiterRef.successCount + waiterRef.waitingCount < waiterRef.quorumSize) {
           // We've lost our quorum, or lost connection to the local replica. Give up.
           abdicate();
           waiterRef.fulfiller->reject(KJ_EXCEPTION(
@@ -386,11 +425,20 @@ LeaderImpl::Comparison LeaderImpl::compare(
   // Both exist.
   auto lefte = left.getExists();
   auto righte = right.getExists();
+  auto leftex = lefte.getExtended();
+  auto rightex = righte.getExtended();
 
-  // Check terms.
-  Comparison termComparison = compare(lefte.getExtended().getTerm(),
-                                      righte.getExtended().getTerm());
-  if (termComparison != Comparison::SAME) return termComparison;
+  // Check terms. If a replica reports no term, then it asserts that all other replicas were known
+  // to match or surpass it at some point in the past, and that version number alone could be used
+  // to compare.
+  if (!leftex.hasTerm()) {
+    KJ_ASSERT(lefte.getVersion() <= righte.getVersion());
+  } else if (!rightex.hasTerm()) {
+    KJ_ASSERT(lefte.getVersion() >= righte.getVersion());
+  } else {
+    Comparison termComparison = compare(leftex.getTerm(), rightex.getTerm());
+    if (termComparison != Comparison::SAME) return termComparison;
+  }
 
   // Same term. Check versions.
   if (lefte.getVersion() < righte.getVersion()) {

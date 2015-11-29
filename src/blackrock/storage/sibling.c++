@@ -67,6 +67,8 @@ public:
     // replicas can delete their object states.
 
     #error todo
+
+    // TODO(now): Attempt to elect a new leader, and then let that leader clean up.
   }
 
   using Replica::Server::thisCap;
@@ -80,20 +82,18 @@ protected:
       if (object->exists()) {
         auto state = results.initDataState().initExists();
         auto xattr = object->getXattr();
-        auto basicState = object->getState();
         auto extendedState = object->getExtendedState();
 
         state.setType(static_cast<uint8_t>(xattr.type));
         state.setIsReadOnly(xattr.readOnly);
         state.setIsDirty(xattr.dirty);
+        state.setIsTransitiveSizeDirty(xattr.dirtyTransitiveSize);
+        state.setIsPendingRemoval(xattr.pendingRemoval);
         state.setVersion(xattr.version);
         state.setTransitiveBlockCount(xattr.transitiveBlockCount);
         if (xattr.owner != nullptr) {
           xattr.owner.copyTo(state.initOwner());
         }
-
-        state.setPendingRemoval(basicState.objectState.remove);
-        state.setPendingSizeUpdate(basicState.objectState.blockCountDelta);
 
         if (extendedState != nullptr) {
           capnp::FlatArrayMessageReader reader(extendedState);
@@ -174,6 +174,8 @@ private:
           tasks(*this) {}
 
     void addReplica(Replica::Client otherReplica) {
+      ++totalReplicas;
+
       tasks.add(otherReplica.getStateRequest(capnp::MessageSize {4,0}).send()
          .then([this](auto&& response) {
         voters.add(kj::mv(response));
@@ -206,6 +208,7 @@ private:
     Replica::Client replicaCap;
     uint quorumSize;
     uint waitingCount = 0;
+    uint totalReplicas = 0;
 
     kj::Vector<capnp::Response<Replica::GetStateResults>> voters;
     kj::Maybe<kj::Exception> sampleException;
@@ -224,9 +227,11 @@ private:
           // We didn't get a quorum. Some replicas must have thrown exceptions.
           leaderPaf.fulfiller->reject(kj::mv(KJ_ASSERT_NONNULL(sampleException)));
         } else {
-          leaderPaf.fulfiller->fulfill(kj::heap<LeaderImpl>(replica.sibling.id,
+          bool isUnanimous = voters.size() == totalReplicas;
+          leaderPaf.fulfiller->fulfill(kj::heap<LeaderImpl>(
+              replica.sibling.timer, replica.sibling.id,
               replica.sibling.getConfig().getWriteQuorumSize(),
-              object, replicaCap, voters.releaseAsArray()));
+              object, replicaCap, voters.releaseAsArray(), isUnanimous));
         }
       }
     }
@@ -304,6 +309,8 @@ public:
   kj::Promise<void> dispatchCall(
       uint64_t interfaceId, uint16_t methodId,
       capnp::CallContext<capnp::AnyPointer, capnp::AnyPointer> context) {
+    context.allowCancellation();
+
     auto& other = localSibling.siblings[shardId];
     auto backendId = other.backendId;
     auto resetCount = localSibling.backendSetResetCount;
@@ -372,9 +379,10 @@ SiblingImpl::SiblingImpl(kj::Timer& timer, JournalLayer::Recovery& journalRecove
 }
 SiblingImpl::~SiblingImpl() noexcept(false) {
   if (!replicas.empty()) {
-    // This will probably crash, so abort.
+    // The replicas have pointers back to SiblingImpl so we'll probably crash if they still exist.
+    // Abort instead.
+    KJ_DEFER(abort());
     KJ_LOG(FATAL, "can't destroy SiblingImpl while replicas exist");
-    abort();
   }
 }
 

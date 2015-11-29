@@ -4,6 +4,7 @@
 
 #include "mid-level-object.h"
 #include <kj/debug.h>
+#include <capnp/serialize.h>
 
 namespace blackrock {
 namespace storage {
@@ -14,7 +15,7 @@ static Xattr cleanXattr() {
   return result;
 }
 
-static TemporaryXattr cleanBasicState(const ObjectId& id) {
+static TemporaryXattr temporaryXattr(const ObjectId& id) {
   TemporaryXattr result;
   memset(&result, 0, sizeof(result));
   result.objectState.ojbectId = id;
@@ -25,7 +26,7 @@ MidLevelObject::MidLevelObject(JournalLayer& journal, ObjectId id,
                                kj::Own<JournalLayer::Object> object,
                                uint64_t stateRecoveryId)
     : journal(journal), id(id),
-      xattr(object->getXattr()), basicState(cleanBasicState(id)), extendedState(nullptr),
+      xattr(object->getXattr()), extendedState(nullptr),
       nextVersion(xattr.version + 1) {
   inner.init<Clean>(Clean { kj::mv(object), stateRecoveryId });
 }
@@ -36,7 +37,6 @@ MidLevelObject::MidLevelObject(JournalLayer& journal, ObjectId id,
                                kj::Array<capnp::word> extendedState)
     : journal(journal), id(id),
       xattr(object->getXattr()),
-      basicState(state->getXattr()),
       extendedState(kj::mv(extendedState)),
       nextVersion(xattr.version + 1) {
   inner.init<Durable>(Durable { kj::mv(object), kj::mv(state) });
@@ -46,18 +46,27 @@ MidLevelObject::MidLevelObject(JournalLayer& journal, ObjectId id,
                                uint64_t stateRecoveryId)
     : journal(journal), id(id),
       xattr(cleanXattr()),
-      basicState(cleanBasicState(id)),
       extendedState(nullptr),
       nextVersion(0) {
   inner.init<Uncreated>(Uncreated { stateRecoveryId });
 }
 
-Xattr MidLevelObject::getXattr() {
-  return xattr;
+MidLevelObject::~MidLevelObject() noexcept(false) {
+  if (inner.is<Durable>()) {
+    // We have a state file that is not clean. If we let the destructor run, it will be deleted.
+    // We'll possibly lose data. Better to abort.
+    KJ_DEFER(abort());
+    KJ_LOG(FATAL,
+        "tried to destroy MidLevelObject with unclean state; aborting to avoid data loss");
+  }
 }
 
-TemporaryXattr MidLevelObject::getState() {
-  return basicState;
+ObjectId MidLevelObject::getId() {
+  return id;
+}
+
+Xattr MidLevelObject::getXattr() {
+  return xattr;
 }
 
 kj::ArrayPtr<const capnp::word> MidLevelObject::getExtendedState() {
@@ -125,8 +134,6 @@ kj::Promise<void> MidLevelObject::modify(ChangeSet::Reader changes) {
   // Any transaction makes us non-dirty.
   xattr.dirty = false;
 
-  bool stateChanged = nextState != nullptr;
-
   if (inner.is<Uncreated>() == 0) {
     // Not created.
     KJ_REQUIRE(changes.getCreate() != 0, "first modification must create the object");
@@ -139,29 +146,19 @@ kj::Promise<void> MidLevelObject::modify(ChangeSet::Reader changes) {
     xattr.readOnly = true;
   }
 
-  xattr.transitiveBlockCount += changes.getAdjustTransitiveBlockCount();
+  if (changes.getShouldMarkForDeletion()) {
+    xattr.pendingRemoval = true;
+  }
+
+  if (changes.getShouldSetTransitiveBlockCount()) {
+    xattr.transitiveBlockCount = changes.getSetTransitiveBlockCount();
+    xattr.dirtyTransitiveSize = changes.getShouldMarkTransitiveBlockCountDirty();
+  } else if (changes.getShouldMarkTransitiveBlockCountDirty()) {
+    xattr.dirtyTransitiveSize = true;
+  }
 
   if (changes.hasSetOwner()) {
     xattr.owner = changes.getSetOwner();
-  }
-
-  if (changes.getShouldClearBackburner()) {
-    #error "todo: unregister backburner"
-    basicState.objectState.blockCountDelta = 0;
-    basicState.objectState.remove = false;
-    stateChanged = true;
-  }
-
-  if (changes.getBackburnerModifyTransitiveBlockCount() != 0) {
-    #error "todo: register backburner"
-    basicState.objectState.blockCountDelta = changes.getBackburnerModifyTransitiveBlockCount();
-    stateChanged = true;
-  }
-
-  if (changes.getBackburnerRecursivelyDelete()) {
-    #error "todo: register backburner"
-    basicState.objectState.remove = true;
-    stateChanged = true;
   }
 
   kj::Maybe<kj::Own<BlobLayer::Temporary>> newContent;
@@ -183,31 +180,18 @@ kj::Promise<void> MidLevelObject::modify(ChangeSet::Reader changes) {
     } else {
       wrapped->setXattr(xattr);
     }
-    if (stateChanged) {
-      if (inner.is<Durable>()) {
-        auto wrapped = txn.wrap(*inner.get<Durable>().state);
-        KJ_IF_MAYBE(c, nextState) {
-          wrapped->overwrite(basicState, kj::mv(*c));
-          nextState = nullptr;
-        } else {
-          wrapped->setXattr(basicState);
-        }
-      } else {
-        // clean -- create new state
-        if (nextState == nullptr) {
-          // Assume empty extended state.
-          nextState = journal.newDetachedTemporary();
-        }
 
-        auto state = txn.createRecoverableTemporary(
-            RecoveryId(RecoveryType::OBJECT_STATE, inner.get<Clean>().stateRecoveryId),
-            basicState, kj::mv(KJ_ASSERT_NONNULL(nextState)));
-        nextState = nullptr;
-
-        inner.init<Durable>(Durable {
-          kj::mv(inner.get<Clean>().object), kj::mv(state)
-        });
-      }
+    if (inner.is<Clean>()) {
+      // clean -- create new state
+      auto state = txn.createRecoverableTemporary(
+          RecoveryId(RecoveryType::OBJECT_STATE, inner.get<Clean>().stateRecoveryId),
+          temporaryXattr(id), extendedStateBlob());
+      inner.init<Durable>(Durable {
+        kj::mv(inner.get<Clean>().object), kj::mv(state)
+      });
+    } else if (extendedStateChanged) {
+      // update extended state
+      txn.wrap(*inner.get<Durable>().state)->overwrite(temporaryXattr(id), extendedStateBlob());
     }
     return txn.commit();
   } else {
@@ -215,10 +199,6 @@ kj::Promise<void> MidLevelObject::modify(ChangeSet::Reader changes) {
       if (newContent == nullptr) {
         // Assume empty initial content.
         newContent = journal.newDetachedTemporary();
-      }
-      if (nextState == nullptr) {
-        // Assume empty extended state.
-        nextState = journal.newDetachedTemporary();
       }
       uint64_t stateRecoveryId = inner.get<Uncreated>().stateRecoveryId;
       inner.init<Temporary>();
@@ -228,10 +208,6 @@ kj::Promise<void> MidLevelObject::modify(ChangeSet::Reader changes) {
     KJ_IF_MAYBE(c, newContent) {
       inner.get<Temporary>().object = kj::mv(*c);
     }
-    KJ_IF_MAYBE(c, nextState) {
-      inner.get<Temporary>().state = kj::mv(*c);
-      nextState = nullptr;
-    }
 
     if (changes.hasSetOwner()) {
       // Transition to durable when the owner is set.
@@ -239,12 +215,33 @@ kj::Promise<void> MidLevelObject::modify(ChangeSet::Reader changes) {
       auto newObject = txn.createObject(id, xattr, kj::mv(inner.get<Temporary>().object));
       auto newState = txn.createRecoverableTemporary(
           RecoveryId(RecoveryType::OBJECT_STATE, inner.get<Temporary>().stateRecoveryId),
-          basicState, kj::mv(inner.get<Temporary>().state));
+          temporaryXattr(id), extendedStateBlob());
       inner.init<Durable>(Durable { kj::mv(newObject), kj::mv(newState) });
       return txn.commit();
     } else {
       return kj::READY_NOW;
     }
+  }
+}
+
+kj::Own<MidLevelObject::Replacer> MidLevelObject::startReplace() {
+  #error todo
+}
+
+void MidLevelObject::cleanShutdown() {
+  if (inner.is<Uncreated>() || inner.is<Temporary>()) {
+    // Not leaving any mess on disk, so ignore.
+    return;
+  }
+
+  KJ_REQUIRE(!xattr.pendingRemoval && !xattr.dirty && !xattr.dirtyTransitiveSize,
+             "can't cleanly shut down when still marked dirty");
+
+  // OK, we can drop the temporary object.
+  if (inner.is<Durable>()) {
+    auto object = kj::mv(inner.get<Durable>().object);
+    auto recoveryId = inner.get<Durable>().state->getId().id;
+    inner.init<Clean>(Clean { kj::mv(object), recoveryId });
   }
 }
 
@@ -272,37 +269,41 @@ void MidLevelObject::setNextVersion(uint64_t version) {
 }
 
 void MidLevelObject::setNextExtendedState(kj::Array<capnp::word> data) {
-  auto temp = journal.newDetachedTemporary();
-  temp->getContent().write(0, data.asBytes());
-  nextState = kj::mv(temp);
   extendedState = kj::mv(data);
+  extendedStateChanged = true;
 }
 
 kj::Promise<void> MidLevelObject::modifyExtendedState(kj::Array<capnp::word> data) {
-  auto temp = journal.newDetachedTemporary();
-  temp->getContent().write(0, data.asBytes());
-  nextState = nullptr;
-  extendedState = kj::mv(data);
+  setNextExtendedState(kj::mv(data));
 
   if (inner.is<Durable>()) {
     JournalLayer::Transaction txn(journal);
-    txn.wrap(*inner.get<Durable>().state)->overwrite(basicState, kj::mv(temp));
+    txn.wrap(*inner.get<Durable>().state)->overwrite(temporaryXattr(id), extendedStateBlob());
     return txn.commit();
   } else if (inner.is<Clean>()) {
+    // Transition to Durable.
     JournalLayer::Transaction txn(journal);
     auto state = txn.createRecoverableTemporary(
         RecoveryId(RecoveryType::OBJECT_STATE, inner.get<Clean>().stateRecoveryId),
-        basicState, kj::mv(temp));
+        temporaryXattr(id), extendedStateBlob());
     inner.init<Durable>(Durable {
       kj::mv(inner.get<Clean>().object), kj::mv(state)
     });
     return txn.commit();
   } else if (inner.is<Temporary>()) {
-    inner.get<Temporary>().state = kj::mv(temp);
     return kj::READY_NOW;
   } else {
     KJ_FAIL_REQUIRE("object not created");
   }
+}
+
+kj::Own<BlobLayer::Temporary> MidLevelObject::extendedStateBlob() {
+  auto temp = journal.newDetachedTemporary();
+  if (extendedState != nullptr) {
+    temp->getContent().write(0, extendedState.asBytes());
+  }
+  extendedStateChanged = false;
+  return temp;
 }
 
 } // namespace storage

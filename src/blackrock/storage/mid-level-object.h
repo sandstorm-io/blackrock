@@ -38,8 +38,8 @@ class MidLevelReader {
   // client.
 
 public:
+  virtual ObjectId getId() = 0;
   virtual Xattr getXattr() = 0;
-  virtual TemporaryXattr getState() = 0;
   virtual kj::ArrayPtr<const capnp::word> getExtendedState() = 0;
   virtual BlobLayer::Content::Size getSize() = 0;
   virtual kj::Promise<void> read(uint64_t offset, kj::ArrayPtr<byte> buffer) = 0;
@@ -69,8 +69,10 @@ public:
   MidLevelObject(JournalLayer& journal, ObjectId id, uint64_t stateRecoveryId);
   // Create a MidLevelObject for an object that does NOT already exist on-disk.
 
+  ~MidLevelObject() noexcept(false);
+
+  ObjectId getId() override;
   Xattr getXattr() override;
-  TemporaryXattr getState() override;
   kj::ArrayPtr<const capnp::word> getExtendedState() override;
   BlobLayer::Content::Size getSize() override;
   kj::Promise<void> read(uint64_t offset, kj::ArrayPtr<byte> buffer) override;
@@ -96,6 +98,11 @@ public:
   kj::Promise<void> modifyExtendedState(kj::Array<capnp::word> data);
   // Commit a transaction now which sets the extended state as specified.
 
+  void cleanShutdown();
+  // Attempts a clean shutdown of the object, which allows the state file to be deleted.
+  //
+  // Throws if the object still needs attention and therefore cannot shut down.
+
   bool exists() { return !inner.is<Uncreated>(); }
 
 private:
@@ -112,7 +119,6 @@ private:
     // Object is created but not yet saved to disk.
 
     kj::Own<BlobLayer::Temporary> object;
-    kj::Own<BlobLayer::Temporary> state;
     uint64_t stateRecoveryId;
   };
 
@@ -133,13 +139,14 @@ private:
   kj::OneOf<Uncreated, Temporary, Durable, Clean> inner;
 
   Xattr xattr;
-  TemporaryXattr basicState;
   kj::Array<capnp::word> extendedState;
   // Cached state.
 
   uint64_t nextVersion;
-  kj::Maybe<kj::Own<BlobLayer::Temporary>> nextState;
+  bool extendedStateChanged;
   // For setNextVersion() / setNextExtendedState().
+
+  kj::Own<BlobLayer::Temporary> extendedStateBlob();
 };
 
 } // namespace storage

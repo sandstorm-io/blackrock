@@ -90,6 +90,7 @@
 $import "/capnp/c++.capnp".namespace("blackrock::storage");
 using Storage = import "/blackrock/storage.capnp";
 using FsStorage = import "/blackrock/fs-storage.capnp";
+using SturdyRef = import "/blackrock/cluster-rpc.capnp".SturdyRef;
 using ObjectId = FsStorage.StoredObjectId;
 using ObjectKey = FsStorage.StoredObjectKey;
 using OwnedStorage = Storage.OwnedStorage;
@@ -179,23 +180,28 @@ interface Leader {
   # Get the high-level representation of the object. Only valid to call if the object has been
   # created.
 
-  startTransaction @2 () -> (builder :TransactionBuilder);
-  # Starts a transaction on the object.
+  getTransitiveSize @2 () -> (blockCount :UInt64);
 
-  flushTransaction @3 (id :TransactionId);
-  # Ask the Leader to please make sure that the given transaction, which was possibly staged
-  # previously, has been fully-applied. After this call returns successfully, it is safe for the
-  # transaction coordinator to forget about the transaction and return false from
-  # `getTransactionState()`.
+  childSizeChanging @3 () -> (change :SizeChange);
+  # Indicates that a child is about to commit a transaction modifying its size.
+  # This method returns once the parent object has been marked `dirtyTransitiveSize` (but the
+  # parent's size is not yet updated). The child then carries out its transaction, then calls
+  # `change.commit()` to indicate that it completed successfully and provide the delta;
+  # the parent's size is then updated (possibly leading to transitive use of this method).
 
-  getTransactionState @4 (id :TransactionId) -> (committed :Bool);
-  # Get the state of a transaction for which the callee is the coordinator. If the named
-  # transaction is still staged but neither committed nor aborted, waits for it to reach either
-  # the commit or the abort state. If nothing about the transaction is known, returns false; but
-  # this only happens if the coordinator previously ensured tha the transaction had been committed.
-  #
-  # This call travels in the opposite direction of stageTransaction() and flushTransaction() and is
-  # only used to recover in the case of a crash / partition.
+  interface SizeChange {
+    commit @0 (blockCountDelta :Int64);
+  }
+
+  makePermanent @4 (owner :ObjectId) -> (ownerChange :OwnerChange);
+
+  interface OwnerChange {
+    commit @0 ();
+  }
+
+  remove @5 () -> (transitiveBlockCount :UInt64);
+  # Mark the object for recursive removal and set its owner to null. Returns once successfully
+  # marked; transitive removals are carried out asynchronously.
 }
 
 interface WeakLeader {
@@ -206,7 +212,7 @@ interface WeakLeader {
 }
 
 interface Voter {
-  vote @0 (leader :WeakLeader, term :TermInfo, writeQuorumSize :UInt8) -> (follower :Follower);
+  vote @0 (leader :WeakLeader, term :TermInfo) -> (follower :Follower);
   # If successful, the voter has voted for this leader and is now following it.
 }
 
@@ -267,28 +273,14 @@ interface Follower {
   copyTo @5 (replacer :Replacer, version :UInt64);
   # Copy the entire contents of this follower *into* the designated replacer.
 
+  cleanShutdown @6 ();
+  # Ends the leader's term while asserting that *all* replicas are known to have acknowledged the
+  # term's last write. Thus, `ReplicaState.Extended.term` can be cleared, possibly allowing the
+  # state file to be deleted entirely.
+
   # TODO(now): Way to add a new transaction that we're coordinating (probably as option to
   #   commit()).
   # TODO(now): Way to update the quorum size.
-}
-
-interface TransactionBuilder {
-  getTransactional @0 [T] (object :T) -> (transactionalObject :T);
-  # Get a transactional wrapper around the given object. `object` must be a capability representing
-  # one of the facets of the storage object with which this Transaction is associated. For exmaple,
-  # when transacting on an Assingable, `object` may be a capability to the `Assignable` itself or
-  # to an `Assignable.Setter` pointing to the same underlying object.
-  #
-  # Once either `stage()` is called or the `TransactionBuilder` is dropped, `transactionalObject`
-  # will be revoked.
-
-  applyRaw @1 (changes :ChangeSet);
-  # Add some direct low-level modifications.
-
-  stage @2 (coordinator :ObjectId, id :TransactionId) -> (staged :StagedTransaction);
-  # Prepare to commit the transaction. If this succeeds, then the underlying object has been
-  # locked. All other transactions will be blocked/rejected until this transaction is either
-  # committed or aborted.
 }
 
 interface StagedTransaction {
@@ -320,13 +312,6 @@ interface StagedTransaction {
   # An aborted transaction does NOT update the version number.
 }
 
-struct TransactionId {
-  # Globally-unique ID for a specific multi-object transaction.
-
-  id0 @0 :UInt64;
-  id1 @1 :UInt64;
-}
-
 struct TermInfo {
   startTime @0 :List(Sibling.Time);
 
@@ -342,16 +327,12 @@ struct ReplicaState {
   type @0 :UInt8;
   isReadOnly @1 :Bool;
   isDirty @2 :Bool;
-  version @3 :UInt64;
-  transitiveBlockCount @4 :UInt64;
-  owner @5 :ObjectId;
+  isTransitiveSizeDirty @3 :Bool;
+  isPendingRemoval @4 :Bool;
+  version @5 :UInt64;
+  transitiveBlockCount @6 :UInt64;
+  owner @7 :ObjectId;
   # From Xattr.
-
-  pendingRemoval @6 :Bool;
-  # If true, a backburner task is scheduled to delete this.
-
-  pendingSizeUpdate @7 :Int64;
-  # If non-zero, a backburner task is scheduled to update the size.
 
   extended @8 :Extended;
   # Extended state -- this is serialized into a temporary file, hence being a separate struct.
@@ -362,36 +343,23 @@ struct ReplicaState {
 
     term @0 :TermInfo;
     # The leadership term under which the last write was made.
+    #
+    # If null, then it is known that the last write to this replica reached *all* replicas, and
+    # therefore it is impossible that any other replica is older than this one, and any replica
+    # which is newer will have a strictly greater version number.
 
     staged @1 :DistributedTransactionInfo;
     # If present, a distributed transaction is staged and awaiting notification of commit or abort.
     # This is added between writes and cleared on every version bump.
 
-    coordinated @2 :List(TransactionId);
-    # Recent distributed transactions for which this object was the coordinator which were
-    # successfully committed.
-
-    effectiveWriteQuorumSize @3 :UInt8;
-    # The last completed transaction was written to at least this many replicas.
-    #
-    # Any transaction can reduce this number (assuming that the election quorum size has already
-    # been increased as needed), and can be committed under the new requirement.
-    #
-    # Increasing this size requires first completing a transaction under the new requirement, before
-    # the new requirement is actually stored in the state or the election quorum size reduced. This
-    # ensures that once the new value hits disk on a single follower, the state of the full system
-    # already complies with it.
+    # IF YOU ADD THINGS: Check if FollowerImpl::cleanShutdown() should check for them.
   }
 }
 
 struct DistributedTransactionInfo {
-  coordinator @0 :ObjectId;
-  id @1 :TransactionId;
-  version @2 :UInt64;
-  changes @3 :ChangeSet;
-
-  # TODO(now): Should the coordinator be identified by a SturdyRef rather than ObjectId and
-  #   TransactionId?
+  txnRef @0 :SturdyRef;
+  version @1 :UInt64;
+  changes @2 :ChangeSet;
 }
 
 struct StorageConfig {

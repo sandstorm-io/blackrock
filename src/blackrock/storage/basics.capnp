@@ -16,23 +16,17 @@ struct ChangeSet {
   setContent @1 :Data;
   # Overwrite content. null = don't overwrite.
 
-  shouldDelete @2 :Bool = false;
+  shouldBecomeReadOnly @2 :Bool = false;
 
-  shouldBecomeReadOnly @3 :Bool = false;
+  shouldDelete @3 :Bool = false;
+  shouldMarkForDeletion @4 :Bool = false;
 
-  adjustTransitiveBlockCount @4 :Int64 = 0;
-  # Delta vs. current value.
+  shouldMarkTransitiveBlockCountDirty @5 :Bool = false;
+  shouldSetTransitiveBlockCount @6 :Bool = false;
+  setTransitiveBlockCount @7 :UInt64;
+  # Setting transitive block count implies making it non-dirty, unless
+  # `shouldMarkTransitiveBlockCountDirty` is true at the same time.
 
-  setOwner @5 :ObjectId;
+  setOwner @8 :ObjectId;
   # null = don't change
-
-  backburnerModifyTransitiveBlockCount @6 :Int64 = 0;
-  # Schedule backburner task to modify this object's transitive block count and recurse to its
-  # parent.
-
-  backburnerRecursivelyDelete @7 :Bool = false;
-  # Schedule backburner task to eventually delete this object and recurse to its children.
-
-  shouldClearBackburner @8 :Bool = false;
-  # Remove all backburner tasks attached to this object.
 }

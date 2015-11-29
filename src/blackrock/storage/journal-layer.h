@@ -143,6 +143,7 @@ public:
   public:
     ~RecoverableTemporary() noexcept(false);
 
+    RecoveryId getId() { return id; }
     TemporaryXattr getXattr() { return inner->getXattr(); }
     uint64_t getGeneration() { return changeCount; }
     BlobLayer::Content& getContent() { return inner->getContent(); }

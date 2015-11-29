@@ -39,6 +39,7 @@ protected:
   kj::Promise<void> sync(SyncContext context) override;
   kj::Promise<void> replace(ReplaceContext context) override;
   kj::Promise<void> copyTo(CopyToContext context) override;
+  kj::Promise<void> cleanShutdown(CleanShutdownContext context) override;
 
 private:
   class StagedTransactionImpl;

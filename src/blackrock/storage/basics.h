@@ -110,13 +110,33 @@ struct Xattr {
   // can never be unset.
 
   bool dirty :1;
-  // Indicates that direct writes have occurred since the last verison bump.
+  // Indicates whether direct writes have occurred since the last verison bump.
 
-  byte reserved :6;
+  bool dirtyTransitiveSize :1;
+  // Indicates whether `transitiveBlockCount` needs to be recalculated by summing all child
+  // sizes.
+  //
+  // This is employed to allow transitive sizes to be updated without distributed transactions.
+  // When a transaction is to be committed updating an object's transitive size, first the
+  // `dirtyTransitiveSize` bit is set on the parent, then the child is updated, then the parent
+  // is updated and `dirtyTransitiveSize` is cleared. If a failure occurs during the process,
+  // the parent will need to recompute its transitive size later by examining all children.
+
+  bool pendingRemoval :1;
+  // If true, and `owner` is the ID of an object that doesn't exist (especially null), then this
+  // object needs to be recursively deleted. The object cannot actually be deleted until
+  // `pendingRemoval` has been set true on all children.
+  //
+  // If `owner` does exist, and is permanent, then `pendingRemoval` should be set false.
+  //
+  // If `owner` does exist, but is still temporary (not saved to disk), then `pendingRemoval`
+  // should be left alone until the owner becomes permanent or is dropped.
+
+  byte reserved :4;
 
   uint64_t version :48;
-  // The object's version number. This monotonically increases as transactions are committed that
-  // affect this object.
+  // The object's version number. Used in replicated mode to determine which copy of the object
+  // is the newest. Not visible to clients.
 
   uint64_t transitiveBlockCount;
   // The number of 4k blocks in this object and all child objects.
@@ -128,6 +148,8 @@ struct Xattr {
   ObjectId owner;
   // What object owns this one?
 };
+
+static_assert(sizeof(Xattr) == 32, "Xattr format changed");
 
 enum class RecoveryType: uint8_t {
   STAGING,
@@ -174,13 +196,7 @@ struct TemporaryXattr {
 
   union {
     struct {
-      bool remove;
-      // If true, the object should be recursively deleted.
-
-      byte reserved[7];
-
-      int64_t blockCountDelta;
-      // This delta should be applied to the object's transitive block count.
+      byte reserved[16];
 
       ObjectId ojbectId;
       // Affected object ID.
@@ -191,6 +207,8 @@ struct TemporaryXattr {
     } siblingState;
   };
 };
+
+static_assert(sizeof(TemporaryXattr) == 32, "TemporaryXattr format changed");
 
 struct JournalEntry {
   // In order to implement atomic transactions, we organize disk changes into a stream of

@@ -119,7 +119,7 @@ kj::Promise<void> FollowerImpl::stageDistributed(StageDistributedContext context
         // The state with the transaction was more than one block, meaning it is probably
         // worthwhile for us to do an extra copy to drop back down to one block.
         capnp::MallocMessageBuilder builder2;
-        builder2.setRoot(builder.getRoot<ReplicaState::Extended>());
+        builder2.setRoot(builder.getRoot<ReplicaState::Extended>().asReader());
         newExState = capnp::messageToFlatArray(builder2);
       }
 
@@ -163,7 +163,6 @@ kj::Promise<void> FollowerImpl::sync(SyncContext context) {
     promiseRef = object.sync();
     return kj::READY_NOW;
   }).then([KJ_MVCAP(promise)]() mutable {
-    // This slightly-weird construction is so that if
     return kj::mv(*promise);
   });
 }
@@ -175,6 +174,16 @@ kj::Promise<void> FollowerImpl::replace(ReplaceContext context) {
 kj::Promise<void> FollowerImpl::copyTo(CopyToContext context) {
   context.allowCancellation();
   #error todo
+}
+
+kj::Promise<void> FollowerImpl::cleanShutdown(CleanShutdownContext context) {
+  return queueOp([](MidLevelObject& object) mutable {
+    // We know that our extended state couldn't possibly contain a staged transaction here because
+    // we would have queued an op to wait for it. That leaves just `term`, which the leader is
+    // telling us we don't need to store anymore.
+    object.cleanShutdown();
+    return kj::READY_NOW;
+  });
 }
 
 FollowerImpl::State& FollowerImpl::getState() {
@@ -241,16 +250,15 @@ kj::Promise<void> VoterImpl::vote(VoteContext context) {
     // Update extended state.
     capnp::MallocMessageBuilder scratch;
 
-    {
+    // Read old state.
+    if (state.object.getExtendedState() != nullptr) {
       capnp::FlatArrayMessageReader reader(state.object.getExtendedState());
       scratch.setRoot(reader.getRoot<ReplicaState::Extended>());
     }
 
-    // Update extended state as appropriate.
+    // Modify.
     auto exState = scratch.getRoot<ReplicaState::Extended>();
-
     exState.setTerm(params.getTerm());
-    exState.setEffectiveWriteQuorumSize(params.getWriteQuorumSize());
 
     // Any staged transaction will be delt with by the leader in the first transaction.
     exState.disownStaged();
@@ -259,6 +267,8 @@ kj::Promise<void> VoterImpl::vote(VoteContext context) {
     //   will at least be freed up on the next update. Ideally, POCO support in Cap'n Proto will
     //   solve everything.
 
+    // Note thta the leader could in theory disconnect before committing any transaction with this
+    // new extended state. That's OK; the next leader to connect will update it again.
     state.object.setNextExtendedState(capnp::messageToFlatArray(scratch));
   }
 
