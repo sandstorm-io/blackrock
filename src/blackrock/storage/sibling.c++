@@ -62,13 +62,32 @@ public:
     KJ_ASSERT(sibling.replicas.erase(id) == 1) { break; }
   }
 
-  void cleanup() {
+  void cleanup(uint retryCount = 0) {
     // Schedules background tasks which attempt to clean-shutdown the object, such that all
     // replicas can delete their object states.
 
-    #error todo
+    KJ_IF_MAYBE(object, objectWhenReady) {
+      if (!object->isClean()) {
+        // Not clean. Elect a leader -- requiring unanimity -- and then immediately drop it. If
+        // successful, the leader will complete all pending cleanup.
+        KJ_LOG(WARNING, "object not cleanly shut down", id);
+        auto self = thisCap();
+        sibling.tasks.add(getLeaderImpl(*object, true).whenResolved()
+            .catch_([this,KJ_MVCAP(self),retryCount](kj::Exception&& exception) mutable {
+          // Awkwardly, leader election failed. This is unusual; if replicas are unavailable we
+          // should have been blocked waiting for the election.
+          KJ_LOG(ERROR, "failed to elect leader for replica cleanup, retrying later",
+                        id, exception);
 
-    // TODO(now): Attempt to elect a new leader, and then let that leader clean up.
+          return sibling.timer.afterDelay((2 << retryCount) * kj::SECONDS)
+              .then([this,KJ_MVCAP(self),retryCount]() { cleanup(retryCount + 1); });
+        }));
+      }
+    } else {
+      // Wait until ready, then try again.
+      auto self = thisCap();
+      sibling.tasks.add(ready.addBranch().then([this,KJ_MVCAP(self)]() { cleanup(); }));
+    }
   }
 
   using Replica::Server::thisCap;
@@ -112,7 +131,8 @@ protected:
           results.initFollowState().setIdle(v->thisCap());
         }
       } else {
-        results.initFollowState().setIdle(kj::heap<VoterImpl>(*object, thisCap(), voter));
+        results.initFollowState().setIdle(kj::heap<VoterImpl>(*object,
+            kj::heap<Cleaner>(*this, thisCap()), voter));
       }
 
       return kj::READY_NOW;
@@ -127,28 +147,7 @@ protected:
   kj::Promise<void> getLeader(GetLeaderContext context) override {
     KJ_IF_MAYBE(object, objectWhenReady) {
       context.releaseParams();
-
-      // Check if we're locally aware of a leader.
-      KJ_IF_MAYBE(v, voter) {
-        KJ_IF_MAYBE(l, v->getLeader()) {
-          context.getResults(capnp::MessageSize {4, 1})
-              .setLeader(l->cap.getRequest(capnp::MessageSize {4, 0}).send().getLeader());
-          return kj::READY_NOW;
-        }
-      }
-
-      // No leader here. Start an election.
-      //
-      // Note that we intentionally call ourselves in addition to other replicas.
-      auto election = kj::heap<Election>(*this, *object, thisCap());
-      for (uint siblingId: sibling.distributor.getDistribution(id)) {
-        auto req = sibling.getSibling(siblingId).getReplicaRequest(capnp::MessageSize {8,0});
-        id.copyTo(req.initId());
-        election->addReplica(req.send().getReplica());
-      }
-
-      auto promise = election->wait();
-      context.getResults(capnp::MessageSize {4, 1}).setLeader(promise.attach(kj::mv(election)));
+      context.getResults(capnp::MessageSize {4, 1}).setLeader(getLeaderImpl(*object, false));
       return kj::READY_NOW;
     } else {
       // Not ready.
@@ -159,19 +158,71 @@ protected:
   }
 
 private:
+  class Election;
+
   SiblingImpl& sibling;
   Sibling::Client siblingCap;
   ObjectId id;
   kj::Maybe<MidLevelObject> objectWhenReady;
   kj::Maybe<VoterImpl&> voter;
   kj::ForkedPromise<void> ready;
+  kj::Maybe<Election&> currentElection;
+  uint cleanerCount = 0;
 
-  class Election final: private kj::TaskSet::ErrorHandler {
+  Leader::Client getLeaderImpl(MidLevelObject& object, bool forCleanup) {
+    // Check if we're locally aware of a leader.
+    KJ_IF_MAYBE(v, voter) {
+      KJ_IF_MAYBE(l, v->getLeader()) {
+        return l->cap.getRequest(capnp::MessageSize {4, 0}).send().getLeader();
+      }
+    }
+
+    // No leader here. Start an election.
+
+    // For cleanup, we need unanimity. Otherwise we need a regular quorum to elect a leader.
+    auto distribution = sibling.distributor.getDistribution(id);
+    uint quorumSize = forCleanup ? distribution.size() :
+        sibling.getConfig().getElectionQuorumSize();
+
+    KJ_IF_MAYBE(e, currentElection) {
+      // Oh, we're already holding an election. No use starting another one.
+      if (e->getQuorumSize() > quorumSize) {
+        // It looks like the in-progress election was called looking for a larger quorum. Probably,
+        // the reason we caught it in-progress is because it is blocked waiting for some replica to
+        // become available. Let's cancel it and start our own.
+        e->cancel();
+      } else {
+        return e->wait();
+      }
+    }
+
+    auto election = kj::refcounted<Election>(*this, object, thisCap(), quorumSize);
+
+    // Note that we intentionally call ourselves in addition to other replicas.
+    for (uint siblingId: distribution) {
+      auto req = sibling.getSibling(siblingId).getReplicaRequest(capnp::MessageSize {8,0});
+      id.copyTo(req.initId());
+      election->addReplica(req.send().getReplica());
+    }
+    return election->wait();
+  }
+
+  class Election final: public kj::Refcounted, private kj::TaskSet::ErrorHandler {
   public:
-    Election(ReplicaImpl& replica, MidLevelObject& object, Replica::Client replicaCap)
-        : replica(replica), object(object), replicaCap(kj::mv(replicaCap)),
-          quorumSize(replica.sibling.getConfig().getElectionQuorumSize()),
-          tasks(*this) {}
+    Election(ReplicaImpl& replica, MidLevelObject& object, Replica::Client replicaCap,
+             uint quorumSize,
+             kj::PromiseFulfillerPair<Leader::Client> leaderPaf =
+                 kj::newPromiseAndFulfiller<Leader::Client>())
+        : replica(replica), object(object), replicaCap(kj::mv(replicaCap)), quorumSize(quorumSize),
+          leaderFulfiller(kj::mv(leaderPaf.fulfiller)), leaderPromise(leaderPaf.promise.fork()),
+          tasks(*this) {
+      KJ_REQUIRE(replica.currentElection == nullptr);
+      replica.currentElection = *this;
+    }
+
+    ~Election() noexcept(false) {
+      cancel();
+    }
 
     void addReplica(Replica::Client otherReplica) {
       ++totalReplicas;
@@ -199,7 +250,17 @@ private:
     }
 
     kj::Promise<Leader::Client> wait() {
-      return kj::mv(leaderPaf.promise);
+      return leaderPromise.addBranch().attach(kj::addRef(*this));
+    }
+
+    uint getQuorumSize() { return quorumSize; }
+
+    void cancel() {
+      if (!canceled) {
+        replica.currentElection = nullptr;
+        leaderFulfiller->reject(KJ_EXCEPTION(DISCONNECTED, "election canceled"));
+        canceled = true;
+      }
     }
 
   private:
@@ -209,12 +270,13 @@ private:
     uint quorumSize;
     uint waitingCount = 0;
     uint totalReplicas = 0;
+    bool canceled = false;
 
     kj::Vector<capnp::Response<Replica::GetStateResults>> voters;
     kj::Maybe<kj::Exception> sampleException;
 
-    kj::PromiseFulfillerPair<Leader::Client> leaderPaf =
-        kj::newPromiseAndFulfiller<Leader::Client>();
+    kj::Own<kj::PromiseFulfiller<Leader::Client>> leaderFulfiller;
+    kj::ForkedPromise<Leader::Client> leaderPromise;
 
     kj::TaskSet tasks;
 
@@ -222,13 +284,13 @@ private:
       // Create the leader and fulfill the wait() promise.
 
       // Use isWaiting() to verify we didn't already finalize.
-      if (leaderPaf.fulfiller->isWaiting()) {
+      if (leaderFulfiller->isWaiting()) {
         if (voters.size() < quorumSize) {
           // We didn't get a quorum. Some replicas must have thrown exceptions.
-          leaderPaf.fulfiller->reject(kj::mv(KJ_ASSERT_NONNULL(sampleException)));
+          leaderFulfiller->reject(kj::mv(KJ_ASSERT_NONNULL(sampleException)));
         } else {
           bool isUnanimous = voters.size() == totalReplicas;
-          leaderPaf.fulfiller->fulfill(kj::heap<LeaderImpl>(
+          leaderFulfiller->fulfill(kj::heap<LeaderImpl>(
               replica.sibling.timer, replica.sibling.id,
               replica.sibling.getConfig().getWriteQuorumSize(),
               object, replicaCap, voters.releaseAsArray(), isUnanimous));
@@ -237,8 +299,37 @@ private:
     }
 
     void taskFailed(kj::Exception&& exception) override {
-      leaderPaf.fulfiller->reject(kj::mv(exception));
+      leaderFulfiller->reject(kj::mv(exception));
     }
+  };
+
+  class Cleaner final: public capnp::Capability::Server {
+    // Hacky capability that calls cleanup() on the replica when dropped. The only reason this
+    // implements Capability is so that it can be passed as `capToHold` to e.g. VoterImpl. The only
+    // reason we don't pass the ReplicaImpl itself as the capability is because we need to get
+    // notification that the cap is being dropped without ReplicaImpl's own destructor being
+    // called.
+
+  public:
+    Cleaner(ReplicaImpl& replica, Replica::Client replicaCap)
+        : replica(replica), replicaCap(kj::mv(replicaCap)) {
+      ++replica.cleanerCount;
+    }
+
+    ~Cleaner() noexcept(false) {
+      if (--replica.cleanerCount == 0) {
+        replica.cleanup();
+      }
+    }
+
+    kj::Promise<void> dispatchCall(uint64_t interfaceId, uint16_t methodId,
+        capnp::CallContext<capnp::AnyPointer, capnp::AnyPointer> context) override {
+      KJ_UNIMPLEMENTED("no methods");
+    }
+
+  private:
+    ReplicaImpl& replica;
+    Replica::Client replicaCap;
   };
 };
 
@@ -262,6 +353,7 @@ protected:
     for (auto backend: context.getParams().getBackends()) {
       addImpl(backend.getId(), backend.getShardId(), backend.getBackend());
     }
+    return kj::READY_NOW;
   }
 
   kj::Promise<void> add(AddContext context) override {

@@ -105,6 +105,9 @@ public:
 
   bool exists() { return !inner.is<Uncreated>(); }
 
+  bool isClean() { return !inner.is<Durable>(); }
+  // Returns true if the object can be safely deleted.
+
 private:
   JournalLayer& journal;
   ObjectId id;
