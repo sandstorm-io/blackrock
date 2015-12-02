@@ -216,14 +216,14 @@ limitations under the License.
       </table>
       <hr>
       {{#if referralBonus.storage}}
-    <p>
-      <span class="referral-bonus">Includes <a href="/referrals">referral bonus</a>: {{renderStorage referralBonus.storage}} storage
-        {{#if referralBonus.grains}}
-        and {{renderQuantity referralBonus.grains}} grains
-        {{/if}}
-      </span>
-    </p>
-    {{/if}}
+        <p>
+          <span class="referral-bonus">Includes <a href="/referrals">referral bonus</a>: {{renderStorage referralBonus.storage}} storage
+            {{#if referralBonus.grains}}
+              and {{renderQuantity referralBonus.grains}} grains
+            {{/if}}
+          </span>
+        </p>
+      {{/if}}
       <p>Based on current plan: <span class="plan-name">{{plan._id}}</span>
         <button class="change-plan">change plan</button></p>
     {{/if}}{{/with}}
