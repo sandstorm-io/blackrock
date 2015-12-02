@@ -182,6 +182,7 @@ limitations under the License.
 </template>
 
 <template name="billingUsage">
+  {{#if Template.subscriptionsReady}}
   <div class="usage">
     <h3>Usage</h3>
     {{#with plan=myPlan used=myUsage referralBonus=myReferralBonus}}{{#if plan}}
@@ -230,5 +231,6 @@ limitations under the License.
 
   {{#if showPrompt}}
     {{>billingPrompt reason="voluntary" topbar=topbar db=db onComplete=promptClosed}}
+  {{/if}}
   {{/if}}
 </template>
