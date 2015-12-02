@@ -226,10 +226,8 @@ var helpers = {
     return Math.floor(price / 100);
   },
   renderStorage: function (size, additionalSize) {
-    // Taking two parameters allows us to pass the referral bonus
-    // storage amount on the client side and use this function to
-    // add & format them together.
-//    debugger;
+    // Taking two parameters here allows to add them in a template helper, since we can't add
+    // numbers directly in Blaze.
     if (typeof additionalSize === "number") {
       size += additionalSize;
     }
@@ -260,10 +258,9 @@ var helpers = {
     }
     return size.toPrecision(3) + suffix;
   },
-  renderQuantity: function (n, m) {
-    var quantity = n;
-    if (typeof m === "number") {
-      quantity += m;
+  renderQuantity: function (quantity, additionalQuantity) {
+    if (typeof additionalQuantity === "number") {
+      quantity += additionalQuantity;
     }
     return (quantity === Infinity) ? "unlimited" : quantity.toString();
   },
