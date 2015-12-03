@@ -15,6 +15,7 @@
 #include <grp.h>
 #include <sandstorm/util.h>
 #include <sandstorm/spk.h>
+#include <stdlib.h>
 
 namespace blackrock {
 
@@ -117,6 +118,15 @@ void enterSandstormBundle() {
   sigset_t sigset;
   KJ_SYSCALL(sigemptyset(&sigset));
   KJ_SYSCALL(sigprocmask(SIG_SETMASK, &sigset, nullptr));
+
+  // The environment inherited from the host is probably no good for us. E.g. an oddball
+  // locale setting can crash Mongo because we don't have the appropriate locale files available.
+  KJ_SYSCALL(clearenv());
+
+  // Set up an environment appropriate for us.
+  KJ_SYSCALL(setenv("LANG", "C.UTF-8", true));
+  KJ_SYSCALL(setenv("PATH", "/usr/bin:/bin", true));
+  KJ_SYSCALL(setenv("LD_LIBRARY_PATH", "/usr/local/lib:/usr/lib:/lib", true));
 }
 
 kj::Maybe<kj::String> checkPgpSignatureInBundle(
