@@ -55,7 +55,8 @@ Template.billingSettings.onDestroyed(function () {
 
 Template.billingSettings.events({
   "click .add-card": function (ev) {
-    var frame = ev.target.parentElement.querySelector("iframe");
+    var frame = ev.target.parentElement.parentElement.querySelector("iframe");
+    console.log(ev.target);
     frame.contentWindow.postMessage({openDialog: true}, "*");
   },
   "click .delete-card": function (ev) {

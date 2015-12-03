@@ -35,7 +35,7 @@ limitations under the License.
     <table>
       <thead>
         <tr>
-          <td></td>
+          <td>Default</td>
           <td>Credit / Debit Card</td>
           <td>Expiry</td>
           <td>Delete</td>
@@ -45,27 +45,23 @@ limitations under the License.
         {{#each cards}}
           <tr class="card">
             <td class="checkbox">
-              {{#if isPrimary}}<span>Default</span>{{/if}}
               <label class="{{#if isPrimary}}selected{{/if}}">
-                {{#unless isPrimary}}Set default{{/unless}}
                 <input type="radio" class="make-primary-card" checked="{{isPrimary}}">
               </label>
             </td>
-            <td>{{brand}}: **** **** **** {{last4}}</td>
+            <td>{{brand}}: ***{{last4}}</td>
             <td>{{exp_month}}/{{exp_year}}</td><!-- TODO(soon): handle non-US formats -->
-            <td><button class="delete-card">Delete</button></td>
+            <td><button class="delete-card" title="Delete card">X</button></td>
           </tr>
         {{/each}}
         <tr>
           <td></td>
-          <td class="add-new-card {{#if showPrompt}}iframe-active{{/if}}">
+          <td class="add-new-card {{#if showPrompt}}iframe-active{{/if}}" colspan="3">
             {{#if checkoutData}}
               <iframe class="mobile-iframe-hack {{#if showPrompt}}fullscreen{{/if}}" src="{{paymentsUrl}}/checkout#{{checkoutData}}"></iframe>
             {{/if}}
             <label><button class="add-card">+</button> Add a new credit / debit card</label>
           </td>
-          <td></td>
-          <td></td>
         </tr>
       </tbody>
     </table>
