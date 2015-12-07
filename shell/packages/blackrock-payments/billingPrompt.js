@@ -264,7 +264,10 @@ var helpers = {
     }
     return (quantity === Infinity) ? "unlimited" : quantity.toString();
   },
-  renderPercent: function (num, denom) {
+  renderPercent: function (num, denom, additionalDenom) {
+    if (typeof additionalDenom === "number") {
+      denom += additionalDenom;
+    }
     return Math.min(100, Math.max(0, num / denom * 100)).toPrecision(3);
   },
   isSelecting: function () {
