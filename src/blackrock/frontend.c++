@@ -890,6 +890,7 @@ kj::Promise<void> FrontendImpl::execLoop(MongoInfo&& mongoInfo, uint replicaNumb
           ", \"allowDemoAccounts\":", config.getAllowDemoAccounts() ? "true" : "false",
           ", \"allowDevAccounts\": false"
           ", \"isTesting\":", config.getIsTesting() ? "true" : "false",
+          ", \"hideTroubleshooting\": true",
           ", \"wildcardHost\":\"", config.getWildcardHost(), "\""
           ", \"quotaEnabled\": true"
           ", \"stripePublicKey\":\"", config.getStripePublicKey(), "\""
