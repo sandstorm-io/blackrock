@@ -105,6 +105,22 @@ limitations under the License.
   {{/if}}
 </template>
 
+<template name="billingPromptFirstTime">
+  <div class="first-time-billing-prompt">
+    {{#if planChosen}}
+      <h2>Success!</h2>
+      <p class="success-note">You've selected <strong>{{myPlan._id}}</strong>.</p>
+      <button class="continue">Continue</button>
+    {{else}}
+      <h2>Choose a Plan</h2>
+
+      <p>Welcome! Choose a plan to start creating.</p>
+
+      {{>_billingPromptBody onComplete=onCompleteNoop topbar=topbar db=db accountsUi=accountsUi}}
+    {{/if}}
+  </div>
+</template>
+
 <template name="_billingPromptBody">
   <div class="subscriptions">
     <a class="free-note" href="https://blog.sandstorm.io/news/2015-08-31-oasis-beta-launch.html" target="_blank">
@@ -149,7 +165,11 @@ limitations under the License.
                 {{#if isUpgrade}}
                   Upgrade
                 {{else}}
-                  Downgrade
+                  {{#if isDowngrade}}
+                    Downgrade
+                  {{else}}
+                    Choose Plan
+                  {{/if}}
                 {{/if}}
               {{/if}}
             </button>
@@ -172,9 +192,10 @@ limitations under the License.
     </div><div class="answer">
       <h4>What if I'm not ready to upgrade?</h4>
 
-      <p>You'll need to delete one of your existing grains before you can create a new one.
-        Open a grain and click <span class="trash">the delete button</span> in the top bar.
-        Or, since Sandstorm is Open Source you can <a href="https://sandstorm.io/install/" target="_blank">install your own server »</a></p>
+      <p>If you run out of space, you'll need to delete one of your existing grains before you can
+        create a new one. Open a grain and click <span class="trash">the delete button</span> in
+        the top bar. Or, since Sandstorm is Open Source you can
+        <a href="https://sandstorm.io/install/" target="_blank">install your own server »</a></p>
     </div>
 
     <a class="button" href="mailto:support@sandstorm.io" target="_blank">Contact Support</a>

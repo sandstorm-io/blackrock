@@ -135,7 +135,7 @@ function clickPlanHelper(context, ev) {
   var template = Template.instance();
   var planName = context._id;
 
-  if (context.isCurrent && ((Meteor.user().plan || "free") === planName)) {
+  if (context.isCurrent && Meteor.user().plan === planName) {
     // Clicked on current plan. Treat as dismiss.
     template.data.onComplete(false);
     return;
@@ -174,6 +174,14 @@ Template._billingPromptPopup.events({
   }
 });
 
+Template.billingPromptFirstTime.events({
+  "click .continue": function (ev) {
+    if (this.onComplete) {
+      this.onComplete(true);
+    }
+  }
+});
+
 Template._billingPromptBody.events({
   "click .subscription": function (ev) {
     clickPlanHelper(this, ev);
@@ -202,6 +210,9 @@ var helpers = {
       email: primaryEmail.email,
     }));
   },
+  planChosen: function () {
+    return !!Meteor.user().plan;
+  },
   plans: function () {
     var plans = this.db.listPlans().fetch();
     var data = StripeCustomerData.findOne();
@@ -213,8 +224,9 @@ var helpers = {
     plans.forEach(function (plan) {
       if (plan._id === myPlanName) {
         plan.isCurrent = true;
-      } else {
-        plan.isUpgrade = !myPlan || plan.price > myPlan.price;
+      } else if (myPlan) {
+        plan.isUpgrade = plan.price > myPlan.price;
+        plan.isDowngrade = plan.price < myPlan.price;
       }
     });
     return plans;
@@ -304,6 +316,7 @@ var helpers = {
       }
     }
   },
+  onCompleteNoop: function () {},
   isComplete: function () {
     return Template.instance()._isComplete.get();
   },
@@ -319,3 +332,4 @@ var helpers = {
 Template._billingPromptBody.helpers(helpers);
 Template._billingPromptPopup.helpers(helpers);
 Template.billingUsage.helpers(helpers);
+Template.billingPromptFirstTime.helpers(helpers);
