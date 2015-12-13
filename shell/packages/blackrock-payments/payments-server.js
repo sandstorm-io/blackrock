@@ -186,33 +186,36 @@ var methods = {
     var planInfo = this.connection.sandstormDb.getPlan(newPlan);
 
     var payments = Meteor.user().payments;
-    if (!payments) {
-      throw new Meteor.Error(403, "User must have stripe data already");
-    }
-    var customerId = payments.id;
-    var data = Meteor.wrapAsync(stripe.customers.retrieve.bind(stripe.customers))(customerId);
+    if (payments) {
+      var customerId = payments.id;
+      var data = Meteor.wrapAsync(stripe.customers.retrieve.bind(stripe.customers))(customerId);
 
-    if (newPlan === "free") {
-      if (data.subscriptions && data.subscriptions.data.length > 0) {
-        // TODO(someday): pass in at_period_end and properly handle pending cancelled subscriptions
-        Meteor.wrapAsync(stripe.customers.cancelSubscription.bind(stripe.customers))(
-          customerId,
-          data.subscriptions.data[0].id
-        );
-      }
-      // else: no subscriptions exist so we're already set to free
-    } else {
-      if (data.subscriptions && data.subscriptions.data.length > 0) {
-        Meteor.wrapAsync(stripe.customers.updateSubscription.bind(stripe.customers))(
-          customerId,
-          data.subscriptions.data[0].id,
-          {plan: newPlan + "-beta"}
-        );
+      if (newPlan === "free") {
+        if (data.subscriptions && data.subscriptions.data.length > 0) {
+          // TODO(someday): pass in at_period_end and properly handle pending cancelled subscriptions
+          Meteor.wrapAsync(stripe.customers.cancelSubscription.bind(stripe.customers))(
+            customerId,
+            data.subscriptions.data[0].id
+          );
+        }
+        // else: no subscriptions exist so we're already set to free
       } else {
-        Meteor.wrapAsync(stripe.customers.createSubscription.bind(stripe.customers))(
-          customerId,
-          {plan: newPlan + "-beta"}
-        );
+        if (data.subscriptions && data.subscriptions.data.length > 0) {
+          Meteor.wrapAsync(stripe.customers.updateSubscription.bind(stripe.customers))(
+            customerId,
+            data.subscriptions.data[0].id,
+            {plan: newPlan + "-beta"}
+          );
+        } else {
+          Meteor.wrapAsync(stripe.customers.createSubscription.bind(stripe.customers))(
+            customerId,
+            {plan: newPlan + "-beta"}
+          );
+        }
+      }
+    } else {
+      if (newPlan !== "free") {
+        throw new Meteor.Error(403, "User must have stripe data already");
       }
     }
 
