@@ -68,7 +68,8 @@ Template.billingPrompt.helpers({
 });
 
 Template._billingPromptPopup.onCreated(function () {
-  this._oldPlan = Meteor.user().plan || "free";
+  var plan = this.data.db.getMyPlan();
+  this._oldPlanTitle = plan.title || plan._id;
   this._isComplete = new ReactiveVar(false);
 });
 
@@ -134,6 +135,14 @@ Template.billingUsage.events({
 function clickPlanHelper(context, ev) {
   var template = Template.instance();
   var planName = context._id;
+
+  if (template.data.db.getMyPlan().hidden) {
+    if (!window.confirm(
+        "You are currently on a discontinued plan. If you switch plans, you will not " +
+        "be able to switch back. Are you sure?")) {
+      return;
+    }
+  }
 
   if (context.isCurrent && Meteor.user().plan === planName) {
     // Clicked on current plan. Treat as dismiss.
@@ -229,7 +238,11 @@ var helpers = {
         plan.isDowngrade = plan.price < myPlan.price;
       }
     });
-    return plans;
+
+    // Filter hidden plans, except for the user's own plan.
+    return _.filter(plans, function (plan) {
+      return !plan.hidden || plan.isCurrent;
+    });
   },
   renderCu: function (n) {
     return Math.floor(n / 1000000 / 3600);
@@ -320,8 +333,11 @@ var helpers = {
   isComplete: function () {
     return Template.instance()._isComplete.get();
   },
+  planTitle: function (plan) {
+    return plan.title || plan._id;
+  },
   oldPlan: function () {
-    return Template.instance()._oldPlan;
+    return Template.instance()._oldPlanTitle;
   },
   isShowingIframe: function () {
     var data = StripeCards.find();

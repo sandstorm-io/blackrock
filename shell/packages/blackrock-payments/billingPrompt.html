@@ -53,7 +53,7 @@ limitations under the License.
   {{#if isComplete}}
     <h2>Success!</h2>
     <p class="success-note">You've changed your plan from <strong>{{oldPlan}}</strong> to
-      <strong>{{myPlan._id}}</strong>.</p>
+      <strong>{{planTitle myPlan}}</strong>.</p>
     <button class="continue">Continue</button>
   {{else}}
 
@@ -109,7 +109,7 @@ limitations under the License.
   <div class="first-time-billing-prompt">
     {{#if planChosen}}
       <h2>Success!</h2>
-      <p class="success-note">You've selected <strong>{{myPlan._id}}</strong>.</p>
+      <p class="success-note">You've selected <strong>{{planTitle myPlan}}</strong>.</p>
       <button class="continue">Continue</button>
     {{else}}
       <h2>Choose a Plan</h2>
@@ -135,7 +135,7 @@ limitations under the License.
 
         <p>{{#if isCurrent}}Current Plan{{else}}&nbsp;{{/if}}</p>
         <table>
-          <tr><td>{{_id}}</td></tr>
+          <tr><td>{{planTitle .}}</td></tr>
           <tr><td>
             {{#if price}}
               <p>${{renderDollars price}}</p>
@@ -253,7 +253,7 @@ limitations under the License.
           </span>
         </p>
       {{/if}}
-      <p>Based on current plan: <span class="plan-name">{{plan._id}}</span>
+      <p>Based on current plan: <span class="plan-name">{{planTitle plan}}</span>
         <button class="change-plan">change plan</button></p>
     {{/if}}{{/with}}
   </div>

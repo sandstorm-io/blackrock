@@ -185,6 +185,10 @@ var methods = {
 
     var planInfo = this.connection.sandstormDb.getPlan(newPlan);
 
+    if (planInfo.hidden) {
+      throw new Meteor.Error(403, "Can't choose discontinued plan.");
+    }
+
     var payments = Meteor.user().payments;
     if (payments) {
       var customerId = payments.id;
