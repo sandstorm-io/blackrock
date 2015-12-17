@@ -15,7 +15,8 @@
 // limitations under the License.
 
 var Crypto = Npm.require("crypto");
-var HOSTNAME = process.env.ROOT_URL;
+var ROOT_URL = process.env.ROOT_URL;
+var HOSTNAME = Url.parse(ROOT_URL).hostname;
 var stripe = Npm.require("stripe")(Meteor.settings.stripeKey);
 
 BlackrockPayments = {};
@@ -33,7 +34,7 @@ var serveSandcat = Meteor.bindEnvironment(function (res) {
 });
 
 function hashId(id) {
-  return Crypto.createHash("sha256").update(HOSTNAME + ":" + id).digest("base64");
+  return Crypto.createHash("sha256").update(ROOT_URL + ":" + id).digest("base64");
 }
 
 function findOriginalId(hashedId, customerId) {
@@ -57,6 +58,157 @@ function sanitizeSource(source, isPrimary) {
   return result;
 }
 
+var inFiber = Meteor.bindEnvironment(function (callback) {
+  callback();
+});
+
+function renderPrice(amount) {
+  var dollars = Math.floor(amount / 100);
+  var cents = amount % 100;
+  if (cents < 10) cents = "0" + cents;
+  return dollars + "." + cents;
+}
+
+function handleWebhookEvent(db, event) {
+  // WE CANNOT TRUST THE EVENT. We have no proof it came from Stripe.
+  //
+  // We could tell Stripe te authenticate with HTTP Basic Auth, but that's ugly and
+  // introduces a new password that needs to be secured. Instead, we turn right around and
+  // fetch the event back from Stripe based on the ID.
+  //
+  // There is still a problem: if an external user can guess event IDs they can reply old
+  // events. Therefore when an event causes us to make a change, we ensure that the event
+  // is idempotent and also refuse to process the event if it's timestamp is older than the
+  // latest change to the same target.
+
+  // Fetch the event from Stripe.
+  event = Meteor.wrapAsync(stripe.events.retrieve.bind(stripe.events))(event.id);
+
+  var timestamp = new Date(event.created * 1000);
+
+  if (event.type === "invoice.payment_succeeded" || event.type === "invoice.payment_failed") {
+    var invoice = event.data.object;
+    var user = Meteor.users.findOne({"payments.id": invoice.customer});
+    if (!user) {
+      throw new Error("no such customer");
+    }
+
+    if (user.payments.lastInvoiceTime && user.payments.lastInvoiceTime >= event.created) {
+      console.log("ignoring duplicate invoice event");
+      return;
+    }
+
+    var plan = db.getPlan(user.plan || free);
+    var planTitle = plan.title || (plan._id.charAt(0).toUpperCase() + plan._id.slice(1));
+    var priceText = renderPrice(plan.price);
+
+    // Send an email.
+    var email = _.find(SandstormDb.getUserEmails(user), function (email) { return email.primary; });
+    if (!email) {
+      email = Meteor.wrapAsync(stripe.customers.retrieve.bind(stripe.customers))
+          (invoice.customer).email;
+    }
+
+    var mailSubject;
+    var mailText;
+    var mailHtml;
+    if (event.type === "invoice.payment_failed") {
+      mailSubject = "Invoice from Sandstorm Oasis";
+      mailText =
+          "You have a new invoice from Sandstorm Oasis:\n" +
+          "\n" +
+          "1 month " + platTitle + " plan: $" + priceText + "\n" +
+          "Beta discount: -$" + priceText + "\n" +
+          "======================================================\n" +
+          "Total: $0\n" +
+          "\n" +
+          "This invoice has already been paid using the payment info we have on file.\n" +
+          "\n" +
+          "Thank you!\n";
+      mailHtml =
+          "<p>You have a new invoice from Sandstorm Oasis:</p>\n" +
+          "<table>\n" +
+          "<tr><td>1 month " + platTitle + " plan</td><td>$" + priceText + "</td></tr>\n" +
+          "<tr><td>Beta discount</td><td>-$" + priceText + "</td></tr>\n" +
+          "======================================================\n" +
+          "<tr><td>Total</td><td>$0</td></tr>\n" +
+          "</table>\n" +
+          "<p>This invoice has already been paid using the payment info we have on file.</p>\n" +
+          "<p>Thank you!</p>\n";
+    } else {
+      mailSubject = "URGENT: Payment failed for Sansdtorm Oasis";
+      mailText =
+          "We were unable to charge your payment method to renew your " +
+          "subscription to Sandstorm Oasis. Your account has been " +
+          "demoted to the free plan. Please click on the link below to " +
+          "log into your account and update your payment info, then " +
+          "switch back to a paid plan.\n" +
+          "\n" +
+          ROOT_URL + "/account\n";
+      mailHtml =
+          "<p>We were unable to charge your payment method to renew your " +
+          "subscription to Sandstorm Oasis. Your account has been " +
+          "demoted to the free plan. Please click on the link below to " +
+          "log into your account and update your payment info, then " +
+          "switch back to a paid plan.</p>\n" +
+          "<p><a href=\"" + ROOT_URL + "/account\">" + ROOT_URL + "/account</a></p>\n";
+    }
+
+    if (email) {
+      SandstormEmail.send({
+        to: emailAddress,
+        from: "Sandstorm Oasis <no-reply@" + HOSTNAME + ">",
+        subject: "Invoice from Sandstorm Oasis",
+        text: mailText,
+        html: mailHtml,
+      });
+    } else {
+      console.error("customer has no email address", invoice.customer);
+    }
+
+    var mod = {"payments.lastInvoiceTime": event.created};
+    if (event.type === "invoice.payment_failed") {
+      // Cancel plan.
+      // TODO(soon): Some sort of grace period.
+      mod.plan = "free";
+      var data = Meteor.wrapAsync(
+          stripe.customers.retrieve.bind(stripe.customers))(invoice.customer);
+      if (data.subscriptions && data.subscriptions.data.length > 0) {
+        Meteor.wrapAsync(stripe.customers.cancelSubscription.bind(stripe.customers))(
+            invoice.customer, data.subscriptions.data[0].id);
+      }
+    }
+
+    Meteor.users.update({_id: user._id}, {$set: mod});
+  }
+}
+
+function processWebhook(db, req, res) {
+  var data = "";
+  req.on("data", function (chunk) {
+    data += chunk;
+  });
+
+  req.on("error", function (err) {
+    res.writeHead(400, { "Content-Type": "text/plain" });
+    res.end("error receiving request");
+  });
+
+  req.on("end", function () {
+    inFiber(function () {
+      try {
+        handleWebhookEvent(db, JSON.parse(data));
+        res.writeHead(200, { "Content-Type": "text/plain" });
+        res.end("success");
+      } catch (err) {
+        console.error("error processing Stripe webhook:", err.stack, "\ndata:", data);
+        res.writeHead(500, { "Content-Type": "text/plain" });
+        res.end("internal server error");
+      }
+    });
+  });
+}
+
 BlackrockPayments.makeConnectHandler = function (db) {
   return function (req, res, next) {
     if (req.headers.host == db.makeWildcardHost("payments")) {
@@ -64,6 +216,8 @@ BlackrockPayments.makeConnectHandler = function (db) {
         serveCheckout(res);
       } else if (req.url == "/sandstorm-purplecircle.png") {
         serveSandcat(res);
+      } else if (req.url === "/webhook") {
+        processWebhook(db, req, res);
       } else {
         res.writeHead(404, { "Content-Type": "text/plain" });
         res.end("404 not found: " + req.url);
@@ -196,7 +350,7 @@ var methods = {
 
       if (newPlan === "free") {
         if (data.subscriptions && data.subscriptions.data.length > 0) {
-          // TODO(someday): pass in at_period_end and properly handle pending cancelled subscriptions
+          // TODO(soon): pass in at_period_end and properly handle pending cancelled subscriptions
           Meteor.wrapAsync(stripe.customers.cancelSubscription.bind(stripe.customers))(
             customerId,
             data.subscriptions.data[0].id
