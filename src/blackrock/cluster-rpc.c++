@@ -370,7 +370,7 @@ public:
 private:
   friend class PrivateKey;
   SymmetricKey(const byte theirPublic[], const byte myPrivate[]) {
-    crypto_scalarmult_curve25519(secret, myPrivate, theirPublic);
+    KJ_ASSERT(crypto_scalarmult_curve25519(secret, myPrivate, theirPublic) == 0);
   }
 
   byte secret[crypto_scalarmult_curve25519_BYTES];
@@ -414,7 +414,7 @@ VatNetwork::PrivateKey::PrivateKey() {
   // Apparently libsodium doesn't currently support generating a key for you. According to
   // http://cr.yp.to/ecdh.html, the following should produce a key.
 
-  sodium_init();
+  KJ_ASSERT(sodium_init() != -1);
 
   key = reinterpret_cast<byte*>(sodium_malloc(crypto_scalarmult_curve25519_BYTES));
   randombytes_buf(key, crypto_scalarmult_curve25519_BYTES);
@@ -618,6 +618,9 @@ public:
     //
     // Returns false if a full connection had already been established, in which case the
     // ConnectionImpl object needs to be entirely replaced.
+    //
+    // TODO(perf): Authenticating the stream presumably involved computing the shared secret, so
+    //   pass it in here to avoid recomputation.
 
     if (connectionNumber < minConnectionNumber) {
       // Ignore accepted connection; our existing one takes priority.
