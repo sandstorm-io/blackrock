@@ -127,19 +127,17 @@ function renderPrice(amount) {
 function handleWebhookEvent(db, event) {
   // WE CANNOT TRUST THE EVENT. We have no proof it came from Stripe.
   //
-  // We could tell Stripe te authenticate with HTTP Basic Auth, but that's ugly and
+  // We could tell Stripe to authenticate with HTTP Basic Auth, but that's ugly and
   // introduces a new password that needs to be secured. Instead, we turn right around and
   // fetch the event back from Stripe based on the ID.
   //
-  // There is still a problem: if an external user can guess event IDs they can reply old
+  // There is still a problem: if an external user can guess event IDs they can replay old
   // events. Therefore when an event causes us to make a change, we ensure that the event
   // is idempotent and also refuse to process the event if it's timestamp is older than the
   // latest change to the same target.
 
   // Fetch the event from Stripe.
   event = Meteor.wrapAsync(stripe.events.retrieve.bind(stripe.events))(event.id);
-
-  var timestamp = new Date(event.created * 1000);
 
   if (event.type === "invoice.payment_succeeded" || event.type === "invoice.payment_failed") {
     var invoice = event.data.object;
