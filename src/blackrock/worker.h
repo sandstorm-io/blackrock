@@ -126,7 +126,6 @@ protected:
 private:
   class RunningGrain;
   class PackageUploadStreamImpl;
-  class SandstormCoreImpl;
   struct CommandInfo;
 
   kj::LowLevelAsyncIoProvider& ioProvider;
@@ -140,7 +139,7 @@ private:
       PackageInfo::Reader packageInfo, kj::Own<capnp::MessageBuilder> grainState,
       sandstorm::Assignable<GrainState>::Setter::Client grainStateSetter, Volume::Client grainVolume,
       sandstorm::spk::Manifest::Command::Reader command, bool isNew,
-      kj::String grainIdForLogging);
+      kj::String grainIdForLogging, sandstorm::SandstormCore::Client core);
 
   void taskFailed(kj::Exception&& exception) override;
 };

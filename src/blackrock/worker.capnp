@@ -7,6 +7,7 @@
 $import "/capnp/c++.capnp".namespace("blackrock");
 
 using Supervisor = import "/sandstorm/supervisor.capnp".Supervisor;
+using SandstormCore = import "/sandstorm/supervisor.capnp".SandstormCore;
 using Grain = import "/sandstorm/grain.capnp";
 using Storage = import "storage.capnp";
 using StorageSchema = import "storage-schema.capnp";
@@ -24,7 +25,8 @@ interface Worker {
   newGrain @0 (package :PackageInfo,
                command :Package.Manifest.Command,
                storage :Storage.StorageFactory,
-               grainIdForLogging :Text)
+               grainIdForLogging :Text,
+               core :SandstormCore)
            -> (grain :Supervisor, grainState :Storage.OwnedAssignable(GrainState));
   # Start a new grain using the given package.
   #
@@ -37,7 +39,8 @@ interface Worker {
                    grainState :GrainState,
                    exclusiveGrainStateSetter :Util.Assignable(GrainState).Setter,
                    exclusiveVolume :Storage.Volume,
-                   grainIdForLogging :Text)
+                   grainIdForLogging :Text,
+                   core :SandstormCore)
                -> (grain :Supervisor);
   # Continue an existing grain.
   #

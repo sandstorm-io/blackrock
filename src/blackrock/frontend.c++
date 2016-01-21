@@ -20,8 +20,9 @@ namespace blackrock {
 
 class FrontendImpl::BackendImpl: public sandstorm::Backend::Server {
 public:
-  BackendImpl(FrontendImpl& frontend, kj::Timer& timer)
-      : frontend(frontend), timer(timer) {}
+  BackendImpl(FrontendImpl& frontend, kj::Timer& timer,
+              sandstorm::SandstormCoreFactory::Client&& sandstormCoreFactory)
+      : frontend(frontend), timer(timer), coreFactory(kj::mv(sandstormCoreFactory)) {}
 
 protected:
   kj::Promise<void> ping(PingContext context) override {
@@ -33,6 +34,12 @@ protected:
     auto packageId = params.getPackageId();
     auto grainId = params.getGrainId();
     KJ_LOG(INFO, "Backend: startGrain", grainId, packageId);
+
+    sandstorm::SandstormCore::Client core = ({
+      auto req = coreFactory.getSandstormCoreRequest();
+      req.setGrainId(grainId);
+      req.send().getCore();
+    });
 
     StorageRootSet::Client storage = frontend.storageRoots->chooseOne();
     StorageFactory::Client storageFactory = storage.getFactoryRequest().send().getFactory();
@@ -68,6 +75,7 @@ protected:
         req.setCommand(params.getCommand());
         req.setStorage(kj::mv(storageFactory));
         req.setGrainIdForLogging(grainId);
+        req.setCore(core);
         req.send();
       });
 
@@ -78,7 +86,8 @@ protected:
       return addGrainToUser(kj::mv(ownerGet), grainId, kj::mv(grainState));
     } else {
       return ownerGet.then(
-          [this,context,params,packageId,grainId,KJ_MVCAP(storageFactory),KJ_MVCAP(packageVolume)]
+          [this,context,params,packageId,grainId,
+           KJ_MVCAP(storageFactory),KJ_MVCAP(packageVolume),KJ_MVCAP(core)]
           (auto&& getResults) mutable {
         for (auto grainInfo: getResults.getValue().getGrains()) {
           if (grainInfo.getId() == grainId) {
@@ -88,7 +97,8 @@ protected:
             //   for continueGrain() to finish, but we need `packageId` and `command` to stay
             //   live in the continueGrain() loop. Make a copy?
             return continueGrain({grainInfo.getState(), kj::mv(storageFactory),
-                    kj::mv(packageVolume), packageId, grainId, params.getCommand()})
+                    kj::mv(packageVolume), packageId, grainId, params.getCommand(),
+                    kj::mv(core)})
                 .then([context](sandstorm::Supervisor::Client supervisor) mutable {
               context.getResults(capnp::MessageSize { 4, 1 })
                   .setSupervisor(kj::mv(supervisor));
@@ -531,6 +541,7 @@ protected:
 private:
   FrontendImpl& frontend;
   kj::Timer& timer;
+  sandstorm::SandstormCoreFactory::Client coreFactory;
 
   class PackageUploadStreamImpl: public sandstorm::Backend::PackageUploadStream::Server {
   public:
@@ -641,6 +652,7 @@ private:
     capnp::Text::Reader packageId;
     capnp::Text::Reader grainIdForLogging;
     sandstorm::spk::Manifest::Command::Reader command;
+    sandstorm::SandstormCore::Client core;
   };
 
   kj::Promise<sandstorm::Supervisor::Client> continueGrain(
@@ -683,6 +695,7 @@ private:
           req.setExclusiveGrainStateSetter(grainGetResult.getSetter());
           req.setExclusiveVolume(volume.getExclusiveRequest().send().getExclusive());
           req.setGrainIdForLogging(params.grainIdForLogging);
+          req.setCore(params.core);
 
           return req.send().getGrain();
         }
@@ -782,15 +795,19 @@ struct FrontendImpl::MongoInfo {
 
 FrontendImpl::FrontendImpl(kj::Network& network, kj::Timer& timer,
                            sandstorm::SubprocessSet& subprocessSet,
-                           FrontendConfig::Reader config, uint replicaNumber)
+                           FrontendConfig::Reader config, uint replicaNumber,
+                           kj::PromiseFulfillerPair<sandstorm::Backend::Client> paf)
     : timer(timer),
       subprocessSet(subprocessSet),
-      capnpServer(kj::heap<BackendImpl>(*this, timer)),
+      capnpServer(kj::mv(paf.promise)),
       storageRoots(kj::refcounted<BackendSetImpl<StorageRootSet>>()),
       storageFactories(kj::refcounted<BackendSetImpl<StorageFactory>>()),
       workers(kj::refcounted<BackendSetImpl<Worker>>()),
       mongos(kj::refcounted<BackendSetImpl<Mongo>>()),
       tasks(*this) {
+  paf.fulfiller->fulfill(kj::heap<BackendImpl>(*this, timer,
+      capnpServer.getBootstrap().castAs<sandstorm::SandstormCoreFactory>()));
+
   setConfig(config);
 
   kj::StringPtr socketPath = sandstorm::Backend::SOCKET_PATH;

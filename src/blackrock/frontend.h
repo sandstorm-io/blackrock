@@ -24,7 +24,9 @@ namespace blackrock {
 class FrontendImpl: public Frontend::Server, private kj::TaskSet::ErrorHandler {
 public:
   FrontendImpl(kj::Network& network, kj::Timer& timer, sandstorm::SubprocessSet& subprocessSet,
-               FrontendConfig::Reader config, uint replicaNumber);
+               FrontendConfig::Reader config, uint replicaNumber,
+               kj::PromiseFulfillerPair<sandstorm::Backend::Client> paf =
+                   kj::newPromiseAndFulfiller<sandstorm::Backend::Client>());
 
   void setConfig(FrontendConfig::Reader config);
 

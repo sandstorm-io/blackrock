@@ -409,11 +409,6 @@ void PackageMountSet::PackageMount::unregister() {
 
 // =======================================================================================
 
-class WorkerImpl::SandstormCoreImpl: public sandstorm::SandstormCore::Server {
-public:
-  // TODO(someday): implement SandstormCore interface
-};
-
 class WorkerImpl::RunningGrain {
   // Encapsulates executing a grain on the worker.
 
@@ -427,7 +422,8 @@ public:
                kj::Own<kj::AsyncIoStream> capnpSocket,
                kj::Own<PackageMountSet::PackageMount> packageMountParam,
                sandstorm::Subprocess::Options&& subprocessOptions,
-               kj::String grainIdForLoggingParam)
+               kj::String grainIdForLoggingParam,
+               sandstorm::SandstormCore::Client core)
       : worker(worker),
         workerCap(kj::mv(workerCap)),
         grainState(kj::mv(grainState)),
@@ -448,7 +444,7 @@ public:
         subprocess(kj::mv(subprocessOptions)),
         processWaitTask(worker.subprocessSet.waitForSuccess(subprocess)),
         capnpSocket(kj::mv(capnpSocket)),
-        rpcClient(*this->capnpSocket, kj::heap<SandstormCoreImpl>()),
+        rpcClient(*this->capnpSocket, kj::mv(core)),
         persistentRegistration(worker.persistentRegistry, rpcClient.bootstrap()),
         grainIdForLogging(kj::mv(grainIdForLoggingParam)) {
     KJ_LOG(INFO, "starting grain", grainIdForLogging);
@@ -580,7 +576,7 @@ kj::Promise<void> WorkerImpl::newGrain(NewGrainContext context) {
   sandstorm::Supervisor::Client supervisor = bootGrain(params.getPackage(),
       kj::mv(grainStateHolder), kj::mv(setter),
       kj::mv(exclusiveVolume), params.getCommand(), true,
-      kj::heapString(params.getGrainIdForLogging()));
+      kj::heapString(params.getGrainIdForLogging()), params.getCore());
 
   supervisorPaf.fulfiller->fulfill(kj::cp(supervisor));
 
@@ -606,7 +602,7 @@ kj::Promise<void> WorkerImpl::restoreGrain(RestoreGrainContext context) {
   auto supervisor = bootGrain(
       params.getPackage(), kj::mv(grainStateHolder), setter,
       params.getExclusiveVolume(), params.getCommand(), false,
-      kj::heapString(params.getGrainIdForLogging()));
+      kj::heapString(params.getGrainIdForLogging()), params.getCore());
 
   mutableGrainState.setActive(supervisor);
 
@@ -624,14 +620,15 @@ sandstorm::Supervisor::Client WorkerImpl::bootGrain(
     PackageInfo::Reader packageInfo, kj::Own<capnp::MessageBuilder> grainState,
     sandstorm::Assignable<GrainState>::Setter::Client grainStateSetter, Volume::Client grainVolume,
     sandstorm::spk::Manifest::Command::Reader commandReader, bool isNew,
-    kj::String grainIdForLogging) {
+    kj::String grainIdForLogging, sandstorm::SandstormCore::Client core) {
   // Copy command info from params, since params will no longer be valid when we return.
   CommandInfo command(commandReader);
 
   // Make sure the package is mounted, then start the grain.
   return packageMountSet.getPackage(packageInfo)
       .then([this,isNew,KJ_MVCAP(grainState),KJ_MVCAP(grainStateSetter),
-             KJ_MVCAP(command),KJ_MVCAP(grainVolume),KJ_MVCAP(grainIdForLogging)]
+             KJ_MVCAP(command),KJ_MVCAP(grainVolume),KJ_MVCAP(grainIdForLogging),
+             KJ_MVCAP(core)]
             (auto&& packageMount) mutable {
     // Create the NBD socketpair. The Supervisor will actually mount the NBD device (in its own
     // mount namespace) but we'll implement it in the Worker.
@@ -689,7 +686,7 @@ sandstorm::Supervisor::Client WorkerImpl::bootGrain(
     auto grain = kj::heap<RunningGrain>(
         *this, thisCap(), kj::mv(grainState), kj::mv(grainStateSetter), kj::mv(nbdUserEnd),
         kj::mv(grainVolume), kj::mv(capnpWorkerEnd), kj::mv(packageMount), kj::mv(options),
-        kj::mv(grainIdForLogging));
+        kj::mv(grainIdForLogging), kj::mv(core));
 
     auto supervisor = grain->getSupervisor();
 
