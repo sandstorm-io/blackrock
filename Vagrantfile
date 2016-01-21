@@ -21,6 +21,18 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
   # to be modifying the source directory. Mount it read-only.
   config.vm.synced_folder ".", "/blackrock", :mount_options => ["ro"]
 
+  # The directory ".local" should contain two ext4 disk images: "storage"
+  # and "mongo". Server state will be stored in these so that
+  # "vagrant destroy"ing all VMs and bringing them back up doesn't mean
+  # wiping storage. To create this directory, do something like:
+  #
+  #     mkdir .local
+  #     truncate -s 10737418240 .local/storage
+  #     truncate -s 10737418240 .local/mongo
+  #     /sbin/mkfs.ext4 .local/storage
+  #     /sbin/mkfs.ext4 .local/mongo
+  config.vm.synced_folder ".local", "/blackrock-local"
+
   # Don't check for image updates on every run; could be slow.
   config.vm.box_check_update = false
 
@@ -31,6 +43,10 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
 
   config.vm.define "storage0" do |storage0|
     storage0.vm.network "private_network", ip: "172.28.128.10"
+
+    storage0.vm.provision "shell",
+        inline: "mkdir -p /var/blackrock/storage && mount /blackrock-local/storage /var/blackrock/storage",
+        run: "always"
   end
   config.vm.define "worker0" do |worker0|
     worker0.vm.network "private_network", ip: "172.28.128.20"
@@ -55,5 +71,9 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
   end
   config.vm.define "mongo0" do |mongo0|
     mongo0.vm.network "private_network", ip: "172.28.128.50"
+
+    mongo0.vm.provision "shell",
+        inline: "mkdir -p /var/blackrock/bundle && mount /blackrock-local/mongo /var/blackrock/bundle",
+        run: "always"
   end
 end
