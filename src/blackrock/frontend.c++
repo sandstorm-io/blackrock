@@ -914,6 +914,8 @@ kj::Promise<void> FrontendImpl::execLoop(MongoInfo&& mongoInfo, uint replicaNumb
           ", \"allowUninvited\":", config.getAllowUninvited() ? "true" : "false",
           "}"
           ", \"stripeKey\":\"", config.getStripeKey(), "\""
+          ", \"mailchimpKey\":\"", config.getMailchimpKey(), "\""
+          ", \"mailchimpListId\":\"", config.getMailchimpListId(), "\""
           ", \"replicaNumber\":", replicaNumber,
           "}").cStr(), true));
 

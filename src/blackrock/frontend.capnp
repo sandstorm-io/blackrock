@@ -47,6 +47,9 @@ struct FrontendConfig {
   stripeKey @6 :Text;
   stripePublicKey @7 :Text;
 
+  mailchimpKey @10 :Text;
+  mailchimpListId @11 :Text;
+
   allowUninvited @8 :Bool;
 
   replicasPerMachine @9 :UInt32;
