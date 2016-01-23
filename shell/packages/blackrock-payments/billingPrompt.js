@@ -97,8 +97,24 @@ Template._billingPromptBody.onDestroyed(function () {
 });
 
 Template.billingUsage.onCreated(function () {
-  this.subscribe("getMyUsage");
+  this.subscribe("myBonuses");
   this._showPrompt = new ReactiveVar(false);
+
+  var self = this;
+  this.autorun(function () {
+    // Force resubscribe to getMyUsage when plan changes, to recompute referral bonus.
+    // Note that we use Meteor.subscribe() and manage the subscription manually because otherwise
+    // reseting the subscription causes the template to flicker which does weird things to the
+    // billing prompt popup window.
+    // TODO(cleanup): This is pretty ugly.
+    Meteor.users.findOne({_id: Meteor.userId()}, {fields: {plan: 1}});
+    if (self._usageSubscription) self._usageSubscription.stop();
+    self._usageSubscription = Meteor.subscribe("getMyUsage");
+  });
+});
+
+Template.billingUsage.onDestroyed(function () {
+  if (self._usageSubscription) self._usageSubscription.stop();
 });
 
 Template.billingUsage.helpers({
@@ -238,12 +254,7 @@ var helpers = {
   renderDollars: function (price) {
     return Math.floor(price / 100);
   },
-  renderStorage: function (size, additionalSize) {
-    // Taking two parameters here allows to add them in a template helper, since we can't add
-    // numbers directly in Blaze.
-    if (typeof additionalSize === "number") {
-      size += additionalSize;
-    }
+  renderStorage: function (size) {
     var suffix = "B";
     if (size >= 1000000000) {
       size = size / 1000000000;
@@ -271,16 +282,10 @@ var helpers = {
     }
     return size.toPrecision(3) + suffix;
   },
-  renderQuantity: function (quantity, additionalQuantity) {
-    if (typeof additionalQuantity === "number") {
-      quantity += additionalQuantity;
-    }
+  renderQuantity: function (quantity) {
     return (quantity === Infinity) ? "unlimited" : quantity.toString();
   },
-  renderPercent: function (num, denom, additionalDenom) {
-    if (typeof additionalDenom === "number") {
-      denom += additionalDenom;
-    }
+  renderPercent: function (num, denom) {
     return Math.min(100, Math.max(0, num / denom * 100)).toPrecision(3);
   },
   isSelecting: function () {
@@ -301,11 +306,26 @@ var helpers = {
   myPlan: function () {
     return this.db.getMyPlan();
   },
+  myQuota: function () {
+    return this.db.getUserQuota(Meteor.user());
+  },
   myUsage: function () {
     return this.db.getMyUsage();
   },
   myReferralBonus: function() {
     return this.db.getMyReferralBonus();
+  },
+  myMetadataBonus: function() {
+    var user = Meteor.user();
+    return (user.payments && user.payments.bonuses && user.payments.bonuses.metadata) || {};
+  },
+  myMailingListBonus: function() {
+    var user = Meteor.user();
+    if (user.payments && user.payments.bonuses && user.payments.bonuses.mailingList) {
+      return {storage: MAILING_LIST_BONUS};
+    } else {
+      return {};
+    }
   },
   onCompleteWrapper: function () {
     var template = Template.instance();

@@ -202,43 +202,56 @@ All Rights Reserved
   {{#if Template.subscriptionsReady}}
   <div class="usage">
     <h3>Usage</h3>
-    {{#with plan=myPlan used=myUsage referralBonus=myReferralBonus}}{{#if plan}}
+    {{#with plan=myPlan quota=myQuota used=myUsage referralBonus=myReferralBonus
+            metadataBonus=myMetadataBonus mailingListBonus=myMailingListBonus}}{{#if plan}}
       <table>
         <tr>
           <td>Compute Units</td>
           <td>
             <div class="progress-bar">
-              <div style="width: {{renderPercent used.compute plan.compute}}%"></div>
+              <div style="width: {{renderPercent used.compute quota.compute}}%"></div>
             </div>
             <div class="used">not tracked yet (beta)</div>
-            <div class="total"><span class="amount">{{renderCu plan.compute}}</span> total</div>
+            <div class="total"><span class="amount">{{renderCu quota.compute}}</span> total</div>
           </td>
         </tr>
         <tr>
           <td>Storage</td>
           <td>
             <div class="progress-bar">
-              <div style="width: {{renderPercent used.storage plan.storage referralBonus.storage}}%"></div>
+              <div style="width: {{renderPercent used.storage quota.storage}}%"></div>
             </div>
             <div class="used"><span class="amount">{{renderStoragePrecise used.storage}}</span> used</div>
-            <div class="total"><span class="amount">{{renderStorage plan.storage referralBonus.storage}}</span> total</div>
+            <div class="total"><span class="amount">{{renderStorage quota.storage}}</span> total</div>
           </td>
         </tr>
         <tr>
           <td>Grains</td>
           <td>
-            <span class="grain-count"><span class="used">{{renderQuantity used.grains}}</span> out of <span class="total">{{renderQuantity plan.grains referralBonus.grains}}</span></span>
+            <span class="grain-count"><span class="used">{{renderQuantity used.grains}}</span> out of <span class="total">{{renderQuantity quota.grains}}</span></span>
           </td>
         </tr>
       </table>
       <hr>
+      {{#if mailingListBonus.storage}}
+        <p class="bonus">
+          Includes mailing list bonus: {{renderStorage mailingListBonus.storage}} storage
+        </p>
+      {{/if}}
       {{#if referralBonus.storage}}
-        <p>
-          <span class="referral-bonus">Includes <a href="/referrals">referral bonus</a>: {{renderStorage referralBonus.storage}} storage
+        <p class="bonus">
+          Includes <a href="/referrals">referral bonus</a>: {{renderStorage referralBonus.storage}} storage
             {{#if referralBonus.grains}}
               and {{renderQuantity referralBonus.grains}} grains
             {{/if}}
-          </span>
+        </p>
+      {{/if}}
+      {{#if metadataBonus.storage}}
+        <p class="bonus">
+          Includes gift from the admin: {{renderStorage metadataBonus.storage}} storage
+            {{#if metadataBonus.grains}}
+              and {{renderQuantity metadataBonus.grains}} grains
+            {{/if}}
         </p>
       {{/if}}
       <p>Based on current plan: <span class="plan-name">{{planTitle plan}}</span>
