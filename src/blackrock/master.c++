@@ -121,9 +121,9 @@ private:
         .then([this,retryStage](VatPath::Reader path) {
       auto machine = rpcSystem.bootstrap(path).castAs<Machine>();
 
-      // Try to send a ping, giving up after 2 seconds.
+      // Try to send a ping, giving up after 60 seconds.
       auto initialPing = machine.pingRequest().send().then([](auto&&) {});
-      return timer.timeoutAfter(10 * kj::SECONDS, kj::mv(initialPing))
+      return timer.timeoutAfter(60 * kj::SECONDS, kj::mv(initialPing))
           .then([this,KJ_MVCAP(machine)]() mutable {
         // Successfully pinged. The machine is up.
 
@@ -163,10 +163,10 @@ private:
   }
 
   kj::Promise<void> pingLoop(Machine::Client machine) {
-    return timer.afterDelay(10 * kj::SECONDS)
+    return timer.afterDelay(60 * kj::SECONDS)
         .then([this,KJ_MVCAP(machine)]() mutable {
       auto ping = machine.pingRequest().send().then([](auto&&) {});
-      return timer.timeoutAfter(10 * kj::SECONDS, kj::mv(ping))
+      return timer.timeoutAfter(60 * kj::SECONDS, kj::mv(ping))
           .then([this,KJ_MVCAP(machine)]() mutable {
         return pingLoop(kj::mv(machine));
       });
