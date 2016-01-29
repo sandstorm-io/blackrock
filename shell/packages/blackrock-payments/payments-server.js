@@ -203,17 +203,22 @@ function handleWebhookEvent(db, event) {
           "\n" +
           "This invoice has already been paid using the payment info we have on file.\n" +
           "\n" +
+          "To modify your subscription, visit:\n" +
+          ROOT_URL + "/account\n" +
+          "\n" +
           "Thank you!\n";
       mailHtml =
-          '  <h2>You have a new invoice from '+serverTitle+':</h2>' +
-          '  <table style="width: 100%">' +
-          '    <tr><td>1 month '+planTitle+' plan</td><td style="'+priceColStyle+'">$'+priceText+'</td></tr>' +
-          '    <tr><td>Beta discount</td><td style="'+priceColStyle+'">-$'+priceText+'</td></tr>' +
-          '    <tr><td colspan="2"><hr style="border-style: none; border-top-style: solid; border-color: #bbb;"></td></tr>' +
-          '    <tr><td><b>Total</b></td><td style="'+priceColStyle+'">$0.00</td></tr>' +
-          '  </table>' +
-          '  <p>This invoice has already been paid using the payment info we have on file.</p>' +
-          '  <p>Thank you!</p>';
+          '<h2>You have a new invoice from '+serverTitle+':</h2>\n' +
+          '<table style="width: 100%">\n' +
+          '  <tr><td>1 month '+planTitle+' plan</td><td style="'+priceColStyle+'">$'+priceText+'</td></tr>\n' +
+          '  <tr><td>Beta discount</td><td style="'+priceColStyle+'">-$'+priceText+'</td></tr>\n' +
+          '  <tr><td colspan="2"><hr style="border-style: none; border-top-style: solid; border-color: #bbb;"></td></tr>\n' +
+          '  <tr><td><b>Total</b></td><td style="'+priceColStyle+'">$0.00</td></tr>\n' +
+          '</table>\n' +
+          '<p>This invoice has already been paid using the payment info we have on file.</p>\n' +
+          '<p>To modify your subscription, visit:<br>\n' +
+          '  <a href="' + ROOT_URL + '/account">' + ROOT_URL + '/account</a></p>\n' +
+          '<p>Thank you!</p>\n';
     }
 
     // Add surrounding box.
