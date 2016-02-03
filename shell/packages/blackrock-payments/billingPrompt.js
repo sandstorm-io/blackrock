@@ -350,7 +350,8 @@ var helpers = {
   isShowingIframe: function () {
     var data = StripeCards.find();
     return this.price && !this.isCurrent && data.count() === 0;
-  }
+  },
+  MAILING_LIST_BONUS: MAILING_LIST_BONUS
 };
 
 Template._billingPromptBody.helpers(helpers);

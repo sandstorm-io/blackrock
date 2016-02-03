@@ -31,3 +31,13 @@ updateStripeData = function (cb) {
 BlackrockPayments = function (db) {
   this.db = db
 }
+
+// Client-side method simulations.
+Meteor.methods({
+  unsubscribeMailingList: function () {
+    Meteor.users.update({_id: Meteor.userId()}, {$set: {"payments.bonuses.mailingList": false}});
+  },
+  subscribeMailingList: function () {
+    Meteor.users.update({_id: Meteor.userId()}, {$set: {"payments.bonuses.mailingList": true}});
+  }
+});

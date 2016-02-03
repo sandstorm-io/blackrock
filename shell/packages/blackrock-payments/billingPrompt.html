@@ -233,11 +233,6 @@ All Rights Reserved
         </tr>
       </table>
       <hr>
-      {{#if mailingListBonus.storage}}
-        <p class="bonus">
-          Includes mailing list bonus: {{renderStorage mailingListBonus.storage}} storage
-        </p>
-      {{/if}}
       {{#if referralBonus.storage}}
         <p class="bonus">
           Includes <a href="/referrals">referral bonus</a>: {{renderStorage referralBonus.storage}} storage
@@ -253,6 +248,16 @@ All Rights Reserved
               and {{renderQuantity metadataBonus.grains}} grains
             {{/if}}
         </p>
+      {{/if}}
+      {{#if mailingListBonus.storage}}
+        <p class="bonus">
+          Includes mailing list bonus: {{renderStorage mailingListBonus.storage}} storage
+          <button class="unsubscribe">Unsubscribe</button>
+        </p>
+      {{else}}
+        <p class="bonus">Get {{renderStorage MAILING_LIST_BONUS}} bonus storage by subscribing to
+          e-mail announcements (1-2 messages per month):
+          <button class="subscribe">Subscribe</button></p>
       {{/if}}
       <p>Based on current plan: <span class="plan-name">{{planTitle plan}}</span>
         <button class="change-plan">change plan</button></p>

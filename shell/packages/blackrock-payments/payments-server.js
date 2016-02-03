@@ -611,6 +611,74 @@ var methods = {
     );
     Meteor.users.update({_id: this.userId}, {$set: { plan: plan }});
     return sanitizedSource;
+  },
+
+  unsubscribeMailingList: function () {
+    var listId = Meteor.settings.mailchimpListId;
+    var key = Meteor.settings.mailchimpKey;
+    if (!listId || !key) throw new Error("Mailchimp not configured!");
+
+    var emails = SandstormDb.getUserEmails(Meteor.user()).filter(function (entry) {
+      return entry.verified;
+    }).map(function (entry) {
+      return canonicalizeEmail(entry.email);
+    });
+
+    MailchimpSubscribers.find({canonical: {$in: emails}, subscribed: true})
+        .forEach(function (entry) {
+      var hash = Crypto.createHash("md5").update(entry._id).digest("hex");
+      var url = "https://us7.api.mailchimp.com/3.0/lists/" + listId + "/members/" + hash;
+
+      console.log("Mailchimp: unsubscribing", entry._id);
+      HTTP.call("PATCH", url, {
+        data: {status: "unsubscribed"},
+        headers: { "Authorization": "apikey " + key },
+        timeout: 10000
+      });
+
+      MailchimpSubscribers.update({_id: entry._id}, {$set: {subscribed: false}});
+    });
+
+    updateBonuses(Meteor.user());
+  },
+
+  subscribeMailingList: function () {
+    var listId = Meteor.settings.mailchimpListId;
+    var key = Meteor.settings.mailchimpKey;
+    if (!listId || !key) throw new Error("Mailchimp not configured!");
+
+    var emails = SandstormDb.getUserEmails(Meteor.user()).filter(function (entry) {
+      return entry.primary;
+    });
+
+    if (emails.length === 0) {
+      throw new Meteor.Error(400, "User has no verified email addresses to subscribe.");
+    }
+
+    var email = emails[0].email;
+    var hash = Crypto.createHash("md5").update(email).digest("hex");
+    var url = "https://us7.api.mailchimp.com/3.0/lists/" + listId + "/members/" + hash;
+
+    if (MailchimpSubscribers.find({_id: email}).count() > 0) {
+      // User already exists in Mailchimp.
+      console.log("Mailchimp: re-subscribing", email);
+      HTTP.call("PATCH", url, {
+        data: {status: "subscribed"},
+        headers: { "Authorization": "apikey " + key },
+        timeout: 10000
+      });
+    } else {
+      console.log("Mailchimp: subscribing", email);
+      HTTP.call("PUT", url, {
+        data: {email_address: email, status: "subscribed"},
+        headers: { "Authorization": "apikey " + key },
+        timeout: 10000
+      });
+    }
+
+    MailchimpSubscribers.upsert({_id: email},
+        {$set: {canonical: canonicalizeEmail(email), subscribed: true}});
+    updateBonuses(Meteor.user());
   }
 };
 Meteor.methods(methods);
