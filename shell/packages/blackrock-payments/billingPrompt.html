@@ -42,7 +42,8 @@ All Rights Reserved
     <h2>Success!</h2>
     <p class="success-note">You've changed your plan from <strong>{{oldPlan}}</strong> to
       <strong>{{planTitle myPlan}}</strong>.</p>
-    <button class="continue">Continue</button>
+
+    {{> _billingSuccessBonusNotice }}
   {{else}}
 
   {{#if isDemoUser}}
@@ -98,7 +99,8 @@ All Rights Reserved
     {{#if planChosen}}
       <h2>Success!</h2>
       <p class="success-note">You've selected <strong>{{planTitle myPlan}}</strong>.</p>
-      <button class="continue">Continue</button>
+
+      {{> _billingSuccessBonusNotice }}
     {{else}}
       <h2>Choose a Plan</h2>
 
@@ -107,6 +109,22 @@ All Rights Reserved
       {{>_billingPromptBody onComplete=onCompleteNoop topbar=topbar db=db accountsUi=accountsUi}}
     {{/if}}
   </div>
+</template>
+
+<template name="_billingSuccessBonusNotice">
+  {{#with mailingListBonus=myMailingListBonus }}
+    {{#if mailingListBonus.storage}}
+      <p>Bonus! Because you're subscribed to our announcement list, we're giving you
+        <strong>{{renderStorage MAILING_LIST_BONUS}} bonus storage</strong>.</p>
+      <button class="continue">Continue</button>
+    {{else}}
+      <p>Get <strong>1GB bonus storage</strong> by subscribing to our announcement list.</p>
+      <p class="subscribe-option">
+        <button class="subscribe">Subscribe</button>
+        <button class="continue">No thanks</button>
+      </p>
+    {{/if}}
+  {{/with}}
 </template>
 
 <template name="_billingPromptBody">
@@ -202,47 +220,65 @@ All Rights Reserved
   {{#if Template.subscriptionsReady}}
   <div class="usage">
     <h3>Usage</h3>
-    {{#with plan=myPlan used=myUsage referralBonus=myReferralBonus}}{{#if plan}}
+    {{#with plan=myPlan quota=myQuota used=myUsage referralBonus=myReferralBonus
+            metadataBonus=myMetadataBonus mailingListBonus=myMailingListBonus}}{{#if plan}}
       <table>
         <tr>
           <td>Compute Units</td>
           <td>
             <div class="progress-bar">
-              <div style="width: {{renderPercent used.compute plan.compute}}%"></div>
+              <div style="width: {{renderPercent used.compute quota.compute}}%"></div>
             </div>
             <div class="used">not tracked yet (beta)</div>
-            <div class="total"><span class="amount">{{renderCu plan.compute}}</span> total</div>
+            <div class="total"><span class="amount">{{renderCu quota.compute}}</span> total</div>
           </td>
         </tr>
         <tr>
           <td>Storage</td>
           <td>
             <div class="progress-bar">
-              <div style="width: {{renderPercent used.storage plan.storage referralBonus.storage}}%"></div>
+              <div style="width: {{renderPercent used.storage quota.storage}}%"></div>
             </div>
             <div class="used"><span class="amount">{{renderStoragePrecise used.storage}}</span> used</div>
-            <div class="total"><span class="amount">{{renderStorage plan.storage referralBonus.storage}}</span> total</div>
+            <div class="total"><span class="amount">{{renderStorage quota.storage}}</span> total</div>
           </td>
         </tr>
         <tr>
           <td>Grains</td>
           <td>
-            <span class="grain-count"><span class="used">{{renderQuantity used.grains}}</span> out of <span class="total">{{renderQuantity plan.grains referralBonus.grains}}</span></span>
+            <span class="grain-count"><span class="used">{{renderQuantity used.grains}}</span> out of <span class="total">{{renderQuantity quota.grains}}</span></span>
           </td>
         </tr>
       </table>
       <hr>
+      {{#if mailingListBonus.storage}}
+        <p class="bonus">
+          Includes mailing list bonus: {{renderStorage mailingListBonus.storage}} storage
+          <button class="unsubscribe">Unsubscribe</button>
+        </p>
+      {{/if}}
       {{#if referralBonus.storage}}
-        <p>
-          <span class="referral-bonus">Includes <a href="/referrals">referral bonus</a>: {{renderStorage referralBonus.storage}} storage
+        <p class="bonus">
+          Includes <a href="/referrals">referral bonus</a>: {{renderStorage referralBonus.storage}} storage
             {{#if referralBonus.grains}}
               and {{renderQuantity referralBonus.grains}} grains
             {{/if}}
-          </span>
+        </p>
+      {{/if}}
+      {{#if metadataBonus.storage}}
+        <p class="bonus">
+          Includes gift from the admin: {{renderStorage metadataBonus.storage}} storage
+            {{#if metadataBonus.grains}}
+              and {{renderQuantity metadataBonus.grains}} grains
+            {{/if}}
         </p>
       {{/if}}
       <p>Based on current plan: <span class="plan-name">{{planTitle plan}}</span>
         <button class="change-plan">change plan</button></p>
+      {{#unless mailingListBonus.storage}}
+        <p>Get {{renderStorage MAILING_LIST_BONUS}} bonus storage by subscribing to e-mail
+          announcements (1-2 messages per month): <button class="subscribe">Subscribe</button></p>
+      {{/unless}}
     {{/if}}{{/with}}
   </div>
 

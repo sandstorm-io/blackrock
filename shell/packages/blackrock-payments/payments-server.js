@@ -2,6 +2,14 @@
 // Copyright (c) 2015-2016 Sandstorm Development Group, Inc.
 // All Rights Reserved
 
+// The Meteor.user().payments object contains:
+//   id: Stripe customer ID.
+//   lastInvoiceTime: Timestamp (integer, from event.created) of the last time an invoice was
+//       successfully paid.
+//   bonuses: Object describing bonuses applied to the user's quota:
+//       mailingList: Boolean, true if user is subscribed to mailing list.
+//       metadata: A structure like plan.bonus but representing bonuses from Stripe metadata.
+
 var Crypto = Npm.require("crypto");
 var Url = Npm.require('url');
 var ROOT_URL = process.env.ROOT_URL;
@@ -9,6 +17,19 @@ var HOSTNAME = Url.parse(ROOT_URL).hostname;
 var stripe = Npm.require("stripe")(Meteor.settings.stripeKey);
 
 BlackrockPayments = {};
+
+MailchimpSubscribers = new Mongo.Collection("mailchimpSubscribers");
+// List of mailing list subscribers. We keep a copy of this rather than hit Mailchimp in real time
+// because Mailchimp is sllooowwwww. We keep it up to date with webhooks.
+//
+// Each contains:
+//     _id: An email address, exactly as stored in Mailchimp.
+//     canonical: _id canonicalized (lower-cased, +suffixes removed, etc), for searchability.
+//     subscribed: True if subscribed, false if not (e.g. if explicitly unsubscribed).
+//     lastChanged: Last-change Date of this subscriber according to Mailchimp. Not present if
+//         this entry was recently added artificially and isn't necessarily in Mailchimp yet.
+//         The main purpose of this field is to allow us to discover what the latest event we know
+//         about is, so that we can ask Mailchimp for newer events.
 
 // Sandstorm icon, for embedding in emails.
 var ICON_BASE64 = new Buffer(
@@ -302,6 +323,94 @@ function processWebhook(db, req, res) {
   });
 }
 
+function mailchimpDate(date) {
+  // Return "YYYY-MM-DD HH:mm:ss"
+  var str = date.toISOString();
+  return str.slice(0, 10) + " " + str.slice(11, 19);
+}
+
+function canonicalizeEmail(email) {
+  // We canonicalize foo+bar@baz to foo@baz, and we lower-case the whole address. Neither of these
+  // transformations are guaranteed to be safe, but we only use this for deciding whether someone
+  // is on the mailing list. Some fudging here is OK, especially if it mostly results in false
+  // positives.
+
+  return email.replace(/\+.*@/, "@").toLowerCase();
+}
+
+function updateMailchimp(db) {
+  var listId = Meteor.settings.mailchimpListId;
+  var key = Meteor.settings.mailchimpKey;
+  if (!listId || !key) throw new Error("Mailchimp not configured!");
+
+  var lastChanged =
+      (MailchimpSubscribers.findOne({}, {sort: {lastChanged: -1}}) || {}).lastChanged;
+
+  var count = 100;
+  var retry = false;
+  for(;;) {
+    var url = "https://us7.api.mailchimp.com/3.0/lists/" + listId +
+        "/members?fields=total_items,members.email_address,members.status,members.last_changed" +
+        "&count=" + count;
+    if (lastChanged) {
+      url += "&since_last_changed=" + mailchimpDate(lastChanged);
+    }
+
+    console.log("Mailchimp: Fetching updates:", url);
+
+    var result = HTTP.get(url, {
+      headers: { "Authorization": "apikey " + key },
+      timeout: 60000
+    });
+
+    if (result.data.total_items <= count) break;
+
+    if (retry) {
+      throw new Error("Mailchimp: Retry had too many results too: " +
+                      result.data.total_items + " > " + count);
+    }
+
+    console.log("Mailchimp: Query wasn't exhaustive. Trying again.", result.data.total_items);
+    count = result.data.total_items + 100;
+    retry = true;
+  }
+
+  (result.data.members || []).forEach(function (member) {
+    check(member, {email_address: String, status: String, last_changed: String});
+    MailchimpSubscribers.upsert({_id: member.email_address}, {$set: {
+      canonical: canonicalizeEmail(member.email_address),
+      subscribed: member.status === "subscribed",
+      lastChanged: new Date(member.last_changed + " GMT")
+    }});
+    var count = db.findAccountsByEmail(member.email_address).map(updateBonuses).length;
+    console.log("Mailchimp:", member.email_address, member.status, "(" + count + " users)");
+  });
+}
+
+function processMailchimpWebhook(db, req, res) {
+  // For now, we interpret Mailchimp hits as only a hint to check for updates from Mailchimp.
+  // We ignore the POST payload because it's totally non-trustworthy anyhow, and because it's
+  // more robust for us to search for all changes since the last we know about.
+
+  if (req.method !== "POST") {
+    res.writeHead(405, { "Content-Type": "text/plain" });
+    res.end("This endpoint is POST-only.\n");
+    return;
+  }
+
+  inFiber(function () {
+    try {
+      updateMailchimp(db);
+      res.writeHead(200, { "Content-Type": "text/plain" });
+      res.end("success\n");
+    } catch (err) {
+      console.error("error processing Mailchimp webhook:", err.stack);
+      res.writeHead(500, { "Content-Type": "text/plain" });
+      res.end("internal server error\n");
+    }
+  });
+}
+
 BlackrockPayments.makeConnectHandler = function (db) {
   return function (req, res, next) {
     if (req.headers.host == db.makeWildcardHost("payments")) {
@@ -311,6 +420,8 @@ BlackrockPayments.makeConnectHandler = function (db) {
         serveSandcat(res);
       } else if (req.url === "/webhook") {
         processWebhook(db, req, res);
+      } else if (req.url === "/mailchimp") {
+        processMailchimpWebhook(db, req, res);
       } else {
         res.writeHead(404, { "Content-Type": "text/plain" });
         res.end("404 not found: " + req.url);
@@ -399,7 +510,7 @@ var methods = {
       throw new Meteor.Error(403, "Must be logged in to get stripe data");
     }
     var payments = Meteor.user().payments;
-    if (!payments) {
+    if (!payments || !payments.id) {
       return {};
     }
     var customerId = payments.id;
@@ -500,6 +611,74 @@ var methods = {
     );
     Meteor.users.update({_id: this.userId}, {$set: { plan: plan }});
     return sanitizedSource;
+  },
+
+  unsubscribeMailingList: function () {
+    var listId = Meteor.settings.mailchimpListId;
+    var key = Meteor.settings.mailchimpKey;
+    if (!listId || !key) throw new Error("Mailchimp not configured!");
+
+    var emails = SandstormDb.getUserEmails(Meteor.user()).filter(function (entry) {
+      return entry.verified;
+    }).map(function (entry) {
+      return canonicalizeEmail(entry.email);
+    });
+
+    MailchimpSubscribers.find({canonical: {$in: emails}, subscribed: true})
+        .forEach(function (entry) {
+      var hash = Crypto.createHash("md5").update(entry._id).digest("hex");
+      var url = "https://us7.api.mailchimp.com/3.0/lists/" + listId + "/members/" + hash;
+
+      console.log("Mailchimp: unsubscribing", entry._id);
+      HTTP.call("PATCH", url, {
+        data: {status: "unsubscribed"},
+        headers: { "Authorization": "apikey " + key },
+        timeout: 10000
+      });
+
+      MailchimpSubscribers.update({_id: entry._id}, {$set: {subscribed: false}});
+    });
+
+    updateBonuses(Meteor.user());
+  },
+
+  subscribeMailingList: function () {
+    var listId = Meteor.settings.mailchimpListId;
+    var key = Meteor.settings.mailchimpKey;
+    if (!listId || !key) throw new Error("Mailchimp not configured!");
+
+    var emails = SandstormDb.getUserEmails(Meteor.user()).filter(function (entry) {
+      return entry.primary;
+    });
+
+    if (emails.length === 0) {
+      throw new Meteor.Error(400, "User has no verified email addresses to subscribe.");
+    }
+
+    var email = emails[0].email;
+    var hash = Crypto.createHash("md5").update(email).digest("hex");
+    var url = "https://us7.api.mailchimp.com/3.0/lists/" + listId + "/members/" + hash;
+
+    if (MailchimpSubscribers.find({_id: email}).count() > 0) {
+      // User already exists in Mailchimp.
+      console.log("Mailchimp: re-subscribing", email);
+      HTTP.call("PATCH", url, {
+        data: {status: "subscribed"},
+        headers: { "Authorization": "apikey " + key },
+        timeout: 10000
+      });
+    } else {
+      console.log("Mailchimp: subscribing", email);
+      HTTP.call("PUT", url, {
+        data: {email_address: email, status: "subscribed"},
+        headers: { "Authorization": "apikey " + key },
+        timeout: 10000
+      });
+    }
+
+    MailchimpSubscribers.upsert({_id: email},
+        {$set: {canonical: canonicalizeEmail(email), subscribed: true}});
+    updateBonuses(Meteor.user());
   }
 };
 Meteor.methods(methods);
@@ -593,3 +772,68 @@ SandstormDb.paymentsMigrationHook = function (SignupKeys, plans) {
     });
   }
 }
+
+function getStripeBonus(user, paymentsBonuses) {
+  var bonus = {};
+
+  if (user.payments && user.payments.id) {
+    var customer = Meteor.wrapAsync(stripe.customers.retrieve.bind(stripe.customers))
+        (user.payments.id);
+
+    var meta = customer.metadata;
+    if (meta) {
+      if (meta.bonusStorage) {
+        bonus.storage = parseFloat(customer.metadata.bonusStorage) || 0;
+      }
+      if (meta.bonusCompute) {
+        bonus.compute = parseFloat(customer.metadata.bonusCompute) || 0;
+      }
+      if (meta.bonusGrains) {
+        bonus.grains = parseFloat(customer.metadata.bonusGrains) || 0;
+      }
+    }
+  }
+
+  if (paymentsBonuses) paymentsBonuses.metadata = bonus;
+  return bonus;
+}
+
+function getMailchimpBonus(user, paymentsBonuses) {
+  var emails = SandstormDb.getUserEmails(user).filter(function (entry) {
+    return entry.verified;
+  }).map(function (entry) {
+    return canonicalizeEmail(entry.email);
+  });
+  if (emails.length > 0 &&
+      MailchimpSubscribers.find({canonical: {$in: emails}, subscribed: true}).count() > 0) {
+    if (paymentsBonuses) paymentsBonuses.mailingList = true;
+    return { storage: MAILING_LIST_BONUS };
+  } else {
+    if (paymentsBonuses) paymentsBonuses.mailingList = false;
+    return {};
+  }
+}
+
+function updateBonuses(user) {
+  var paymentsBonuses = {};
+  var bonus = {};
+  [getStripeBonus, getMailchimpBonus].forEach(function (f) {
+    var b = f(user, paymentsBonuses);
+    for (var field in b) {
+      bonus[field] = (bonus[field] || 0) + b[field];
+    }
+  });
+
+  if (!_.isEqual(user.planBonus, bonus) ||
+      !user.payments ||
+      !_.isEqual(user.payments.bonuses, paymentsBonuses)) {
+    Meteor.users.update(user._id, {$set: {planBonus: bonus, "payments.bonuses": paymentsBonuses}});
+  }
+}
+
+Meteor.publish("myBonuses", function () {
+  if (!this.userId) return [];
+
+  updateBonuses(Meteor.users.findOne({_id: this.userId}));
+  return Meteor.users.find({_id: this.userId}, {fields: {"payments.bonuses": 1}});
+});
