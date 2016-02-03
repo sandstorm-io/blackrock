@@ -42,7 +42,8 @@ All Rights Reserved
     <h2>Success!</h2>
     <p class="success-note">You've changed your plan from <strong>{{oldPlan}}</strong> to
       <strong>{{planTitle myPlan}}</strong>.</p>
-    <button class="continue">Continue</button>
+
+    {{> _billingSuccessBonusNotice }}
   {{else}}
 
   {{#if isDemoUser}}
@@ -98,7 +99,8 @@ All Rights Reserved
     {{#if planChosen}}
       <h2>Success!</h2>
       <p class="success-note">You've selected <strong>{{planTitle myPlan}}</strong>.</p>
-      <button class="continue">Continue</button>
+
+      {{> _billingSuccessBonusNotice }}
     {{else}}
       <h2>Choose a Plan</h2>
 
@@ -107,6 +109,22 @@ All Rights Reserved
       {{>_billingPromptBody onComplete=onCompleteNoop topbar=topbar db=db accountsUi=accountsUi}}
     {{/if}}
   </div>
+</template>
+
+<template name="_billingSuccessBonusNotice">
+  {{#with mailingListBonus=myMailingListBonus }}
+    {{#if mailingListBonus.storage}}
+      <p>Bonus! Because you're subscribed to our announcement list, we're giving you
+        <strong>{{renderStorage MAILING_LIST_BONUS}} bonus storage</strong>.</p>
+      <button class="continue">Continue</button>
+    {{else}}
+      <p>Get <strong>1GB bonus storage</strong> by subscribing to our announcement list.</p>
+      <p class="subscribe-option">
+        <button class="subscribe">Subscribe</button>
+        <button class="continue">No thanks</button>
+      </p>
+    {{/if}}
+  {{/with}}
 </template>
 
 <template name="_billingPromptBody">
@@ -236,6 +254,7 @@ All Rights Reserved
       {{#if mailingListBonus.storage}}
         <p class="bonus">
           Includes mailing list bonus: {{renderStorage mailingListBonus.storage}} storage
+          <button class="unsubscribe">Unsubscribe</button>
         </p>
       {{/if}}
       {{#if referralBonus.storage}}
@@ -256,6 +275,10 @@ All Rights Reserved
       {{/if}}
       <p>Based on current plan: <span class="plan-name">{{planTitle plan}}</span>
         <button class="change-plan">change plan</button></p>
+      {{#unless mailingListBonus.storage}}
+        <p>Get {{renderStorage MAILING_LIST_BONUS}} bonus storage by subscribing to e-mail
+          announcements (1-2 messages per month): <button class="subscribe">Subscribe</button></p>
+      {{/unless}}
     {{/if}}{{/with}}
   </div>
 

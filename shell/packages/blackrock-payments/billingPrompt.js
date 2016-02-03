@@ -136,6 +136,33 @@ Template.billingUsage.events({
   }
 });
 
+var mailingListEvents = {
+  "click .unsubscribe": function () {
+    event.preventDefault();
+    Meteor.call("unsubscribeMailingList", function(err) {
+      if (err) window.alert("Error unsubscribing from list: " + err.message);
+    });
+  },
+
+  "click .subscribe": function () {
+    event.preventDefault();
+    Meteor.call("subscribeMailingList", function(err) {
+      if (err) window.alert("Error subscribing to list: " + err.message);
+    });
+  },
+
+  "click .continue": function (ev) {
+    event.preventDefault();
+    var onComplete = Template.currentData().onComplete;
+    if (onComplete) {
+      onComplete(true);
+    }
+  }
+};
+
+Template.billingUsage.events(mailingListEvents);
+Template._billingSuccessBonusNotice.events(mailingListEvents);
+
 function clickPlanHelper(context, ev) {
   var template = Template.instance();
   var planName = context._id;
@@ -178,22 +205,6 @@ function clickPlanHelper(context, ev) {
     frame.contentWindow.postMessage({openDialog: true}, "*");
   }
 }
-
-Template._billingPromptPopup.events({
-  "click .continue": function (ev) {
-    if (this.onComplete) {
-      this.onComplete(true);
-    }
-  }
-});
-
-Template.billingPromptFirstTime.events({
-  "click .continue": function (ev) {
-    if (this.onComplete) {
-      this.onComplete(true);
-    }
-  }
-});
 
 Template._billingPromptBody.events({
   "click .subscription": function (ev) {
@@ -350,10 +361,12 @@ var helpers = {
   isShowingIframe: function () {
     var data = StripeCards.find();
     return this.price && !this.isCurrent && data.count() === 0;
-  }
+  },
+  MAILING_LIST_BONUS: MAILING_LIST_BONUS
 };
 
 Template._billingPromptBody.helpers(helpers);
 Template._billingPromptPopup.helpers(helpers);
+Template._billingSuccessBonusNotice.helpers(helpers);
 Template.billingUsage.helpers(helpers);
 Template.billingPromptFirstTime.helpers(helpers);
