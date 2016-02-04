@@ -342,6 +342,7 @@ function updateMailchimp(db) {
   var listId = Meteor.settings.mailchimpListId;
   var key = Meteor.settings.mailchimpKey;
   if (!listId || !key) throw new Error("Mailchimp not configured!");
+  var shard = key.split("-")[1];
 
   var lastChanged =
       (MailchimpSubscribers.findOne({}, {sort: {lastChanged: -1}}) || {}).lastChanged;
@@ -349,7 +350,7 @@ function updateMailchimp(db) {
   var count = 100;
   var retry = false;
   for(;;) {
-    var url = "https://us7.api.mailchimp.com/3.0/lists/" + listId +
+    var url = "https://"+shard+".api.mailchimp.com/3.0/lists/" + listId +
         "/members?fields=total_items,members.email_address,members.status,members.last_changed" +
         "&count=" + count;
     if (lastChanged) {
@@ -617,6 +618,7 @@ var methods = {
     var listId = Meteor.settings.mailchimpListId;
     var key = Meteor.settings.mailchimpKey;
     if (!listId || !key) throw new Error("Mailchimp not configured!");
+    var shard = key.split("-")[1];
 
     var emails = SandstormDb.getUserEmails(Meteor.user()).filter(function (entry) {
       return entry.verified;
@@ -627,7 +629,7 @@ var methods = {
     MailchimpSubscribers.find({canonical: {$in: emails}, subscribed: true})
         .forEach(function (entry) {
       var hash = Crypto.createHash("md5").update(entry._id).digest("hex");
-      var url = "https://us7.api.mailchimp.com/3.0/lists/" + listId + "/members/" + hash;
+      var url = "https://"+shard+".api.mailchimp.com/3.0/lists/" + listId + "/members/" + hash;
 
       console.log("Mailchimp: unsubscribing", entry._id);
       HTTP.call("PATCH", url, {
@@ -646,6 +648,7 @@ var methods = {
     var listId = Meteor.settings.mailchimpListId;
     var key = Meteor.settings.mailchimpKey;
     if (!listId || !key) throw new Error("Mailchimp not configured!");
+    var shard = key.split("-")[1];
 
     var emails = SandstormDb.getUserEmails(Meteor.user()).filter(function (entry) {
       return entry.primary;
@@ -657,7 +660,7 @@ var methods = {
 
     var email = emails[0].email;
     var hash = Crypto.createHash("md5").update(email).digest("hex");
-    var url = "https://us7.api.mailchimp.com/3.0/lists/" + listId + "/members/" + hash;
+    var url = "https://"+shard+".api.mailchimp.com/3.0/lists/" + listId + "/members/" + hash;
 
     if (MailchimpSubscribers.find({_id: email}).count() > 0) {
       // User already exists in Mailchimp.
