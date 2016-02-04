@@ -773,6 +773,33 @@ SandstormDb.paymentsMigrationHook = function (SignupKeys, plans) {
   }
 }
 
+SandstormDb.bonusesMigrationHook = function () {
+  var db = new SandstormDb();  // HACK: this only needs to work once
+
+  updateMailchimp(db);
+
+  Meteor.users.find({
+    loginIdentities: {$exists: true},
+    expires: {$exists: false},
+  }).forEach(function (user) {
+    console.log("Applying bonuses:", user._id);
+
+    var bonuses = updateBonuses(user);
+
+    if (!bonuses.mailingList && user.hasCompletedSignup) {
+      Notifications.upsert({
+        userId: user._id,
+        mailingListBonus: true,
+      }, {
+        userId: user._id,
+        mailingListBonus: true,
+        timestamp: new Date(),
+        isUnread: true,
+      });
+    }
+  });
+}
+
 function getStripeBonus(user, paymentsBonuses) {
   var bonus = {};
 
@@ -829,6 +856,8 @@ function updateBonuses(user) {
       !_.isEqual(user.payments.bonuses, paymentsBonuses)) {
     Meteor.users.update(user._id, {$set: {planBonus: bonus, "payments.bonuses": paymentsBonuses}});
   }
+
+  return paymentsBonuses;
 }
 
 Meteor.publish("myBonuses", function () {
