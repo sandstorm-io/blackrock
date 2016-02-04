@@ -201,10 +201,20 @@ All Rights Reserved
 <template name="billingUsage">
   {{#if Template.subscriptionsReady}}
   <div class="usage">
-    <h3>Usage</h3>
+    <h3>My Plan</h3>
     {{#with plan=myPlan quota=myQuota used=myUsage referralBonus=myReferralBonus
             metadataBonus=myMetadataBonus mailingListBonus=myMailingListBonus}}{{#if plan}}
       <table>
+        <tr>
+          <td>Current Plan:</td>
+          <td>
+            <span class="plan-name">{{planTitle plan}}</span>
+            <button class="change-plan">Change plan</button>
+          </td>
+        </tr>
+        <tr>
+          <td colspan="2"><strong>Usage (based on current plan):</strong></td>
+        </tr>
         <tr>
           <td>Compute Units</td>
           <td>
@@ -231,41 +241,72 @@ All Rights Reserved
             <span class="grain-count"><span class="used">{{renderQuantity used.grains}}</span> out of <span class="total">{{renderQuantity quota.grains}}</span></span>
           </td>
         </tr>
+        <tr>
+          <td colspan="2"><hr></td>
+        </tr>
+        {{#if hasAnyBonus}}
+        <tr class="bonus">
+          <td>Includes bonuses:</td>
+          <td>
+            {{#if referralBonus.storage}}
+              <p class="bonus">
+                <a href="/referrals">Referral bonus</a>: {{renderStorage referralBonus.storage}}
+                  {{#if referralBonus.grains}}
+                    and {{renderQuantity referralBonus.grains}} grains
+                  {{/if}}
+              </p>
+            {{/if}}
+            {{#if metadataBonus.storage}}
+              <p class="bonus">
+                Gift from admin: {{renderStorage metadataBonus.storage}}
+                  {{#if metadataBonus.grains}}
+                    and {{renderQuantity metadataBonus.grains}} grains
+                  {{/if}}
+              </p>
+            {{/if}}
+            {{#if mailingListBonus.storage}}
+              <p class="bonus">
+                Mailing list: {{renderStorage mailingListBonus.storage}}
+                <button class="unsubscribe">Unsubscribe</button>
+              </p>
+            {{/if}}
+          </td>
+        </tr>
+        {{/if}}
       </table>
-      <hr>
-      {{#if referralBonus.storage}}
-        <p class="bonus">
-          Includes <a href="/referrals">referral bonus</a>: {{renderStorage referralBonus.storage}} storage
-            {{#if referralBonus.grains}}
-              and {{renderQuantity referralBonus.grains}} grains
-            {{/if}}
-        </p>
-      {{/if}}
-      {{#if metadataBonus.storage}}
-        <p class="bonus">
-          Includes gift from the admin: {{renderStorage metadataBonus.storage}} storage
-            {{#if metadataBonus.grains}}
-              and {{renderQuantity metadataBonus.grains}} grains
-            {{/if}}
-        </p>
-      {{/if}}
-      {{#if mailingListBonus.storage}}
-        <p class="bonus">
-          Includes mailing list bonus: {{renderStorage mailingListBonus.storage}} storage
-          <button class="unsubscribe">Unsubscribe</button>
-        </p>
-      {{else}}
-        <p class="bonus">Get {{renderStorage MAILING_LIST_BONUS}} bonus storage by subscribing to
-          e-mail announcements (1-2 messages per month):
-          <button class="subscribe">Subscribe</button></p>
-      {{/if}}
-      <p>Based on current plan: <span class="plan-name">{{planTitle plan}}</span>
-        <button class="change-plan">change plan</button></p>
+      {{#unless mailingListBonus.storage}}
+        <div class="subscribe-prompt">
+          <p>Get <strong>{{renderStorage MAILING_LIST_BONUS}} bonus storage</strong> by subscribing
+            to e-mail announcements (1-2 messages per month):</p>
+          <p><button class="subscribe">Subscribe</button></p>
+        </div>
+      {{/unless}}
     {{/if}}{{/with}}
   </div>
 
   {{#if showPrompt}}
     {{>billingPrompt reason="voluntary" topbar=topbar db=db onComplete=promptClosed}}
   {{/if}}
+  {{/if}}
+</template>
+
+<template name="billingOptins">
+  {{#if Template.subscriptionsReady}}
+    {{#if isSubscribed}}
+      <li class="alreadySubscribed">
+        It looks like you are subscribed to our announcement list, so we'll give you
+        <strong>{{renderStorage MAILING_LIST_BONUS}} bonus storage</strong>.
+      </li>
+    {{else}}
+      <li class="mailingListOptin">
+        <label>
+          <input type="checkbox" name="subscribeToList"> Subscribe to announcements for
+            <strong>{{renderStorage MAILING_LIST_BONUS}} bonus storage</strong>.
+        </label>
+        <span class="details">
+          1-2 e-mails per month.<br>Your current storage: {{renderStorage myQuota.storage}}
+        </span>
+      </li>
+    {{/if}}
   {{/if}}
 </template>

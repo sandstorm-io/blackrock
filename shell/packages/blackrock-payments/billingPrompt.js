@@ -117,6 +117,10 @@ Template.billingUsage.onDestroyed(function () {
   if (self._usageSubscription) self._usageSubscription.stop();
 });
 
+Template.billingOptins.onCreated(function () {
+  this.subscribe("myBonuses");
+});
+
 Template.billingUsage.helpers({
   showPrompt: function () {
     return Template.instance()._showPrompt.get();
@@ -133,7 +137,21 @@ Template.billingUsage.events({
   "click .change-plan": function (event, template) {
     event.preventDefault();
     template._showPrompt.set(true);
-  }
+  },
+
+  "click .unsubscribe": function () {
+    event.preventDefault();
+    Meteor.call("unsubscribeMailingList", function(err) {
+      if (err) window.alert("Error unsubscribing from list: " + err.message);
+    });
+  },
+
+  "click .subscribe": function () {
+    event.preventDefault();
+    Meteor.call("subscribeMailingList", function(err) {
+      if (err) window.alert("Error subscribing to list: " + err.message);
+    });
+  },
 });
 
 function clickPlanHelper(context, ev) {
@@ -312,6 +330,13 @@ var helpers = {
   myUsage: function () {
     return this.db.getMyUsage();
   },
+  hasAnyBonus: function () {
+    var quota = Template.parentData().db.getUserQuota(Meteor.user());
+    var plan = Template.parentData().db.getMyPlan();
+    return quota.storage > plan.storage
+        || quota.compute > plan.compute
+        || quota.grains > plan.grains;
+  },
   myReferralBonus: function() {
     return this.db.getMyReferralBonus();
   },
@@ -326,6 +351,10 @@ var helpers = {
     } else {
       return {};
     }
+  },
+  isSubscribed: function () {
+    var user = Meteor.user();
+    return user.payments && user.payments.bonuses && user.payments.bonuses.mailingList;
   },
   onCompleteWrapper: function () {
     var template = Template.instance();
@@ -358,3 +387,4 @@ Template._billingPromptBody.helpers(helpers);
 Template._billingPromptPopup.helpers(helpers);
 Template.billingUsage.helpers(helpers);
 Template.billingPromptFirstTime.helpers(helpers);
+Template.billingOptins.helpers(helpers);
