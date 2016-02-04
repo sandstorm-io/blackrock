@@ -393,12 +393,6 @@ function processMailchimpWebhook(db, req, res) {
   // We ignore the POST payload because it's totally non-trustworthy anyhow, and because it's
   // more robust for us to search for all changes since the last we know about.
 
-  if (req.method !== "POST") {
-    res.writeHead(405, { "Content-Type": "text/plain" });
-    res.end("This endpoint is POST-only.\n");
-    return;
-  }
-
   inFiber(function () {
     try {
       updateMailchimp(db);
@@ -421,7 +415,7 @@ BlackrockPayments.makeConnectHandler = function (db) {
         serveSandcat(res);
       } else if (req.url === "/webhook") {
         processWebhook(db, req, res);
-      } else if (req.url === "/mailchimp") {
+      } else if (req.url === "/mailchimp" || req.url.lastIndexOf("/mailchimp?", 0) === 0) {
         processMailchimpWebhook(db, req, res);
       } else {
         res.writeHead(404, { "Content-Type": "text/plain" });
