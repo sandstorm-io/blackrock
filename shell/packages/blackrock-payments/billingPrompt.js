@@ -155,7 +155,7 @@ Template.billingUsage.events({
 });
 
 Template.mailingListBonusNotificationButtons.events({
-  "click .accept-notification": function () {
+  "click .accept-notification": function (event) {
     event.preventDefault();
     Meteor.call("subscribeMailingList", function(err) {
       if (err) window.alert("Error subscribing to list: " + err.message);
