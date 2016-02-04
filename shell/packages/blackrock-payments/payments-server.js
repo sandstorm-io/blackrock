@@ -543,7 +543,7 @@ var methods = {
     }
 
     var payments = Meteor.user().payments;
-    if (payments) {
+    if (payments && payments.id) {
       var customerId = payments.id;
       var data = Meteor.wrapAsync(stripe.customers.retrieve.bind(stripe.customers))(customerId);
 
