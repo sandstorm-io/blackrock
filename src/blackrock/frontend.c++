@@ -673,14 +673,6 @@ private:
         case GrainState::INACTIVE: {
           // Grain is not running. Start it.
 
-          // TODO(integrity): We ought to somehow "claim" the grain here before we call
-          //   volume.getExclusive() so that concurrent claims don't interfere. This probably
-          //   requires a "starting" state in addition to active/inactive. Unfortunately we can't
-          //   just store a promise for the supervisor into the "active" field now because the
-          //   set() will not complete until the promise resolves, and we don't know that there
-          //   is no conflict until the set() completes.
-
-          auto volume = grainState.getVolume();
           Worker::Client worker = frontend.workers->chooseOne();
 
           auto req = worker.restoreGrainRequest();
@@ -688,16 +680,29 @@ private:
           // TODO(perf): parse ID hex to bytes? Be sure to update worker.c++ which logs
           //   id.asChars() in some places.
           packageInfo.setId(params.packageId.asBytes());
-          packageInfo.setVolume(kj::mv(params.packageVolume));
+          packageInfo.setVolume(params.packageVolume);
           req.setCommand(params.command);
-          req.setStorage(kj::mv(params.storageFactory));
+          req.setStorage(params.storageFactory);
           req.setGrainState(grainState);
           req.setExclusiveGrainStateSetter(grainGetResult.getSetter());
-          req.setExclusiveVolume(volume.getExclusiveRequest().send().getExclusive());
           req.setGrainIdForLogging(params.grainIdForLogging);
           req.setCore(params.core);
 
-          return req.send().getGrain();
+          return req.send()
+              .then([](auto&& response) -> kj::Promise<sandstorm::Supervisor::Client> {
+            return response.getGrain();
+          }, [this,KJ_MVCAP(params),retryCount](kj::Exception&& exception) mutable
+              -> kj::Promise<sandstorm::Supervisor::Client> {
+            if (exception.getType() != kj::Exception::Type::DISCONNECTED) {
+              return kj::mv(exception);
+            }
+
+            // Disconnected exception, presumably because the grain state assignable was
+            // concurrently modified. Retry.
+            KJ_LOG(INFO, "RARE: restoreGrain() threw DISCONNECTED, probably due to concurrent "
+                         "calls; retrying", retryCount);
+            return continueGrain(kj::mv(params), retryCount + 1);
+          });
         }
 
         case GrainState::ACTIVE: {

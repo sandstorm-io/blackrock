@@ -423,7 +423,8 @@ public:
                kj::Own<PackageMountSet::PackageMount> packageMountParam,
                sandstorm::Subprocess::Options&& subprocessOptions,
                kj::String grainIdForLoggingParam,
-               sandstorm::SandstormCore::Client core)
+               sandstorm::SandstormCore::Client core,
+               kj::Own<LocalPersistentRegistry::Registration> persistentRegistration)
       : worker(worker),
         workerCap(kj::mv(workerCap)),
         grainState(kj::mv(grainState)),
@@ -445,7 +446,7 @@ public:
         processWaitTask(worker.subprocessSet.waitForSuccess(subprocess)),
         capnpSocket(kj::mv(capnpSocket)),
         rpcClient(*this->capnpSocket, kj::mv(core)),
-        persistentRegistration(worker.persistentRegistry, rpcClient.bootstrap()),
+        persistentRegistration(kj::mv(persistentRegistration)),
         grainIdForLogging(kj::mv(grainIdForLoggingParam)) {
     KJ_LOG(INFO, "starting grain", grainIdForLogging);
   }
@@ -478,7 +479,7 @@ public:
   }
 
   sandstorm::Supervisor::Client getSupervisor() {
-    return persistentRegistration.getWrapped().castAs<sandstorm::Supervisor>();
+    return rpcClient.bootstrap().castAs<sandstorm::Supervisor>();
   }
 
 private:
@@ -502,7 +503,8 @@ private:
   capnp::TwoPartyClient rpcClient;
   // Cap'n Proto RPC connection to the grain's supervisor.
 
-  LocalPersistentRegistry::Registration persistentRegistration;
+  kj::Own<LocalPersistentRegistry::Registration> persistentRegistration;
+  // We hold on to this until the grain shuts down, so that the grain can be restored from storage.
 
   kj::String grainIdForLogging;
 };
@@ -554,31 +556,35 @@ struct WorkerImpl::CommandInfo {
 
 kj::Promise<void> WorkerImpl::newGrain(NewGrainContext context) {
   auto params = context.getParams();
+
+  // Create a promise for the Supervisor, and then make that promise persistent. Although in theory
+  // we don't need this weirdness in the newGrain() path (only restoreGrain()), we can reuse mode
+  // code by doing it in both paths.
+  auto paf = kj::newPromiseAndFulfiller<sandstorm::Supervisor::Client>();
+  auto persistentRegistration = persistentRegistry.makePersistent(kj::mv(paf.promise));
+  sandstorm::Supervisor::Client supervisor =
+      persistentRegistration->getWrapped().castAs<sandstorm::Supervisor>();
+  context.getResults(capnp::MessageSize { 4, 1 }).setGrain(kj::mv(supervisor));
+
+  // Construct objects and create the GrainState Assignable.
   auto storageFactory = params.getStorage();
-
   auto grainVolume = storageFactory.newVolumeRequest().send().getVolume();
-  auto exclusiveVolume = grainVolume.getExclusiveRequest().send().getExclusive();
-
-  auto supervisorPaf = kj::newPromiseAndFulfiller<sandstorm::Supervisor::Client>();
-
   auto grainStateHolder = kj::heap<capnp::MallocMessageBuilder>(8);
-
   auto req = storageFactory.newAssignableRequest<GrainState>();
   {
     auto grainStateValue = req.initInitialValue();
-    grainStateValue.setActive(kj::mv(supervisorPaf.promise));
+    grainStateValue.setActive(supervisor);
     grainStateValue.setVolume(kj::mv(grainVolume));
     grainStateHolder->setRoot(grainStateValue.asReader());
   }
   OwnedAssignable<GrainState>::Client grainState = req.send().getAssignable();
   auto setter = grainState.getRequest().send().getSetter();
 
-  sandstorm::Supervisor::Client supervisor = bootGrain(params.getPackage(),
-      kj::mv(grainStateHolder), kj::mv(setter),
-      kj::mv(exclusiveVolume), params.getCommand(), true,
-      kj::heapString(params.getGrainIdForLogging()), params.getCore());
-
-  supervisorPaf.fulfiller->fulfill(kj::cp(supervisor));
+  // Boot the grain.
+  paf.fulfiller->fulfill(bootGrain(params.getPackage(),
+      kj::mv(grainStateHolder), kj::mv(setter), params.getCommand(), true,
+      kj::heapString(params.getGrainIdForLogging()), params.getCore(),
+      kj::mv(persistentRegistration)));
 
   auto results = context.getResults();
   results.setGrain(kj::mv(supervisor));
@@ -591,36 +597,57 @@ kj::Promise<void> WorkerImpl::newGrain(NewGrainContext context) {
 kj::Promise<void> WorkerImpl::restoreGrain(RestoreGrainContext context) {
   auto params = context.getParams();
 
+  // Create a promise for the Supervisor, and then make that promise persistent. We need to save
+  // the promise into the persistent GrainState *before* we actually attempt to start the grain,
+  // in order to detect if the GrainState has been modified concurrently.
+  auto paf = kj::newPromiseAndFulfiller<sandstorm::Supervisor::Client>();
+  auto persistentRegistration = persistentRegistry.makePersistent(kj::mv(paf.promise));
+  sandstorm::Supervisor::Client supervisor =
+      persistentRegistration->getWrapped().castAs<sandstorm::Supervisor>();
+
+  // Make a copy of the GrainState and modify it to the `active` state.
   auto grainState = params.getGrainState();
   auto grainStateHolder = kj::heap<capnp::MallocMessageBuilder>(
       grainState.totalSize().wordCount + 8);
   grainStateHolder->setRoot(grainState);
-
   auto mutableGrainState = grainStateHolder->getRoot<GrainState>();
-  auto setter = params.getExclusiveGrainStateSetter();
-
-  auto supervisor = bootGrain(
-      params.getPackage(), kj::mv(grainStateHolder), setter,
-      params.getExclusiveVolume(), params.getCommand(), false,
-      kj::heapString(params.getGrainIdForLogging()), params.getCore());
-
   mutableGrainState.setActive(supervisor);
 
+  // Might as well fill in the results now.
+  context.getResults(capnp::MessageSize { 4, 1 }).setGrain(kj::mv(supervisor));
+
+  // Call set() on our GrainState Assignable setter to save the new supervisor cap to storage.
+  // TODO(perf): If we were clever, we could start the grain now but prevent any writes or outgoing
+  //   messages until the set() succeeds. This would be complicated, though, especially since we
+  //   can't call getExclusive() on the volume until we know we actually have exclusivity.
+  auto setter = params.getExclusiveGrainStateSetter();
   auto sizeHint = mutableGrainState.totalSize();
   sizeHint.wordCount += 4;
   auto req = setter.setRequest(sizeHint);
   req.setValue(mutableGrainState);
+  auto fulfiller = kj::mv(paf.fulfiller);
+  return req.send()
+      .then([this,context,params,KJ_MVCAP(setter),KJ_MVCAP(fulfiller),
+             KJ_MVCAP(persistentRegistration),KJ_MVCAP(grainStateHolder)](auto&&) mutable {
+    // OK, the set succeeded, so the grain is officially ours.
 
-  context.getResults(capnp::MessageSize { 4, 1 }).setGrain(kj::mv(supervisor));
-
-  return req.send().then([](auto) {});
+    fulfiller->fulfill(bootGrain(params.getPackage(),
+        kj::mv(grainStateHolder), kj::mv(setter), params.getCommand(), false,
+        kj::heapString(params.getGrainIdForLogging()), params.getCore(),
+        kj::mv(persistentRegistration)));
+  });
 }
 
 sandstorm::Supervisor::Client WorkerImpl::bootGrain(
     PackageInfo::Reader packageInfo, kj::Own<capnp::MessageBuilder> grainState,
-    sandstorm::Assignable<GrainState>::Setter::Client grainStateSetter, Volume::Client grainVolume,
+    sandstorm::Assignable<GrainState>::Setter::Client grainStateSetter,
     sandstorm::spk::Manifest::Command::Reader commandReader, bool isNew,
-    kj::String grainIdForLogging, sandstorm::SandstormCore::Client core) {
+    kj::String grainIdForLogging, sandstorm::SandstormCore::Client core,
+    kj::Own<LocalPersistentRegistry::Registration> persistentRegistration) {
+  // Obtain exclusive control of volume.
+  auto grainVolume = grainState->getRoot<GrainState>().getVolume()
+      .getExclusiveRequest().send().getExclusive();
+
   // Copy command info from params, since params will no longer be valid when we return.
   CommandInfo command(commandReader);
 
@@ -628,7 +655,7 @@ sandstorm::Supervisor::Client WorkerImpl::bootGrain(
   return packageMountSet.getPackage(packageInfo)
       .then([this,isNew,KJ_MVCAP(grainState),KJ_MVCAP(grainStateSetter),
              KJ_MVCAP(command),KJ_MVCAP(grainVolume),KJ_MVCAP(grainIdForLogging),
-             KJ_MVCAP(core)]
+             KJ_MVCAP(core),KJ_MVCAP(persistentRegistration)]
             (auto&& packageMount) mutable {
     // Create the NBD socketpair. The Supervisor will actually mount the NBD device (in its own
     // mount namespace) but we'll implement it in the Worker.
@@ -686,7 +713,7 @@ sandstorm::Supervisor::Client WorkerImpl::bootGrain(
     auto grain = kj::heap<RunningGrain>(
         *this, thisCap(), kj::mv(grainState), kj::mv(grainStateSetter), kj::mv(nbdUserEnd),
         kj::mv(grainVolume), kj::mv(capnpWorkerEnd), kj::mv(packageMount), kj::mv(options),
-        kj::mv(grainIdForLogging), kj::mv(core));
+        kj::mv(grainIdForLogging), kj::mv(core), kj::mv(persistentRegistration));
 
     auto supervisor = grain->getSupervisor();
 

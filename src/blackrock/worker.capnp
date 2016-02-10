@@ -38,20 +38,22 @@ interface Worker {
                    storage :Storage.StorageFactory,
                    grainState :GrainState,
                    exclusiveGrainStateSetter :Util.Assignable(GrainState).Setter,
-                   exclusiveVolume :Storage.Volume,
                    grainIdForLogging :Text,
                    core :SandstormCore)
                -> (grain :Supervisor);
   # Continue an existing grain.
   #
-  # It is the caller's (coordinator's) responsibility to have updated `grainState` to take
-  # ownership of the grain before calling this. `exclusiveGrainStateSetter` and `exclusiveVolume`
-  # are obtained from calling getSetter() on the grain's state Assignable and getExclusive() on the
-  # state's Volume. These capabilities will thus become disconnected if a new worker takes
-  # ownership of the grain, thereby preventing the old owner from corrupting data. Normally a new
-  # worker will only be assigned if the old worker appears unhealthy or dead; the forceable
-  # disconnection is performed to prevent zombies from corrupting data after the new worker has
-  # taken over.
+  # `grainState` is the current value of the grain's GrainState assignable, and
+  # `exclusiveGrainStateSetter` is the setter returned by the get() call that returned
+  # `grainState`. Thus, a `set()` call on `grainStateSetter` will fail if the grain state has
+  # changed.
+  #
+  # The first thing the worker will do is attempt to set the grain state in order to assert its
+  # exclusive ownership. If the initial `set()` fails, `restoreGrain()` throws a "disconnected"
+  # exception, and the caller should start over.
+  #
+  # Assuming the `set()` succeeds, the worker will call `volume.getExclusive()` to make absolutely
+  # sure that no other worker might still be writing to the voluse.
 
   unpackPackage @2 (storage :Storage.StorageFactory) -> (stream :PackageUploadStream);
   # Initiate upload of a package, unpacking it into a fresh Volume.
