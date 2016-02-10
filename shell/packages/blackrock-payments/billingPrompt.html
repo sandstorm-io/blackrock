@@ -274,6 +274,15 @@ All Rights Reserved
         </tr>
         {{/if}}
       </table>
+      <div class="referral-cta">
+        {{#if isPaid}}
+        <p>Get up to <span class="reward-amount">30 GB</span> of free space when your friends share on Oasis!</p>
+        {{else}}
+        <p>Get unlimited grains &amp; up to <span class="reward-amount">2 GB</span> of free space when
+          your friends share on Oasis!</p>
+        {{/if}}
+        <p style="display: inline;"><button style="display: inline;" class="subscribe">Read more</button></p>
+      </div>
       {{#unless mailingListBonus.storage}}
         <div class="subscribe-prompt">
           <p>Get <strong>{{renderStorage MAILING_LIST_BONUS}} bonus storage</strong> by subscribing
