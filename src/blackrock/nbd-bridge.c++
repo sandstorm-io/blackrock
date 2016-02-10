@@ -515,6 +515,16 @@ void NbdDevice::loadKernelModule() {
 NbdBinding::NbdBinding(NbdDevice& device, kj::AutoCloseFd socket, NbdAccessType access)
     : device(setup(device, kj::mv(socket), access)),
       doItThread([&device,KJ_MVCAP(socket)]() mutable {
+        // The NBD driver sometimes does weird things when signals are received. Block common
+        // signals that might be directed at the process but certainly shouldn't be handled by
+        // this thread.
+        sigset_t sigmask;
+        sigemptyset(&sigmask);
+        sigaddset(&sigmask, SIGHUP);
+        sigaddset(&sigmask, SIGCHLD);
+        sigaddset(&sigmask, SIGTERM);
+        KJ_SYSCALL(sigprocmask(SIG_BLOCK, &sigmask, nullptr));
+
         KJ_DEFER(KJ_SYSCALL(ioctl(device.getFd(), NBD_CLEAR_SOCK)) { break; });
         KJ_SYSCALL(ioctl(device.getFd(), NBD_DO_IT));
       }) {}
