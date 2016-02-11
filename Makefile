@@ -20,7 +20,7 @@ all: blackrock.tar.xz
 fast: blackrock-fast.tar.xz
 
 clean:
-	rm -rf blackrock*.tar.xz shell/.meteor
+	rm -rf blackrock*.tar.xz shell/.meteor local-config
 	make -f deps/sandstorm/Makefile clean
 	find shell/packages -type l | xargs -r rm
 
@@ -81,3 +81,33 @@ blackrock-fast.tar.xz: bundle bin/blackrock.unstripped
 	@$(call color,compress fast bundle)
 	@tar c --transform="s,^,blackrock/,S" bin/blackrock bundle | xz -c -0 > blackrock-fast.tar.xz
 
+# ========================================================================================
+# Local testing
+
+.local/mongo:
+	@mkdir -p .local
+	truncate -s 10737418240 .local/mongo
+	/sbin/mkfs.ext4 .local/mongo
+
+.local/storage:
+	@mkdir -p .local
+	truncate -s 10737418240 .local/storage
+	/sbin/mkfs.ext4 .local/storage
+
+local-config: ../prod/blackrock-config.capnp
+	capnp eval --binary -Isrc ../prod/blackrock-config.capnp vagrant > local-config
+
+run-local: bundle local-config .local/mongo .local/storage
+	# We need to bring up one VM in advance to make the vboxnet0 network interface appear.
+	vagrant up storage0
+	bin/blackrock master local-config
+
+kill-local:
+	vagrant destroy -f
+
+local-mongo:
+	mongo -u sandstorm -p "$$(vagrant ssh mongo0 -c 'cat /var/blackrock/bundle/mongo/passwd')" --authenticationDatabase admin 172.28.128.50/meteor
+
+local-admintoken:
+	vagrant ssh frontend0 -c 'echo -n testtoken > /var/blackrock/bundle/sandstorm/adminToken'
+	@echo "Now go to: http://localrock.sandstorm.io:6080/admin/testtoken"
