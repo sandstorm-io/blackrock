@@ -184,7 +184,9 @@ function handleWebhookEvent(db, event) {
 
     // Send an email.
     var email = _.find(SandstormDb.getUserEmails(user), function (email) { return email.primary; });
-    if (!email) {
+    if (email) {
+      email = email.email;
+    } else {
       email = Meteor.wrapAsync(stripe.customers.retrieve.bind(stripe.customers))
           (invoice.customer).email;
     }
@@ -256,7 +258,7 @@ function handleWebhookEvent(db, event) {
 
     if (email) {
       SandstormEmail.send({
-        to: email.email,
+        to: email,
         from: serverTitle + " <" + globalDb.getReturnAddress() + ">",
         subject: mailSubject,
         text: mailText,
