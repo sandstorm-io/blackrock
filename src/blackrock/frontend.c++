@@ -127,23 +127,25 @@ protected:
     });
 
     return owner.getRequest().send()
-        .then([params,grainId,context](auto&& getResults) mutable -> kj::Promise<void> {
+        .then([this,params,grainId,context](auto&& getResults) mutable -> kj::Promise<void> {
       auto userInfo = getResults.getValue();
 
       for (auto grain: userInfo.getGrains()) {
         if (grain.getId() == grainId) {
           return grain.getState().getRequest().send()
-              .then([context](auto&& response) mutable -> kj::Promise<void> {
+              .then([this,context,grainId](auto&& response) mutable -> kj::Promise<void> {
             auto grainState = response.getValue();
             if (grainState.isActive()) {
               auto supervisor = grainState.getActive();
-              context.releaseParams();
 
-              return supervisor.keepAliveRequest().send()
+              return timer.timeoutAfter(4 * kj::SECONDS, supervisor.keepAliveRequest().send())
                   .then([KJ_MVCAP(supervisor),context](auto) mutable -> kj::Promise<void> {
                 context.getResults(capnp::MessageSize {4, 1}).setSupervisor(kj::mv(supervisor));
                 return kj::READY_NOW;
-              }, [](kj::Exception&& e) -> kj::Promise<void> {
+              }, [grainId](kj::Exception&& e) -> kj::Promise<void> {
+                KJ_LOG(INFO, "RARE: (getGrain) GrainState is active, but supervisor appears dead.",
+                       grainId, e);
+
                 // Threw exception. Assume dead.
                 return KJ_EXCEPTION(DISCONNECTED, "grain supervisor is dead");
               });
@@ -736,7 +738,8 @@ private:
             //   waiting for the previous worker to set it to `inactive`. Then we could pause much
             //   longer, so that we don't interrupt an unmount that has a lot of data to flush.
             //   This should be exceedingly rare, though. In fact, this whole branch is rare.
-            KJ_LOG(INFO, "RARE: GrainState is active, but supervisor appears dead.", e);
+            KJ_LOG(INFO, "RARE: (startGrain) GrainState is active, but supervisor appears dead.",
+                   params.grainIdForLogging, e);
 
             return timer.afterDelay(4 * kj::SECONDS)
                 .then([KJ_MVCAP(grainGetResult),grainState]() {
