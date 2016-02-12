@@ -564,7 +564,6 @@ kj::Promise<void> WorkerImpl::newGrain(NewGrainContext context) {
   auto persistentRegistration = persistentRegistry.makePersistent(kj::mv(paf.promise));
   sandstorm::Supervisor::Client supervisor =
       persistentRegistration->getWrapped().castAs<sandstorm::Supervisor>();
-  context.getResults(capnp::MessageSize { 4, 1 }).setGrain(kj::mv(supervisor));
 
   // Construct objects and create the GrainState Assignable.
   auto storageFactory = params.getStorage();
@@ -586,7 +585,7 @@ kj::Promise<void> WorkerImpl::newGrain(NewGrainContext context) {
       kj::heapString(params.getGrainIdForLogging()), params.getCore(),
       kj::mv(persistentRegistration)));
 
-  auto results = context.getResults();
+  auto results = context.getResults(capnp::MessageSize { 4, 1 });
   results.setGrain(kj::mv(supervisor));
   results.setGrainState(kj::mv(grainState));
 
