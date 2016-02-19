@@ -213,7 +213,7 @@ All Rights Reserved
           </td>
         </tr>
         <tr>
-          <td colspan="2"><strong>Usage (based on current plan):</strong></td>
+          <td colspan="2"><h4>Usage (based on current plan):</h4></td>
         </tr>
         <tr>
           <td>Compute Units</td>
@@ -274,13 +274,23 @@ All Rights Reserved
         </tr>
         {{/if}}
       </table>
+
+      <h4 class="free-stuff-section-header">Get free storage{{#unless isPaid}} &amp; unlimited grains{{/unless}}:</h4>
       {{#unless mailingListBonus.storage}}
-        <div class="subscribe-prompt">
-          <p>Get <strong>{{renderStorage MAILING_LIST_BONUS}} bonus storage</strong> by subscribing
-            to e-mail announcements (1-2 messages per month):</p>
-          <p><button class="subscribe">Subscribe</button></p>
-        </div>
+      <div class="free-stuff">
+        <p>Get <strong>{{renderStorage MAILING_LIST_BONUS}} bonus storage</strong> by subscribing
+          to announcements (1-2 emails per month):</p>
+        <button class="subscribe">Subscribe</button>
+      </div>
       {{/unless}}
+      <div class="free-stuff">
+        {{#if isPaid}}
+        <p>Get up to <span class="reward-amount">30 GB</span> of free space when your friends share on Oasis!</p>
+        {{else}}
+        <p>Get up to <span class="reward-amount">2 GB bonus storage</span> and <span class="reward-amount">unlimited grains</span> by sharing with your friends on Oasis!</p>
+        {{/if}}
+        <a href="{{pathFor 'referrals'}}" class="like-a-button">Learn more</a>
+      </div>
     {{/if}}{{/with}}
   </div>
 
