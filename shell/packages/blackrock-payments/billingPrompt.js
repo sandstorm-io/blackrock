@@ -334,6 +334,9 @@ var helpers = {
   myPlan: function () {
     return this.db.getMyPlan();
   },
+  isPaid: function () {
+    return (Meteor.user() && Meteor.user().plan && Meteor.user().plan !== "free");
+  },
   myQuota: function () {
     return this.db.getUserQuota(Meteor.user());
   },
