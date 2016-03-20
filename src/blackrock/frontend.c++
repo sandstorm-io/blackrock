@@ -415,7 +415,7 @@ protected:
           req.setMetadata(metadata);
           req.setStorage(kj::mv(storageFactory));
           return req.send().then([this,backupId,KJ_MVCAP(storage)](auto&& response) mutable {
-            auto req2 = storage.setRequest<Blob>(capnp::MessageSize {4, 1});
+            auto req2 = storage.setRequest<sandstorm::Blob>(capnp::MessageSize {4, 1});
             req2.setName(kj::str("backup-", backupId));
             req2.setObject(response.getData());
             return req2.send().then([](auto&&) {});
@@ -437,9 +437,9 @@ protected:
     StorageFactory::Client storageFactory = storage.getFactoryRequest().send().getFactory();
 
     auto blob = ({
-      auto req = storage.getRequest<Blob>();
+      auto req = storage.getRequest<sandstorm::Blob>();
       req.setName(kj::str("backup-", backupId));
-      req.send().getObject().castAs<Blob>();
+      req.send().getObject().castAs<sandstorm::Blob>();
     });
 
     auto req = worker.unpackBackupRequest();
@@ -481,7 +481,7 @@ protected:
 
     auto upload = storageFactory.uploadBlobRequest().send();
 
-    auto req = storage.setRequest<Blob>();
+    auto req = storage.setRequest<sandstorm::Blob>();
     req.setName(kj::str("backup-", backupId));
     req.setObject(upload.getBlob());
     context.releaseParams();
@@ -501,11 +501,11 @@ protected:
 
     StorageRootSet::Client storage = frontend.storageRoots->chooseOne();
 
-    auto req = storage.getRequest<Blob>();
+    auto req = storage.getRequest<sandstorm::Blob>();
     req.setName(kj::str("backup-", backupId));
     context.releaseParams();
 
-    auto req2 = req.send().getObject().castAs<Blob>().writeToRequest();
+    auto req2 = req.send().getObject().castAs<sandstorm::Blob>().writeToRequest();
     req2.setStream(kj::mv(stream));
     return req2.send().then([](auto&&) {});
   }

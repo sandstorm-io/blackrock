@@ -353,7 +353,7 @@ KJ_TEST("blob") {
   KJ_EXPECT(size == 4096, size);
 
   {
-    auto req = env.storage.setRequest<Blob>();
+    auto req = env.storage.setRequest<sandstorm::Blob>();
     req.setName("blob");
     req.setObject(kj::mv(blob));
     req.send().wait(env.io.waitScope);

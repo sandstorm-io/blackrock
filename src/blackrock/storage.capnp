@@ -9,6 +9,7 @@ using persistent = import "/capnp/persistent.capnp".persistent;
 
 using Util = import "/sandstorm/util.capnp";
 using ByteStream = Util.ByteStream;
+using Blob = Util.Blob;
 
 using Timepoint = UInt64;
 # Nanoseconds since epoch.
@@ -20,27 +21,6 @@ interface StorageSibling {
 }
 
 # ========================================================================================
-
-interface Blob {
-  # Represents a large byte blob living in long-term storage.
-
-  getSize @0 () -> (size :UInt64);
-  # Get the total size of the blob. May block if the blob is still being uploaded and the size is
-  # not yet known.
-
-  writeTo @1 (stream :ByteStream, startAtOffset :UInt64 = 0) -> (handle :Util.Handle);
-  # Write the contents of the blob to `stream`.
-
-  getSlice @2 (offset :UInt64, size :UInt32) -> (data :Data);
-  # Read a slice of the blob starting at the given offset. `size` cannot be greater than Cap'n
-  # Proto's limit of 2^29-1, and reasonable servers will likely impose far lower limits. If the
-  # slice would cross past the end of the blob, it is truncated. Otherwise, `data` is always
-  # exactly `size` bytes (though the caller should check for security purposes).
-  #
-  # One technique that makes a lot of sense is to start off by calling e.g. `getSlice(0, 65536)`.
-  # If the returned data is less than 65536 bytes then you know you got the whole blob, otherwise
-  # you may want to switch to `writeTo`.
-}
 
 interface Volume {
   # Block storage supporting up to 2^32 blocks, typically of 4k each.
