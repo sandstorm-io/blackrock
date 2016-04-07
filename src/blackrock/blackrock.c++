@@ -32,6 +32,8 @@
 #include "nbd-bridge.h"
 #include "gce.h"
 #include <sandstorm/backup.h>
+#include <sys/time.h>
+#include <sys/resource.h>
 
 namespace blackrock {
 
@@ -617,6 +619,8 @@ private:
       }
     }
 
+    increaseFdLimit();
+
     auto pidfile = sandstorm::raiiOpen("/var/run/blackrock-slave",
         O_RDWR | O_CREAT | O_CLOEXEC, 0600);
     int l;
@@ -762,6 +766,14 @@ private:
     do {
       KJ_SYSCALL(n = splice(inFd, nullptr, outFd, nullptr, 4096, 0));
     } while (n > 0);
+  }
+
+  void increaseFdLimit() {
+    struct rlimit limit;
+    memset(&limit, 0, sizeof(limit));
+    limit.rlim_cur = 65536;
+    limit.rlim_max = 65536;
+    KJ_SYSCALL(setrlimit(RLIMIT_NOFILE, &limit));
   }
 };
 
