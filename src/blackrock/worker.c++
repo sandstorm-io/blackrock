@@ -988,18 +988,19 @@ kj::Promise<void> WorkerImpl::packBackup(PackBackupContext context) {
 
 class SupervisorMain::SystemConnectorImpl: public sandstorm::SupervisorMain::SystemConnector {
 public:
-  RunResult run(kj::AsyncIoContext& ioContext,
-                sandstorm::Supervisor::Client mainCapability) const override {
+  kj::Promise<void> run(kj::AsyncIoContext& ioContext,
+                        sandstorm::Supervisor::Client mainCapability,
+                        kj::Own<sandstorm::CapRedirector> coreRedirector) const override {
     auto runner = kj::heap<Runner>(ioContext, kj::mv(mainCapability));
 
     capnp::MallocMessageBuilder message(8);
     auto vatId = message.getRoot<capnp::rpc::twoparty::VatId>();
     vatId.setSide(capnp::rpc::twoparty::Side::SERVER);
-    auto core = runner->rpcSystem.bootstrap(vatId).castAs<sandstorm::SandstormCore>();
+    coreRedirector->setTarget(
+        runner->rpcSystem.bootstrap(vatId).castAs<sandstorm::SandstormCore>());
 
     auto promise = runner->network.onDisconnect();
-
-    return { promise.attach(kj::mv(runner)), kj::mv(core) };
+    return promise.attach(kj::mv(runner));
   }
 
   void checkIfAlreadyRunning() const override {

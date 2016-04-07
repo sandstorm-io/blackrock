@@ -138,7 +138,13 @@ protected:
             if (grainState.isActive()) {
               auto supervisor = grainState.getActive();
 
-              return timer.timeoutAfter(4 * kj::SECONDS, supervisor.keepAliveRequest().send())
+              // Create a new SandstormCore to send along.
+              auto coreReq = coreFactory.getSandstormCoreRequest();
+              coreReq.setGrainId(grainId);
+              auto keepAliveReq = supervisor.keepAliveRequest();
+              keepAliveReq.setCore(coreReq.send().getCore());
+
+              return timer.timeoutAfter(4 * kj::SECONDS, keepAliveReq.send())
                   .then([KJ_MVCAP(supervisor),context](auto) mutable -> kj::Promise<void> {
                 context.getResults(capnp::MessageSize {4, 1}).setSupervisor(kj::mv(supervisor));
                 return kj::READY_NOW;
@@ -710,7 +716,9 @@ private:
         case GrainState::ACTIVE: {
           // Attempt to keep-alive the old supervisor.
           auto supervisor = grainState.getActive();
-          auto promise = timer.timeoutAfter(4 * kj::SECONDS, supervisor.keepAliveRequest().send());
+          auto keepAliveReq = supervisor.keepAliveRequest();
+          keepAliveReq.setCore(params.core);
+          auto promise = timer.timeoutAfter(4 * kj::SECONDS, keepAliveReq.send());
           return promise.then([KJ_MVCAP(supervisor)](auto&&) mutable
               -> kj::Promise<sandstorm::Supervisor::Client> {
             // Keep-alive succeeded. Use existing supervisor.
