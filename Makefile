@@ -48,6 +48,9 @@ meteor-env: shell/.meteor/cordova-plugins shell/.meteor/platforms shell/.meteor/
 bundle: meteor-env tmp/.deps
 	make -f deps/sandstorm/Makefile bundle
 
+bin/e2fsck: tmp/e2fsprogs/e2fsck/e2fsck check-e2fsprogs.sh
+	./check-e2fsprogs.sh
+
 shell-env: meteor-env tmp/.deps
 	make -f deps/sandstorm/Makefile shell-env
 
@@ -63,6 +66,16 @@ deps/sandstorm:
 	@mkdir -p deps
 	git clone https://github.com/sandstorm-io/sandstorm.git deps/sandstorm
 
+deps/e2fsprogs:
+	@$(call color,downloading e2fsprogs)
+	@mkdir -p deps
+	git clone https://github.com/tytso/e2fsprogs.git deps/e2fsprogs
+
+tmp/e2fsprogs/e2fsck/e2fsck: deps/e2fsprogs
+	@$(call color,build e2fsprogs)
+	@mkdir -p tmp/e2fsprogs
+	cd tmp/e2fsprogs && ../../deps/e2fsprogs/configure CFLAGS='-Os -DEXT2_SKIP_UUID' LDFLAGS='-static' && make -j$(PARALLEL)
+
 update-deps:
 	@$(call color,updating sandstorm)
 	@cd deps/sandstorm && echo "pulling sandstorm..." && git pull && make update-deps
@@ -73,13 +86,13 @@ bin/blackrock.unstripped: bundle
 	@cp bin/blackrock bin/blackrock.unstripped
 	@strip bin/blackrock
 
-blackrock.tar.xz: bundle bin/blackrock.unstripped
+blackrock.tar.xz: bundle bin/e2fsck bin/blackrock.unstripped
 	@$(call color,compress release bundle)
-	@tar c --transform="s,^,blackrock/,S" bin/blackrock bundle | xz -c -9e > blackrock.tar.xz
+	@tar c --transform="s,^,blackrock/,S" bin/blackrock bin/e2fsck bin/tune2fs bin/resize2fs bundle | xz -c -9e > blackrock.tar.xz
 
-blackrock-fast.tar.xz: bundle bin/blackrock.unstripped
+blackrock-fast.tar.xz: bundle bin/e2fsck bin/blackrock.unstripped
 	@$(call color,compress fast bundle)
-	@tar c --transform="s,^,blackrock/,S" bin/blackrock bundle | xz -c -0 > blackrock-fast.tar.xz
+	@tar c --transform="s,^,blackrock/,S" bin/blackrock bin/e2fsck bin/tune2fs bin/resize2fs bundle | xz -c -0 > blackrock-fast.tar.xz
 
 # ========================================================================================
 # Local testing
@@ -97,7 +110,7 @@ blackrock-fast.tar.xz: bundle bin/blackrock.unstripped
 local-config: ../prod/blackrock-config.capnp
 	capnp eval --binary -Isrc ../prod/blackrock-config.capnp vagrant > local-config
 
-run-local: bundle local-config .local/mongo .local/storage
+run-local: bundle bin/e2fsck local-config .local/mongo .local/storage
 	# We need to bring up one VM in advance to make the vboxnet0 network interface appear.
 	vagrant up storage0
 	bin/blackrock master local-config
