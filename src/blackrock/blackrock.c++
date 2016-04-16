@@ -31,6 +31,7 @@
 #include <stdio.h>
 #include "nbd-bridge.h"
 #include "gce.h"
+#include "bundle.h"
 #include <sandstorm/backup.h>
 #include <sys/time.h>
 #include <sys/resource.h>
@@ -620,6 +621,7 @@ private:
     }
 
     increaseFdLimit();
+    createSandstormDirectories();
 
     auto pidfile = sandstorm::raiiOpen("/var/run/blackrock-slave",
         O_RDWR | O_CREAT | O_CLOEXEC, 0600);

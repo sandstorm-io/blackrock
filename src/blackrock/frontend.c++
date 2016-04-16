@@ -892,8 +892,6 @@ kj::Promise<void> FrontendImpl::execLoop(MongoInfo&& mongoInfo, uint replicaNumb
   auto promise = kj::evalNow([&]() {
     KJ_LOG(INFO, "starting node...");
 
-    createSandstormDirectories();
-
     sandstorm::Subprocess subprocess([&]() -> int {
       enterSandstormBundle();
 
@@ -986,8 +984,6 @@ kj::Promise<void> MongoImpl::execLoop(kj::PromiseFulfiller<void>& passwordFulfil
   auto rateLimit = timer.afterDelay(10 * kj::SECONDS);
 
   return kj::evalNow([&]() {
-    createSandstormDirectories();
-
     sandstorm::Subprocess subprocess([&]() -> int {
       enterSandstormBundle();
 
