@@ -5,6 +5,10 @@ set -eu
 echo findProvider canonical:blackrock/sparse-data
 read MKSPARSE
 
+echo findProvider canonical:blackrock/mke2fs.conf
+read MKE2FS_CONFIG
+export MKE2FS_CONFIG
+
 echo newOutput blackrock/blank-ext4.sparse
 read OUTPUT
 
