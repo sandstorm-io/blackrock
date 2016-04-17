@@ -1136,6 +1136,8 @@ kj::MainBuilder::Validity MetaSupervisorMain::run() {
 
   if (isNew) {
     device.format();
+  } else {
+    device.fixSurpriseFeatures();
   }
 
   KJ_ON_SCOPE_SUCCESS(device.trimJournalIfClean());
@@ -1308,6 +1310,8 @@ kj::MainBuilder::Validity BackupMain::run(kj::StringPtr filename) {
   NbdBinding binding(device, kj::AutoCloseFd(3), NbdAccessType::READ_WRITE);
   if (restore) {
     device.format();
+  } else {
+    device.fixSurpriseFeatures();
   }
   KJ_ON_SCOPE_SUCCESS(if (restore) device.trimJournalIfClean());
   Mount mount(device.getPath(), "/mnt", MS_NOATIME, "discard");

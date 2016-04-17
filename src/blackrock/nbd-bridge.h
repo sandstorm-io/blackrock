@@ -89,6 +89,18 @@ public:
   // unmount to reduce disk usage. (The journal normally doesn't get TRIMed even when the contents
   // have already been committed. This seems to be a deficiency in the ext4 driver.)
 
+  void fixSurpriseFeatures();
+  // Check if this volume has the "surprise features" of 64bit and metadata_checksum enabled. If
+  // so, fix the situation. The surprise features were accidentally enabled on many grains in
+  // production due to an unexpected change in /etc/mke2fs.conf landing in Debian Testing. Since
+  // we use mke2fs to create the zygote image at compile time, these features ended up enabled
+  // in production. The metadata_checksum feature is buggy on our older production kernels, and
+  // the 64bit option breaks trimJournalIfClean() (we could fix that, but the 64bit option is
+  // not helpful to us, so better to avoid having multiple code paths!).
+  //
+  // Note: This method runs subprocesses and may block. It CANNOT be run from the main worker
+  //   process!
+
   static void resetAll();
   // Iterate through all the nbd devices and reset them, in order to un-block processes wedged
   // trying to read disconnected devices.

@@ -476,6 +476,56 @@ void NbdDevice::trimJournalIfClean() {
 #undef EXPECTN
 }
 
+void NbdDevice::fixSurpriseFeatures() {
+  Ext4Record<1024> superblock(fd, 1024);
+  bool hasJournal = superblock.le32(0x5C) & 0x4;
+  bool is64bit = superblock.le32(0x60) & 0x80;
+  bool isChecksummed = superblock.le32(0x64) & 0x400;
+  if (hasJournal && !is64bit && !isChecksummed) {
+    // Clean.
+    return;
+  }
+
+  KJ_LOG(WARNING, "fixing filesystem with surprise features", is64bit, isChecksummed);
+
+  // First, run e2fsck to make sure we're operating on a clean filesystem, so that the other tools
+  // can do their thing.
+
+  {
+    int status = sandstorm::Subprocess({"/blackrock/bin/e2fsck", "-fp", path}).waitForExit();
+
+    // Status code bit 1 indicates that filesystem errors were fixed, so it is really a
+    // success code. So, we mask it out here.
+    KJ_ASSERT((status & ~1) == 0, "e2fsck failed", status);
+  }
+
+  // The journal should have been replayed by now. Remove it, because there is no direct way to
+  // flip the flags on the journal. We'll remake it later.
+  if (hasJournal) {
+    sandstorm::Subprocess({
+        "/blackrock/bin/tune2fs", "-O", "^has_journal", path}).waitForSuccess();
+  }
+
+  // Next up: Disable checksumming.
+  if (isChecksummed) {
+    sandstorm::Subprocess({
+        "/blackrock/bin/tune2fs", "-O", "^metadata_csum,uninit_bg", path}).waitForSuccess();
+  }
+
+  // Finally, switch to 32-bit.
+  if (is64bit) {
+    sandstorm::Subprocess({"/blackrock/bin/resize2fs", "-s", path}).waitForSuccess();
+  }
+
+  // OK, now reinstate the journal.
+  sandstorm::Subprocess({
+      "/blackrock/bin/tune2fs", "-O", "has_journal", path}).waitForSuccess();
+
+  // Since 64-bitness caused us to fail to trim journals, go ahead and trim now to reclaim the
+  // user's storage space.
+  trimJournalIfClean();
+}
+
 void NbdDevice::resetAll() {
   for (uint i = 0; i < MAX_NBDS; i++) {
     auto devname = kj::str("/dev/nbd", i);
