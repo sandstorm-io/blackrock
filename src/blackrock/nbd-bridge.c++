@@ -442,7 +442,14 @@ void NbdDevice::trimJournalIfClean() {
         EXPECT(inode.le32(off + 0x8), == physicalPos, "journal extents not contiguous?");
       }
 
-      uint len = inode.le32(off + 0x4) & 0x7fffu;  // don't care if it's initialized
+      uint len = inode.le16(off + 0x4);
+      if (len > 32768) {
+        // A value greater than 32768 means the extent is "uninitialized" (which we don't care
+        // about), and the actual length can be found by subtracting 32768. Note that if the value
+        // is *exactly* 32768 bytes, this doesn't apply, because a zero-length extent would be
+        // silly, I guess.
+        len -= 32768;
+      }
       logicalPos += len;
       physicalPos += len;
     }
