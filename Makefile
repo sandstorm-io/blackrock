@@ -44,6 +44,8 @@ shell/.meteor/packages: deps/sandstorm/shell/.meteor/packages tmp/.deps shell/.m
 	@find shell/packages -type l | xargs -r rm
 	@(cd shell/packages && ln -s ../../deps/sandstorm/shell/packages/* .)
 meteor-env: shell/.meteor/cordova-plugins shell/.meteor/platforms shell/.meteor/release shell/.meteor/versions shell/.meteor/packages
+	@ # Hack: If we don't "npm install" inside Sandstorm itself, we may have broken symlinks, e.g. introjs.css.
+	@cd deps/sandstorm/shell && meteor npm install
 
 bundle: meteor-env tmp/.deps
 	make -f deps/sandstorm/Makefile bundle
@@ -81,7 +83,7 @@ update-deps:
 	@cd deps/sandstorm && echo "pulling sandstorm..." && git pull && make update-deps
 
 bin/blackrock.unstripped: bundle
-	# TODO(cleanup): This is ugly.
+	@ # TODO(cleanup): This is ugly.
 	@$(call color,strip binaries)
 	@cp bin/blackrock bin/blackrock.unstripped
 	@strip bin/blackrock
