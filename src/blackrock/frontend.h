@@ -53,7 +53,10 @@ private:
   pid_t frontendPid = 0;
   kj::TaskSet tasks;
 
-  kj::Promise<void> execLoop(MongoInfo&& mongoInfo, uint replicaNumber, uint port);
+  kj::Promise<void> startExecLoop(MongoInfo&& mongoInfo, uint replicaNumber,
+                                  uint port, uint smtpPort);
+  kj::Promise<void> execLoop(MongoInfo&& mongoInfo, uint replicaNumber,
+                             kj::AutoCloseFd&& http, kj::AutoCloseFd&& smtp);
 
   void taskFailed(kj::Exception&& exception) override;
 };

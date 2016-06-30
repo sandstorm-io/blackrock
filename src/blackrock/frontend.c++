@@ -849,7 +849,7 @@ FrontendImpl::FrontendImpl(kj::Network& network, kj::Timer& timer,
       // the front-end.
       uint n = this->config.getReplicasPerMachine();
       for (uint i = 0; i < n; i++) {
-        tasks.add(execLoop(MongoInfo(mongoInfo), replicaNumber * n + i, 6080 + i));
+        tasks.add(startExecLoop(MongoInfo(mongoInfo), replicaNumber * n + i, 6080 + i, 30025 + i));
       }
 
       return capnpServer.listen(kj::mv(listener));
@@ -885,7 +885,48 @@ BackendSet<Mongo>::Client FrontendImpl::getMongoBackendSet() {
   return kj::addRef(*mongos);
 }
 
-kj::Promise<void> FrontendImpl::execLoop(MongoInfo&& mongoInfo, uint replicaNumber, uint port) {
+static kj::AutoCloseFd raiiSocket(int domain, int type, int protocol) {
+  int fd;
+  KJ_SYSCALL(fd = socket(domain, type | SOCK_CLOEXEC, protocol));
+  return kj::AutoCloseFd(fd);
+}
+
+static kj::AutoCloseFd ensureFdGt(kj::AutoCloseFd&& fd, int min) {
+  if (fd.get() < min) {
+    int newFd;
+    KJ_SYSCALL(newFd = fcntl(fd, F_DUPFD, min));
+    return kj::AutoCloseFd(newFd);
+  } else {
+    return kj::mv(fd);
+  }
+}
+
+kj::Promise<void> FrontendImpl::startExecLoop(MongoInfo&& mongoInfo, uint replicaNumber,
+                                              uint port, uint smtpPort) {
+  // Create the HTTP and SMTP listen ports in advance so that when node dies, connections will
+  // wait for a new node process to start rather than fail outright.
+  auto http = ensureFdGt(raiiSocket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0), 5);
+  auto smtp = ensureFdGt(raiiSocket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0), 5);
+
+  int optval = 1;
+  KJ_SYSCALL(setsockopt(http, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval)));
+  KJ_SYSCALL(setsockopt(smtp, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval)));
+
+  struct sockaddr_in addr;
+  memset(&addr, 0, sizeof(addr));
+  addr.sin_port = htons(port);
+  KJ_SYSCALL(bind(http, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)));
+  addr.sin_port = htons(smtpPort);
+  KJ_SYSCALL(bind(smtp, reinterpret_cast<struct sockaddr*>(&addr), sizeof(addr)));
+
+  KJ_SYSCALL(listen(http, SOMAXCONN));
+  KJ_SYSCALL(listen(smtp, SOMAXCONN));
+
+  return execLoop(kj::mv(mongoInfo), replicaNumber, kj::mv(http), kj::mv(smtp));
+}
+
+kj::Promise<void> FrontendImpl::execLoop(MongoInfo&& mongoInfo, uint replicaNumber,
+                                         kj::AutoCloseFd&& http, kj::AutoCloseFd&& smtp) {
   // If node fails, we will wait until at least 10 seconds from now before restarting it.
   auto rateLimit = timer.afterDelay(10 * kj::SECONDS);
 
@@ -897,7 +938,7 @@ kj::Promise<void> FrontendImpl::execLoop(MongoInfo&& mongoInfo, uint replicaNumb
 
       // Set up environment.
       KJ_SYSCALL(setenv("ROOT_URL", config.getBaseUrl().cStr(), true));
-      KJ_SYSCALL(setenv("PORT", kj::str(port).cStr(), true));
+      KJ_SYSCALL(setenv("PORT", "4321", true));  // a lie, doesn't matter
       KJ_SYSCALL(setenv("MONGO_URL",
           kj::str("mongodb://", mongoInfo, "/meteor?authSource=admin").cStr(), true));
       KJ_SYSCALL(setenv("MONGO_OPLOG_URL",
@@ -933,8 +974,12 @@ kj::Promise<void> FrontendImpl::execLoop(MongoInfo&& mongoInfo, uint replicaNumb
           ", \"replicaNumber\":", replicaNumber,
           "}").cStr(), true));
 
+      // Pass in special FDs.
+      KJ_SYSCALL(dup2(smtp, 3));
+      KJ_SYSCALL(dup2(http, 4));
+
       // Execute!
-      KJ_SYSCALL(execl("bin/node", "bin/node", "main.js", (char*)nullptr));
+      KJ_SYSCALL(execl("bin/node", "bin/node", "sandstorm-main.js", (char*)nullptr));
       KJ_UNREACHABLE;
     });
 
@@ -947,8 +992,8 @@ kj::Promise<void> FrontendImpl::execLoop(MongoInfo&& mongoInfo, uint replicaNumb
   }).catch_([KJ_MVCAP(rateLimit)](kj::Exception&& exception) mutable {
     KJ_LOG(ERROR, "frontend died; restarting", exception);
     return kj::mv(rateLimit);
-  }).then([this,KJ_MVCAP(mongoInfo),replicaNumber, port]() mutable {
-    return execLoop(kj::mv(mongoInfo), replicaNumber, port);
+  }).then([this,KJ_MVCAP(mongoInfo),replicaNumber,KJ_MVCAP(http),KJ_MVCAP(smtp)]() mutable {
+    return execLoop(kj::mv(mongoInfo), replicaNumber, kj::mv(http), kj::mv(smtp));
   });
 }
 
