@@ -934,6 +934,10 @@ kj::Promise<void> FrontendImpl::execLoop(MongoInfo&& mongoInfo, uint replicaNumb
     KJ_LOG(INFO, "starting node...");
 
     sandstorm::Subprocess subprocess([&]() -> int {
+      // Hint to the kernel that if we run out of memory, it should try killing Node first.
+      kj::FdOutputStream(sandstorm::raiiOpen("/proc/self/oom_score_adj", O_WRONLY | O_CLOEXEC))
+          .write("1000\n", 5);
+
       enterSandstormBundle();
 
       // Set up environment.
