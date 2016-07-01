@@ -7,7 +7,7 @@ var messageListener = function (showPrompt, template, event) {
     return;
   }
 
-  if (event.data.id != template.id) {
+  if (event.data.id !== template.id) {
     return;
   }
 
