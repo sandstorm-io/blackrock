@@ -17,6 +17,7 @@
 #include <sched.h>
 #include <sys/eventfd.h>
 #include <sys/prctl.h>
+#include <sys/mount.h>
 
 namespace blackrock {
 namespace {
@@ -76,6 +77,7 @@ private:
 
   kj::MainBuilder::Validity run() {
     KJ_SYSCALL(unshare(CLONE_NEWNS), "are you root?");
+    KJ_SYSCALL(mount("none", "/", nullptr, MS_REC | MS_PRIVATE, nullptr));
 
     NbdDevice::loadKernelModule();
     bool isNew = faccessat(storageDir, "roots/root", F_OK, 0) < 0;

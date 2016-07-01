@@ -27,6 +27,15 @@ namespace blackrock {
 
 namespace {
 
+void unshareMountNamespace() {
+  KJ_SYSCALL(unshare(CLONE_NEWNS));
+
+  // To really unshare the mount namespace, we also have to make sure all mounts are private.
+  // The parameters here were derived by strace'ing `mount --make-rprivate /`.  AFAICT the flags
+  // are undocumented.  :(
+  KJ_SYSCALL(mount("none", "/", nullptr, MS_REC | MS_PRIVATE, nullptr));
+}
+
 class BlobDownloadStreamImpl: public sandstorm::ByteStream::Server {
 public:
   BlobDownloadStreamImpl(kj::AutoCloseFd fd): target(kj::mv(fd)) {}
@@ -1106,7 +1115,7 @@ kj::MainBuilder::Validity MetaSupervisorMain::run() {
   KJ_SYSCALL(fcntl(4, F_SETFD, FD_CLOEXEC));
 
   // Enter mount namespace, to mount the grain.
-  KJ_SYSCALL(unshare(CLONE_NEWNS));
+  unshareMountNamespace();
 
   // Unmount all packages other than our own, so that we don't hold them open in our mount
   // namespace.
@@ -1245,7 +1254,7 @@ static void seteugidNoHang(uid_t uid, gid_t gid) {
 
 kj::MainBuilder::Validity UnpackMain::run() {
   // Enter mount namespace!
-  KJ_SYSCALL(unshare(CLONE_NEWNS));
+  unshareMountNamespace();
 
   // We'll mount our package on /mnt because it's our own mount namespace so why not?
   NbdDevice device;
@@ -1303,7 +1312,7 @@ kj::MainFunc BackupMain::getMain() {
 
 kj::MainBuilder::Validity BackupMain::run(kj::StringPtr filename) {
   // Enter mount namespace!
-  KJ_SYSCALL(unshare(CLONE_NEWNS));
+  unshareMountNamespace();
 
   // We'll mount our grain on /mnt because it's our own mount namespace so why not?
   NbdDevice device;
