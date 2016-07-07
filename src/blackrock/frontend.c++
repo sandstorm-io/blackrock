@@ -74,7 +74,7 @@ protected:
         packageInfo.setVolume(kj::mv(packageVolume));
         req.setCommand(params.getCommand());
         req.setStorage(kj::mv(storageFactory));
-        req.setGrainIdForLogging(grainId);
+        req.setGrainId(grainId);
         req.setCore(core);
         req.send();
       });
@@ -658,7 +658,7 @@ private:
     StorageFactory::Client storageFactory;
     Volume::Client packageVolume;
     capnp::Text::Reader packageId;
-    capnp::Text::Reader grainIdForLogging;
+    capnp::Text::Reader grainId;
     sandstorm::spk::Manifest::Command::Reader command;
     sandstorm::SandstormCore::Client core;
   };
@@ -693,7 +693,7 @@ private:
           req.setStorage(params.storageFactory);
           req.setGrainState(grainState);
           req.setExclusiveGrainStateSetter(grainGetResult.getSetter());
-          req.setGrainIdForLogging(params.grainIdForLogging);
+          req.setGrainId(params.grainId);
           req.setCore(params.core);
 
           return req.send()
@@ -747,7 +747,7 @@ private:
             //   longer, so that we don't interrupt an unmount that has a lot of data to flush.
             //   This should be exceedingly rare, though. In fact, this whole branch is rare.
             KJ_LOG(INFO, "RARE: (startGrain) GrainState is active, but supervisor appears dead.",
-                   params.grainIdForLogging, e);
+                   params.grainId, e);
 
             return timer.afterDelay(4 * kj::SECONDS)
                 .then([KJ_MVCAP(grainGetResult),grainState]() {

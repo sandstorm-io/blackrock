@@ -25,7 +25,7 @@ interface Worker {
   newGrain @0 (package :PackageInfo,
                command :Package.Manifest.Command,
                storage :Storage.StorageFactory,
-               grainIdForLogging :Text,
+               grainId :Text,
                core :SandstormCore)
            -> (grain :Supervisor, grainState :Storage.OwnedAssignable(GrainState));
   # Start a new grain using the given package.
@@ -38,7 +38,7 @@ interface Worker {
                    storage :Storage.StorageFactory,
                    grainState :GrainState,
                    exclusiveGrainStateSetter :Util.Assignable(GrainState).Setter,
-                   grainIdForLogging :Text,
+                   grainId :Text,
                    core :SandstormCore)
                -> (grain :Supervisor);
   # Continue an existing grain.
