@@ -978,13 +978,6 @@ kj::Promise<void> FrontendImpl::execLoop(MongoInfo&& mongoInfo, uint replicaNumb
           ", \"replicaNumber\":", replicaNumber,
           "}").cStr(), true));
 
-      if (replicaNumber == 2) {
-        // Enable heap profiling to track down memory leak.
-        // TODO(soon): Remove this once fixed.
-        KJ_SYSCALL(setenv("LD_PRELOAD", "/usr/lib/libtcmalloc.so.4", true));
-        KJ_SYSCALL(setenv("HEAPPROFILE", "/var/log/heapprof", true));
-      }
-
       // Pass in special FDs.
       KJ_SYSCALL(dup2(smtp, 3));
       KJ_SYSCALL(dup2(http, 4));
