@@ -688,7 +688,7 @@ sandstorm::Supervisor::Client WorkerImpl::bootGrain(
 
     // Build array of StringPtr for argv.
     KJ_STACK_ARRAY(kj::StringPtr, argv,
-        command.commandArgs.size() + command.envArgs.size() + 6 + isNew, 16, 16);
+        command.commandArgs.size() + command.envArgs.size() + 7 + isNew, 16, 16);
     {
       int i = 0;
       argv[i++] = "blackrock";
@@ -703,6 +703,7 @@ sandstorm::Supervisor::Client WorkerImpl::bootGrain(
       }
       argv[i++] = "--";
       argv[i++] = packageRoot;
+      argv[i++] = grainIdForLogging;
       for (auto& commandArg: command.commandArgs) {
         argv[i++] = commandArg;
       }
@@ -1055,6 +1056,7 @@ kj::MainFunc SupervisorMain::getMain() {
                         "Set the environment variable <name> to <val> inside the sandbox.  Note "
                         "that *no* environment variables are set by default.")
       .expectArg("<package>", KJ_BIND_METHOD(sandstormSupervisor, setPkg))
+      .expectArg("<grain-id>", KJ_BIND_METHOD(sandstormSupervisor, setGrainId))
       .expectOneOrMoreArgs("<command>", KJ_BIND_METHOD(sandstormSupervisor, addCommandArg))
       .callAfterParsing(KJ_BIND_METHOD(*this, run))
       .build();
@@ -1068,7 +1070,6 @@ kj::MainBuilder::Validity SupervisorMain::run() {
   KJ_SYSCALL(fcntl(3, F_SETFD, FD_CLOEXEC));
 
   sandstormSupervisor.setAppName("appname-not-applicable");
-  sandstormSupervisor.setGrainId("grainid-not-applicable");
 
   SystemConnectorImpl connector;
   sandstormSupervisor.setSystemConnector(connector);
