@@ -410,10 +410,10 @@ function processMailchimpWebhook(db, req, res) {
 
 BlackrockPayments.makeConnectHandler = function (db) {
   return function (req, res, next) {
-    if (req.headers.host == db.makeWildcardHost("payments")) {
-      if (req.url == "/checkout") {
+    if (req.headers.host === db.makeWildcardHost("payments")) {
+      if (req.url === "/checkout") {
         serveCheckout(res);
-      } else if (req.url == "/sandstorm-purplecircle.png") {
+      } else if (req.url === "/sandstorm-purplecircle.png") {
         serveSandcat(res);
       } else if (req.url === "/webhook") {
         processWebhook(db, req, res);
@@ -473,7 +473,7 @@ var methods = {
     if (data.sources && data.sources.data && data.subscriptions && data.subscriptions.data) {
       var sources = data.sources.data;
       var subscriptions = data.subscriptions.data;
-      if (sources.length == 1 && subscriptions.length > 0) {
+      if (sources.length === 1 && subscriptions.length > 0) {
         // TODO(soon): handle this better (client-side?)
         throw new Meteor.Error(400, "Can't delete last card if still subscribed");
       }
