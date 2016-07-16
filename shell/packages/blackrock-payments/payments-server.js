@@ -14,7 +14,8 @@ var Crypto = Npm.require("crypto");
 var Url = Npm.require('url');
 var ROOT_URL = process.env.ROOT_URL;
 var HOSTNAME = Url.parse(ROOT_URL).hostname;
-var stripe = Npm.require("stripe")(Meteor.settings.stripeKey);
+
+stripe = Npm.require("stripe")(Meteor.settings.stripeKey);
 
 BlackrockPayments = {};
 
@@ -109,40 +110,130 @@ var serveSandcat = Meteor.bindEnvironment(function (res) {
   res.end(new Buffer(Assets.getBinary("sandstorm-purplecircle.png")));
 });
 
-function hashId(id) {
+hashSourceId = (id) => {
   return Crypto.createHash("sha256").update(ROOT_URL + ":" + id).digest("base64");
-}
+};
 
-function findOriginalId(hashedId, customerId) {
+findOriginalSourceId = (hashedId, customerId) => {
   var data = Meteor.wrapAsync(stripe.customers.retrieve.bind(stripe.customers))(customerId);
   if (data.sources && data.sources.data) {
     var sources = data.sources.data;
     for (var i = 0; i < sources.length; i++) {
-      if (hashId(sources[i].id) === hashedId) {
+      if (hashSourceId(sources[i].id) === hashedId) {
         return sources[i].id;
       }
     }
   }
 
   throw new Meteor.Error(400, "Id not found");
-}
+};
 
-function sanitizeSource(source, isPrimary) {
+sanitizeSource = (source, isPrimary) => {
   var result = _.pick(source, "last4", "brand", "exp_year", "exp_month", "isPrimary");
   result.isPrimary = isPrimary;
-  result.id = hashId(source.id);
+  result.id = hashSourceId(source.id);
   return result;
-}
+};
 
 var inFiber = Meteor.bindEnvironment(function (callback) {
   callback();
 });
 
 function renderPrice(amount) {
+  var prefix = " $";
+  if (amount < 0) {
+    prefix = "-$";
+    amount *= -1;
+  }
+
   var dollars = Math.floor(amount / 100);
   var cents = amount % 100;
   if (cents < 10) cents = "0" + cents;
-  return dollars + "." + cents;
+  return prefix + dollars + "." + cents;
+}
+
+function sendEmail(db, user, mailSubject, mailText, mailHtml, config) {
+  const iconCid = Random.id();
+
+  // Add surrounding box.
+  // TODO(someday): Make the logo image and title configurable by alternate hosts.
+  mailHtml =
+        '<div style="border: 1px solid #bbb; margin: 32px auto; max-width: 520px;">' +
+        '  <div style="background-color: #eee; padding: 8px 32px; font-size: 25px; line-height: 34px;">' +
+        '    <img src="cid:'+iconCid+'" style="width: 48px; vertical-align: bottom;"> Sandstorm.io' +
+        '  </div>' +
+        '  <div style="margin: 32px">' +
+        mailHtml +
+        '  </div>' +
+        '</div>';
+
+  let email = _.find(SandstormDb.getUserEmails(user), function (email) { return email.primary; });
+  if (email) {
+    email = email.email;
+  } else {
+    email = Meteor.wrapAsync(stripe.customers.retrieve.bind(stripe.customers))
+        (user.payments.id).email;
+  }
+
+  if (email) {
+    SandstormEmail.send({
+      to: email,
+      from: config.acceptorTitle + " <" + config.returnAddress + ">",
+      subject: mailSubject,
+      text: mailText,
+      html: mailHtml,
+      attachments: [
+        {
+          filename: "sandstorm-logo.png",
+          contents: ICON_BASE64,
+          contentType: "image/png",
+          cid: iconCid
+        },
+      ],
+    });
+  } else {
+    console.error("customer has no email address", user.payments.id);
+  }
+}
+
+sendInvoice = (db, user, invoice, config) => {
+  let total = 0;
+  invoice.items.forEach(item => total += item.amountCents);
+
+  const mailSubject = "Invoice from " + config.acceptorTitle;
+  const priceColStyle = "text-align: right; white-space: nowrap;";
+  const mailText =
+      "You have a new invoice from " + config.acceptorTitle + ":\n" +
+      "\n" +
+      invoice.items.map(item => {
+        return renderPrice(item.amountCents) + "  " + item.title.defaultText + "\n";
+      }).join("") +
+      "-----------------------------------------------\n" +
+      renderPrice(total) + "  Total\n" +
+      "\n" +
+      "This invoice has already been paid using the payment info we have on file.\n" +
+      "\n" +
+      "To modify your subscription, visit:\n" +
+      config.settingsUrl + "\n" +
+      "\n" +
+      "Thank you!\n";
+  const mailHtml =
+      '<h2>You have a new invoice from '+config.acceptorTitle+':</h2>\n' +
+      '<table style="width: 100%">\n' +
+      invoice.items.map(item => {
+        return '  <tr><td>' + item.title.defaultText +
+            '</td><td style="'+priceColStyle+'">' + renderPrice(item.amountCents) +
+            '</td></tr>\n'
+      }).join("") +
+      '  <tr><td colspan="2"><hr style="border-style: none; border-top-style: solid; border-color: #bbb;"></td></tr>\n' +
+      '  <tr><td><b>Total</b></td><td style="'+priceColStyle+'">' + renderPrice(total) + '</td></tr>\n' +
+      '</table>\n' +
+      '<p>This invoice has already been paid using the payment info we have on file.</p>\n' +
+      '<p>To update your settings, visit:<br>\n' +
+      '  <a href="' + config.settingsUrl + '">' + config.settingsUrl + '</a></p>\n' +
+      '<p>Thank you!</p>\n';
+
+  sendEmail(db, user, mailSubject, mailText, mailHtml, config);
 }
 
 function handleWebhookEvent(db, event) {
@@ -176,104 +267,43 @@ function handleWebhookEvent(db, event) {
     console.log("Processing Stripe webhook " + event.id + ": " + event.type +
                 " for user " + user._id);
 
-    var serverTitle = globalDb.getServerTitle();
-
-    var plan = db.getPlan(user.plan || free);
-    var planTitle = plan.title || (plan._id.charAt(0).toUpperCase() + plan._id.slice(1));
-    var priceText = renderPrice(plan.price);
+    const config = {
+      acceptorTitle: globalDb.getServerTitle(),
+      returnAddress: db.getReturnAddress(),
+      settingsUrl: ROOT_URL + "/account",
+    };
 
     // Send an email.
-    var email = _.find(SandstormDb.getUserEmails(user), function (email) { return email.primary; });
-    if (email) {
-      email = email.email;
-    } else {
-      email = Meteor.wrapAsync(stripe.customers.retrieve.bind(stripe.customers))
-          (invoice.customer).email;
-    }
-
-    var iconCid = Random.id();
-
-    var mailSubject;
-    var mailText;
-    var mailHtml;
     if (event.type === "invoice.payment_failed") {
-      mailSubject = "URGENT: Payment failed for " + serverTitle;
-      mailText =
+      const mailSubject = "URGENT: Payment failed for " + config.acceptorTitle;
+      const mailText =
           "We were unable to charge your payment method to renew your " +
-          "subscription to " + serverTitle + ". Your account has been " +
+          "subscription to " + config.acceptorTitle + ". Your account has been " +
           "demoted to the free plan. Please click on the link below to " +
           "log into your account and update your payment info, then " +
           "switch back to a paid plan.\n" +
           "\n" +
           ROOT_URL + "/account\n";
-      mailHtml =
+      const mailHtml =
           "<p>We were unable to charge your payment method to renew your " +
-          "subscription to " + serverTitle + ". Your account has been " +
+          "subscription to " + config.acceptorTitle + ". Your account has been " +
           "demoted to the free plan. Please click on the link below to " +
           "log into your account and update your payment info, then " +
           "switch back to a paid plan.</p>\n" +
           "<p><a href=\"" + ROOT_URL + "/account\">" + ROOT_URL + "/account</a></p>\n";
+      sendEmail(db, user, mailSubject, mailText, mailHtml, config);
     } else {
-      mailSubject = "Invoice from " + serverTitle;
-      var priceColStyle = "text-align: right; white-space: nowrap;";
-      mailText =
-          "You have a new invoice from " + serverTitle + ":\n" +
-          "\n" +
-          " $" + priceText + "  1 month " + planTitle + " plan\n" +
-          "-$" + priceText + "  Beta discount\n" +
-          "-----------------------------------------------\n" +
-          " $0.00  Total\n" +
-          "\n" +
-          "This invoice has already been paid using the payment info we have on file.\n" +
-          "\n" +
-          "To modify your subscription, visit:\n" +
-          ROOT_URL + "/account\n" +
-          "\n" +
-          "Thank you!\n";
-      mailHtml =
-          '<h2>You have a new invoice from '+serverTitle+':</h2>\n' +
-          '<table style="width: 100%">\n' +
-          '  <tr><td>1 month '+planTitle+' plan</td><td style="'+priceColStyle+'">$'+priceText+'</td></tr>\n' +
-          '  <tr><td>Beta discount</td><td style="'+priceColStyle+'">-$'+priceText+'</td></tr>\n' +
-          '  <tr><td colspan="2"><hr style="border-style: none; border-top-style: solid; border-color: #bbb;"></td></tr>\n' +
-          '  <tr><td><b>Total</b></td><td style="'+priceColStyle+'">$0.00</td></tr>\n' +
-          '</table>\n' +
-          '<p>This invoice has already been paid using the payment info we have on file.</p>\n' +
-          '<p>To modify your subscription, visit:<br>\n' +
-          '  <a href="' + ROOT_URL + '/account">' + ROOT_URL + '/account</a></p>\n' +
-          '<p>Thank you!</p>\n';
-    }
+      const plan = db.getPlan(user.plan || free);
+      const planTitle = plan.title || (plan._id.charAt(0).toUpperCase() + plan._id.slice(1));
 
-    // Add surrounding box.
-    // TODO(someday): Make the logo image and title configurable by alternate hosts.
-    mailHtml =
-          '<div style="border: 1px solid #bbb; margin: 32px auto; max-width: 520px;">' +
-          '  <div style="background-color: #eee; padding: 8px 32px; font-size: 25px; line-height: 34px;">' +
-          '    <img src="cid:'+iconCid+'" style="width: 48px; vertical-align: bottom;"> Sandstorm.io' +
-          '  </div>' +
-          '  <div style="margin: 32px">' +
-          mailHtml +
-          '  </div>' +
-          '</div>';
-
-    if (email) {
-      SandstormEmail.send({
-        to: email,
-        from: serverTitle + " <" + globalDb.getReturnAddress() + ">",
-        subject: mailSubject,
-        text: mailText,
-        html: mailHtml,
-        attachments: [
-          {
-            filename: "sandstorm-logo.png",
-            contents: ICON_BASE64,
-            contentType: "image/png",
-            cid: iconCid
-          },
+      const sandstormInvoice = {
+        items: [
+          { title: { defaultText: "1 month " + planTitle + " plan" }, amountCents: plan.price },
+          { title: { defaultText: "Beta discount" }, amountCents: -plan.price },
         ],
-      });
-    } else {
-      console.error("customer has no email address", invoice.customer);
+      };
+
+      sendInvoice(db, user, sandstormInvoice, config);
     }
 
     var mod = {"payments.lastInvoiceTime": event.created};
@@ -458,6 +488,8 @@ var methods = {
       var data = createUser(token, email);
       if (data.sources && data.sources.data && data.sources.data.length >= 1) {
         return sanitizeSource(data.sources.data[0], true);
+      } else {
+        throw new Meteor.Error(500, "Stripe created new user with no payment sources");
       }
     }
   },
@@ -479,7 +511,7 @@ var methods = {
       }
     }
 
-    id = findOriginalId(id, customerId);
+    id = findOriginalSourceId(id, customerId);
 
     Meteor.wrapAsync(stripe.customers.deleteCard.bind(stripe.customers))(
       customerId,
@@ -494,7 +526,7 @@ var methods = {
     check(id, String);
 
     var customerId = Meteor.user().payments.id;
-    id = findOriginalId(id, customerId);
+    id = findOriginalSourceId(id, customerId);
 
     Meteor.wrapAsync(stripe.customers.update.bind(stripe.customers))(
       customerId,

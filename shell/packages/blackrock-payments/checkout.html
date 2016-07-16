@@ -28,18 +28,24 @@
           }
         });
 
-        window.addEventListener("message", function (ev) {
-          if (ev && ev.data && ev.data.openDialog) {
+        if (data.openNow) {
+          delete data.openNow;
+          handler.open(data);
+        } else {
+          // Wait for instructions.
+          window.addEventListener("message", function (ev) {
+            if (ev && ev.data && ev.data.openDialog) {
+              window.parent.postMessage({id: data.id, showPrompt: true, plan: data.planName}, "*");
+              handler.open(data);
+            }
+          }, false);
+
+          document.querySelector("div").addEventListener("click", function () {
+            // TODO(soon): show user error if invalid plan specified
             window.parent.postMessage({id: data.id, showPrompt: true, plan: data.planName}, "*");
             handler.open(data);
-          }
-        }, false);
-
-        document.querySelector("div").addEventListener("click", function () {
-          // TODO(soon): show user error if invalid plan specified
-          window.parent.postMessage({id: data.id, showPrompt: true, plan: data.planName}, "*");
-          handler.open(data);
-        });
+          });
+        }
       })();
     </script>
   </body>
