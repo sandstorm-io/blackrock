@@ -154,16 +154,6 @@ Template.billingUsage.events({
   },
 });
 
-Template.mailingListBonusNotificationButtons.events({
-  "click .accept-notification": function (event) {
-    event.preventDefault();
-    Meteor.call("subscribeMailingList", function(err) {
-      if (err) window.alert("Error subscribing to list: " + err.message);
-    });
-    Meteor.call("dismissNotification", this._id);
-  },
-});
-
 function clickPlanHelper(context, ev) {
   var template = Template.instance();
   var planName = context._id;
@@ -401,4 +391,3 @@ Template._billingPromptPopup.helpers(helpers);
 Template.billingUsage.helpers(helpers);
 Template.billingPromptFirstTime.helpers(helpers);
 Template.billingOptins.helpers(helpers);
-Template.mailingListBonusNotification.helpers(helpers);
