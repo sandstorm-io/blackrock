@@ -546,6 +546,37 @@ protected:
     });
   }
 
+  kj::Promise<void> getGrainStorageUsage(GetGrainStorageUsageContext context) override {
+    auto params = context.getParams();
+    auto grainId = params.getGrainId();
+
+    StorageRootSet::Client storage = frontend.storageRoots->chooseOne();
+
+    auto owner = ({
+      auto userObjectName = kj::str("user-", params.getOwnerId());
+
+      auto req = storage.getOrCreateAssignableRequest<AccountStorage>();
+      req.setName(userObjectName);
+      req.initDefaultValue();
+      req.send().getObject();
+    });
+
+    return owner.getRequest().send()
+        .then([grainId,context](auto&& getResults) mutable -> kj::Promise<void> {
+      for (auto grainInfo: getResults.getValue().getGrains()) {
+        if (grainInfo.getId() == grainId) {
+          // This is the grain we're looking for!
+          return grainInfo.getState().getStorageUsageRequest().send()
+              .then([context](auto result) mutable {
+            context.getResults(capnp::MessageSize { 4, 0 }).setSize(result.getTotalBytes());
+          });
+        }
+      }
+
+      KJ_FAIL_REQUIRE("no such grain");
+    });
+  }
+
 private:
   FrontendImpl& frontend;
   kj::Timer& timer;
