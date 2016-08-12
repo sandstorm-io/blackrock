@@ -57,7 +57,7 @@ Template.stripeAddPaymentSourcePowerboxConfiguration.onCreated(function () {
     }
 
     if (event.data.error) {
-      this.data.powerboxRequest.failRequest(new Error(event.data.error));
+      this.data.powerboxRequest.cancelRequest();
     }
   };
 
