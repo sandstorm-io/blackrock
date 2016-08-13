@@ -12,6 +12,7 @@ Npm.depends({
 });
 
 Package.onUse(function (api) {
+  api.use("ecmascript");
   api.use(["mongo", "sandstorm-db"], "server");
   api.use(["mongo", "reactive-var", "templating"], "client");
 
@@ -21,9 +22,11 @@ Package.onUse(function (api) {
     "billingPrompt.html",
     "billingSettings.js",
     "billingPrompt.js",
-    "payments-client.js"
+    "payments-client.js",
+    "payments-api.html",
+    "payments-api-client.js",
   ], "client");
-  api.addFiles(["constants.js", "payments-server.js",], "server");
+  api.addFiles(["constants.js", "payments-server.js", "payments-api-server.js"], "server");
   api.addFiles(["checkout.html", "sandstorm-purplecircle.png"], "server", {isAsset: true});
 
   api.export(["BlackrockPayments", "makePaymentsConnectHandler"]);
