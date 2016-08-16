@@ -3,14 +3,14 @@
 // All Rights Reserved
 
 Template.stripePaymentAcceptorPowerboxConfiguration.events({
-  "submit form"(event) {
-    event.preventDefault();
+  "submit form"(ev) {
+    ev.preventDefault();
 
     this.powerboxRequest.completeNewFrontendRef({
       stripePaymentAcceptor: {
-        acceptorTitle: event.currentTarget.acceptorTitle.value,
-        returnAddress: event.currentTarget.returnAddress.value,
-        settingsUrl: event.currentTarget.settingsUrl.value,
+        acceptorTitle: ev.currentTarget.acceptorTitle.value,
+        returnAddress: ev.currentTarget.returnAddress.value,
+        settingsUrl: ev.currentTarget.settingsUrl.value,
       },
     });
   }
@@ -27,23 +27,23 @@ Template.stripeAddPaymentSourcePowerboxConfiguration.onCreated(function () {
   updateStripeData();
   this.addCardPrompt = new ReactiveVar(false);
   this.id = "stripe-powerbox-add-card-" + (counter++);
-  this.listener = event => {
-    console.log(event);
-    if (event.origin !== window.location.protocol + "//" + makeWildcardHost("payments")) {
+  this.listener = ev => {
+    console.log(ev);
+    if (ev.origin !== window.location.protocol + "//" + makeWildcardHost("payments")) {
       return;
     }
 
-    if (event.data.id !== this.id) {
+    if (ev.data.id !== this.id) {
       return;
     }
 
-    if (event.data.showPrompt) {
+    if (ev.data.showPrompt) {
       // ignore
       return;
     }
 
-    if (event.data.token) {
-      Meteor.call("addCardForUser", event.data.token.id, event.data.token.email, (err, source) => {
+    if (ev.data.token) {
+      Meteor.call("addCardForUser", ev.data.token.id, ev.data.token.email, (err, source) => {
         if (err) {
           this.data.powerboxRequest.failRequest(err);
         } else {
@@ -56,7 +56,7 @@ Template.stripeAddPaymentSourcePowerboxConfiguration.onCreated(function () {
       });
     }
 
-    if (event.data.error) {
+    if (ev.data.error) {
       this.data.powerboxRequest.cancelRequest();
     }
   };

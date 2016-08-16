@@ -4,27 +4,27 @@
 
 var idCounter = 0;
 
-var messageListener = function (template, event) {
-  if (event.origin !== window.location.protocol + "//" + makeWildcardHost("payments")) {
+var messageListener = function (template, ev) {
+  if (ev.origin !== window.location.protocol + "//" + makeWildcardHost("payments")) {
     return;
   }
 
-  if (event.data.id !== template.id) {
+  if (ev.data.id !== template.id) {
     return;
   }
 
-  if (event.data.showPrompt) {
-    template.promptChoice.set(event.data.plan);
+  if (ev.data.showPrompt) {
+    template.promptChoice.set(ev.data.plan);
     return;
   }
 
-  if (event.data.token) {
+  if (ev.data.token) {
     var updateData = {
-      email: event.data.token.email,
-      subscription: event.data.plan
+      email: ev.data.token.email,
+      subscription: ev.data.plan
     };
-    Meteor.call("createUserSubscription", event.data.token.id,
-                event.data.token.email, event.data.plan, function (err, source) {
+    Meteor.call("createUserSubscription", ev.data.token.id,
+                ev.data.token.email, ev.data.plan, function (err, source) {
       if (err) {
         alert(err); // TODO(soon): make this UI better);
         return;
@@ -40,7 +40,7 @@ var messageListener = function (template, event) {
     });
   }
 
-  if (event.data.error || event.data.token) {
+  if (ev.data.error || ev.data.token) {
     template.promptChoice.set(null);
   }
 };
@@ -134,20 +134,20 @@ Template.billingUsage.helpers({
 });
 
 Template.billingUsage.events({
-  "click .change-plan": function (event, template) {
-    event.preventDefault();
+  "click .change-plan": function (ev, template) {
+    ev.preventDefault();
     template._showPrompt.set(true);
   },
 
-  "click .unsubscribe": function () {
-    event.preventDefault();
+  "click .unsubscribe": function (ev) {
+    ev.preventDefault();
     Meteor.call("unsubscribeMailingList", function(err) {
       if (err) window.alert("Error unsubscribing from list: " + err.message);
     });
   },
 
-  "click .subscribe": function () {
-    event.preventDefault();
+  "click .subscribe": function (ev) {
+    ev.preventDefault();
     Meteor.call("subscribeMailingList", function(err) {
       if (err) window.alert("Error subscribing to list: " + err.message);
     });

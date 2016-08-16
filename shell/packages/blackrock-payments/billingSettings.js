@@ -2,29 +2,29 @@
 // Copyright (c) 2015-2016 Sandstorm Development Group, Inc.
 // All Rights Reserved
 
-var messageListener = function (showPrompt, template, event) {
-  if (event.origin !== window.location.protocol + "//" + makeWildcardHost("payments")) {
+var messageListener = function (showPrompt, template, ev) {
+  if (ev.origin !== window.location.protocol + "//" + makeWildcardHost("payments")) {
     return;
   }
 
-  if (event.data.id !== template.id) {
+  if (ev.data.id !== template.id) {
     return;
   }
 
-  if (event.data.showPrompt) {
+  if (ev.data.showPrompt) {
     showPrompt.set(true);
     return;
   }
 
-  if (event.data.token) {
-    Meteor.call("addCardForUser", event.data.token.id, event.data.token.email, function (err) {
+  if (ev.data.token) {
+    Meteor.call("addCardForUser", ev.data.token.id, ev.data.token.email, function (err) {
       if (err) alert(err); // TODO(soon): make this UI better
 
       updateStripeData();
     });
   }
 
-  if (event.data.error || event.data.token) {
+  if (ev.data.error || ev.data.token) {
     showPrompt.set(false);
   }
 };
