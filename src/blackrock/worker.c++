@@ -809,7 +809,7 @@ protected:
       return kj::joinPromises(promises.finish());
     }).then([this]() {
       // Freeze the volume so it can never be written again.
-      return volume.freezeRequest().send().then([](auto) {});
+      return volume.freezeRequest().send().then([](auto) -> void {});
     });
   }
 

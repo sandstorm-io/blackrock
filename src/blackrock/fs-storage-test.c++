@@ -37,7 +37,7 @@ UnshareTmp unshareTmp;
 
 
 struct TestTempdir {
-  static constexpr char PATH[] = "/tmp/blackrock-fs-storage-test";
+  static constexpr char PATH[] = "/var/tmp/blackrock-fs-storage-test";
   kj::AutoCloseFd fd;
 
   TestTempdir() {

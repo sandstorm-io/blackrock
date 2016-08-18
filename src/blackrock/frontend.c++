@@ -210,7 +210,7 @@ protected:
 
         auto req = getResults.getSetter().setRequest();
         req.setValue(userInfoCopy);
-        return req.send().then([](auto) {});
+        return req.send().then([](auto) -> void {});
       } else {
         return kj::READY_NOW;
       }
@@ -359,7 +359,7 @@ protected:
     auto req = storage.removeRequest();
     req.setName(kj::str("package-", packageId));
     context.releaseParams();
-    return req.send().then([](auto) {});
+    return req.send().then([](auto) -> void {});
   }
 
   // ---------------------------------------------------------------------------
@@ -567,7 +567,7 @@ protected:
         if (grainInfo.getId() == grainId) {
           // This is the grain we're looking for!
           return grainInfo.getState().getStorageUsageRequest().send()
-              .then([context](auto result) mutable {
+              .then([context](auto result) mutable -> void {
             context.getResults(capnp::MessageSize { 4, 0 }).setSize(result.getTotalBytes());
           });
         }
@@ -680,7 +680,7 @@ private:
       // a copy to GC.)
       auto req = getResults.getSetter().setRequest();
       req.setValue(userInfoCopy);
-      return req.send().then([](auto) {});
+      return req.send().then([](auto) -> void {});
     });
   }
 

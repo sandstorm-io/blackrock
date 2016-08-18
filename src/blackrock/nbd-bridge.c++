@@ -131,7 +131,7 @@ kj::Promise<void> NbdVolumeAdapter::run() {
         // Send all requests and handle responses.
         RequestHandle reqHandle = request.handle;
         tasks.add(kj::joinPromises(promises.finish())
-            .then([this,reqHandle,startPad,endPad](auto responses) {
+            .then([this,reqHandle,startPad,endPad](auto responses) -> void {
           auto reply = kj::heap<ReplyAndIovec>(kj::mv(responses), reqHandle, startPad, endPad);
           replyQueue = replyQueue.then([this,KJ_MVCAP(reply)]() mutable {
             auto promise = socket->write(reply->iov);
@@ -190,13 +190,13 @@ kj::Promise<void> NbdVolumeAdapter::run() {
             auto req2 = volume.zeroRequest();
             req2.setBlockNum(req.getBlockNum());
             req2.setCount(data.size() / Volume::BLOCK_SIZE);
-            tasks.add(req2.send().then([this,reqHandle](auto resp) {
+            tasks.add(req2.send().then([this,reqHandle](auto resp) -> void {
               reply(reqHandle);
             }, [this,reqHandle](kj::Exception&& e) {
               replyError(reqHandle, kj::mv(e), "zero");
             }));
           } else {
-            tasks.add(req.send().then([this,reqHandle](auto resp) {
+            tasks.add(req.send().then([this,reqHandle](auto resp) -> void {
               reply(reqHandle);
             }, [this,reqHandle](kj::Exception&& e) {
               replyError(reqHandle, kj::mv(e), "write");
@@ -221,7 +221,7 @@ kj::Promise<void> NbdVolumeAdapter::run() {
           return run();
         }
 
-        tasks.add(volume.syncRequest().send().then([this,reqHandle](auto resp) {
+        tasks.add(volume.syncRequest().send().then([this,reqHandle](auto resp) -> void {
           reply(reqHandle);
         }, [this,reqHandle](kj::Exception&& e) {
           replyError(reqHandle, kj::mv(e), "sync");
@@ -246,7 +246,7 @@ kj::Promise<void> NbdVolumeAdapter::run() {
         KJ_ASSERT(size % Volume::BLOCK_SIZE == 0);
         req.setCount(size / Volume::BLOCK_SIZE);
 
-        tasks.add(req.send().then([this,reqHandle](auto resp) {
+        tasks.add(req.send().then([this,reqHandle](auto resp) -> void {
           reply(reqHandle);
         }, [this,reqHandle](kj::Exception&& e) {
           replyError(reqHandle, kj::mv(e), "zero");
