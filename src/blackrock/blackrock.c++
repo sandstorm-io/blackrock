@@ -71,7 +71,7 @@ protected:
       req.setSturdyRef(transient.getLocalRef());
       context.releaseParams();
       // We can't quite tail-call here because it's a different generic type. Darn.
-      return req.send().then([](auto) -> void {});
+      return req.send().ignoreResult();
     } else {
       return KJ_EXCEPTION(UNIMPLEMENTED, "Restoring non-transient ref not implemented.");
     }

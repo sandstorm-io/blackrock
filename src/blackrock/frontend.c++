@@ -210,7 +210,7 @@ protected:
 
         auto req = getResults.getSetter().setRequest();
         req.setValue(userInfoCopy);
-        return req.send().then([](auto) -> void {});
+        return req.send().ignoreResult();
       } else {
         return kj::READY_NOW;
       }
@@ -359,7 +359,7 @@ protected:
     auto req = storage.removeRequest();
     req.setName(kj::str("package-", packageId));
     context.releaseParams();
-    return req.send().then([](auto) -> void {});
+    return req.send().ignoreResult();
   }
 
   // ---------------------------------------------------------------------------
@@ -680,7 +680,7 @@ private:
       // a copy to GC.)
       auto req = getResults.getSetter().setRequest();
       req.setValue(userInfoCopy);
-      return req.send().then([](auto) -> void {});
+      return req.send().ignoreResult();
     });
   }
 
