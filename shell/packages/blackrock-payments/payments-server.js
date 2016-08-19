@@ -236,7 +236,7 @@ sendInvoice = (db, user, invoice, config) => {
   sendEmail(db, user, mailSubject, mailText, mailHtml, config);
 }
 
-function handleWebhookEvent(db, event) {
+function handleWebhookEvent(db, untrustedEvent) {
   // WE CANNOT TRUST THE EVENT. We have no proof it came from Stripe.
   //
   // We could tell Stripe to authenticate with HTTP Basic Auth, but that's ugly and
@@ -249,22 +249,22 @@ function handleWebhookEvent(db, event) {
   // latest change to the same target.
 
   // Fetch the event from Stripe.
-  event = Meteor.wrapAsync(stripe.events.retrieve.bind(stripe.events))(event.id);
+  ev = Meteor.wrapAsync(stripe.events.retrieve.bind(stripe.events))(untrustedEvent.id);
 
-  if (event.type === "invoice.payment_succeeded" || event.type === "invoice.payment_failed") {
-    var invoice = event.data.object;
+  if (ev.type === "invoice.payment_succeeded" || ev.type === "invoice.payment_failed") {
+    var invoice = ev.data.object;
     var user = Meteor.users.findOne({"payments.id": invoice.customer});
     if (!user) {
-      console.error("Stripe event didn't match any user: " + event.id);
+      console.error("Stripe event didn't match any user: " + ev.id);
       return;
     }
 
-    if (user.payments.lastInvoiceTime && user.payments.lastInvoiceTime >= event.created) {
-      console.log("Ignoring duplicate Stripe event: " + event.id);
+    if (user.payments.lastInvoiceTime && user.payments.lastInvoiceTime >= ev.created) {
+      console.log("Ignoring duplicate Stripe event: " + ev.id);
       return;
     }
 
-    console.log("Processing Stripe webhook " + event.id + ": " + event.type +
+    console.log("Processing Stripe webhook " + ev.id + ": " + ev.type +
                 " for user " + user._id);
 
     const config = {
@@ -274,7 +274,7 @@ function handleWebhookEvent(db, event) {
     };
 
     // Send an email.
-    if (event.type === "invoice.payment_failed") {
+    if (ev.type === "invoice.payment_failed") {
       const mailSubject = "URGENT: Payment failed for " + config.acceptorTitle;
       const mailText =
           "We were unable to charge your payment method to renew your " +
@@ -306,8 +306,8 @@ function handleWebhookEvent(db, event) {
       sendInvoice(db, user, sandstormInvoice, config);
     }
 
-    var mod = {"payments.lastInvoiceTime": event.created};
-    if (event.type === "invoice.payment_failed") {
+    var mod = {"payments.lastInvoiceTime": ev.created};
+    if (ev.type === "invoice.payment_failed") {
       // Cancel plan.
       // TODO(soon): Some sort of grace period.
       mod.plan = "free";
