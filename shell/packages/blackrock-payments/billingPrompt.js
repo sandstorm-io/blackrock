@@ -139,14 +139,14 @@ Template.billingUsage.events({
     template._showPrompt.set(true);
   },
 
-  "click .unsubscribe": function () {
+  "click .unsubscribe": function (event) {
     event.preventDefault();
     Meteor.call("unsubscribeMailingList", function(err) {
       if (err) window.alert("Error unsubscribing from list: " + err.message);
     });
   },
 
-  "click .subscribe": function () {
+  "click .subscribe": function (event) {
     event.preventDefault();
     Meteor.call("subscribeMailingList", function(err) {
       if (err) window.alert("Error subscribing to list: " + err.message);
