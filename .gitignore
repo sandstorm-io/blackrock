@@ -37,9 +37,11 @@ blackrock.tar.xz
 shell/packages/accounts-email-token
 shell/packages/bignum
 shell/packages/connect
+shell/packages/sandstorm-autoupdate-apps
 shell/packages/sandstorm-accounts-oauth
 shell/packages/sandstorm-accounts-packages
 shell/packages/sandstorm-accounts-ui
+shell/packages/sandstorm-backend
 shell/packages/sandstorm-db
 shell/packages/sandstorm-email
 shell/packages/sandstorm-identicons
@@ -47,5 +49,6 @@ shell/packages/sandstorm-permissions
 shell/packages/sandstorm-ui-applist
 shell/packages/sandstorm-ui-grainlist
 shell/packages/sandstorm-ui-topbar
+shell/packages/sandstorm-ui-powerbox
 shell/packages/simplesmtp
 .local
