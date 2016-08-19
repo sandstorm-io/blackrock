@@ -170,32 +170,37 @@ All Rights Reserved
   <div class="faq">
     <h3>F. A. Q.</h3>
 
-    <div class="answer">
-      <h4>*What is a compute unit?</h4>
+    <div class="answers">
+      <div class="answer">
+        <h4>*What is a compute unit?</h4>
 
-      <p>A compute unit is 1GB of RAM used for one hour. Sandstorm apps only use RAM while
-        you are actively using them, so 200 CU should be plenty for most users.
-        <a href="https://blog.sandstorm.io/news/2015-01-14-compute-units.html" target="_blank">
-        Learn more about compute units »</a></p>
-    </div><div class="answer">
-      {{#if planChosen}}
-        <h4>What if I'm not ready to upgrade?</h4>
+        <p>A compute unit is 1GB of RAM used for one hour. Sandstorm apps only use RAM while
+          you are actively using them, so 200 CU should be plenty for most users.
+          <a href="https://blog.sandstorm.io/news/2015-01-14-compute-units.html" target="_blank">
+          Learn more about compute units »</a></p>
+      </div>
+      <div class="answer">
+        {{#if planChosen}}
+          <h4>What if I'm not ready to upgrade?</h4>
 
-        <p>If you run out of space, you'll need to permanently delete one of your existing grains
-          before you can create a new one. <a href="/grain">Go to your grain list »</a> to move grains
-          to the <a href="/grain#trash">trash</a>, where you can permanently delete them. Or, since
-          Sandstorm is Open Source you can
-          <a href="https://sandstorm.io/install/" target="_blank">install your own server »</a></p>
-      {{else}}
-        <h4>Which plan should I choose?</h4>
+          <p>If you run out of space, you'll need to permanently delete one of your existing grains
+            before you can create a new one. <a href="/grain">Go to your grain list »</a> to move grains
+            to the <a href="/grain#trash">trash</a>, where you can permanently delete them. Or, since
+            Sandstorm is Open Source you can
+            <a href="https://sandstorm.io/install/" target="_blank">install your own server »</a></p>
+        {{else}}
+          <h4>Which plan should I choose?</h4>
 
-        <p>If you're not sure which plan to choose, start with the free plan. You can always
-          upgrade later. Also remember than Sandstorm is Open Source, so you can
-          <a href="https://sandstorm.io/install/" target="_blank">install your own server »</a></p>
-      {{/if}}
+          <p>If you're not sure which plan to choose, start with the free plan. You can always
+            upgrade later. Also remember than Sandstorm is Open Source, so you can
+            <a href="https://sandstorm.io/install/" target="_blank">install your own server »</a></p>
+        {{/if}}
+      </div>
     </div>
 
-    <a class="button" href="mailto:support@sandstorm.io" target="_blank">Contact Support</a>
+    <div class="contact-button-wrapper">
+      <a class="button" href="mailto:support@sandstorm.io" target="_blank">Contact Support</a>
+    </div>
   </div>
 </template>
 
