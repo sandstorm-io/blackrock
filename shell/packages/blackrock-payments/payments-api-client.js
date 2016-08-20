@@ -86,3 +86,6 @@ Template.stripeAddPaymentSourcePowerboxConfiguration.helpers({
     }));
   },
 });
+
+Template.stripePaymentSourcePowerboxOption.powerboxIconSrc = () => "/credit-m.svg";
+Template.stripeAddPaymentSourcePowerboxOption.powerboxIconSrc = () => "/add-credit-m.svg";
