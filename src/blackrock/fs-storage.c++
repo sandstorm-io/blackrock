@@ -1120,8 +1120,8 @@ protected:
   kj::Promise<void> setStoredObject(capnp::AnyPointer::Reader value) {
     // Overwrites the object with the given value saved as a StoredObject.
 
-    KJ_ASSERT(value.targetSize().wordCount < (1u << 17),
-        "Stored Cap'n Proto objects must be less than 1MB. Use Volume or Blob for bulk data.");
+    KJ_ASSERT(value.targetSize().wordCount < (1u << 21),
+        "Stored Cap'n Proto objects must be less than 16MB. Use Volume or Blob for bulk data.");
 
     uint seqnum = nextSetSeqnum++;
 
