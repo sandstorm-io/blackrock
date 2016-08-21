@@ -185,7 +185,7 @@ function sendEmail(db, user, mailSubject, mailText, mailHtml, config) {
       attachments: [
         {
           filename: "sandstorm-logo.png",
-          contents: ICON_BASE64,
+          content: ICON_BASE64,
           contentType: "image/png",
           cid: iconCid
         },
