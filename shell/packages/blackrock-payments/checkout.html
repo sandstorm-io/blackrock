@@ -16,15 +16,23 @@
         var hash = location.slice(hashPos + 1);
         var data = JSON.parse(decodeURIComponent(hash));
 
+        var done = false;
+
         var handler = StripeCheckout.configure({
           key: '$STRIPE_KEY',
           image: '/sandstorm-purplecircle.png',
           zipCode: true,
           token: function(token) {
-            window.parent.postMessage({id: data.id, token: token, plan: data.planName}, "*");
+            if (!done) {
+              window.parent.postMessage({id: data.id, token: token, plan: data.planName}, "*");
+              done = true;
+            }
           },
           closed: function() {
-            window.parent.postMessage({id: data.id, error: "closed early"}, "*");
+            if (!done) {
+              window.parent.postMessage({id: data.id, error: "closed early"}, "*");
+              done = true;
+            }
           }
         });
 

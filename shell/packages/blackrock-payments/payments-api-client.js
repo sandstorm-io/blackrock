@@ -28,7 +28,6 @@ Template.stripeAddPaymentSourcePowerboxConfiguration.onCreated(function () {
   this.addCardPrompt = new ReactiveVar(false);
   this.id = "stripe-powerbox-add-card-" + (counter++);
   this.listener = event => {
-    console.log(event);
     if (event.origin !== window.location.protocol + "//" + makeWildcardHost("payments")) {
       return;
     }
