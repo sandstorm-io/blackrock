@@ -164,6 +164,9 @@ BlackrockPayments.registerPaymentsApi =
         }, []);
 
         return { success: { payment } };
+      }, err => {
+        console.error("Payment declined:", err);
+        return { failed: { description: { defaultText: err.message } } };
       });
     }
   }
