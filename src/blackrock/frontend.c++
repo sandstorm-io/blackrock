@@ -1014,7 +1014,7 @@ kj::Promise<void> FrontendImpl::execLoop(MongoInfo&& mongoInfo, uint replicaNumb
       KJ_SYSCALL(dup2(http, 4));
 
       // Execute!
-      KJ_SYSCALL(execl("bin/node", "bin/node", "sandstorm-main.js", (char*)nullptr));
+      KJ_SYSCALL(execl("bin/node", "bin/node", "--perf_basic_prof_only_functions", "sandstorm-main.js", (char*)nullptr));
       KJ_UNREACHABLE;
     });
 
