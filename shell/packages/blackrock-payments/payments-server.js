@@ -734,7 +734,7 @@ function getAllStripeCustomers() {
   return results;
 }
 
-SandstormDb.getTotalCharges = function() {
+BlackrockPayments.getTotalCharges = function() {
   var hasMore = true;
   var results = [];
 
