@@ -734,6 +734,24 @@ function getAllStripeCustomers() {
   return results;
 }
 
+BlackrockPayments.getTotalCharges = function() {
+  var hasMore = true;
+  var results = [];
+
+  var req = {limit: 100};
+  while (hasMore) {
+    var next = Meteor.wrapAsync(stripe.charges.list.bind(stripe.charges))(req);
+    results = results.concat(next.data);
+    hasMore = next.has_more;
+    if (hasMore) {
+      req.starting_after = results.slice(-1)[0].id;
+    }
+  }
+  return _.reduce(results, (total, elem) => {
+    return (elem.amount || 0) - (elem.amount_refunded || 0) + total;
+  }, 0) / 100;
+};
+
 SandstormDb.paymentsMigrationHook = function (SignupKeys, plans) {
   var db = this;
   var customers = getAllStripeCustomers();

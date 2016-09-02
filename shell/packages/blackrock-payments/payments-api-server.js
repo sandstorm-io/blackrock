@@ -144,7 +144,7 @@ BlackrockPayments.registerPaymentsApi =
     createPayment(source, invoice) {
       return unwrapFrontendCap(source, "stripePaymentSource", source => {
         const description = (invoice.items || []).map(item => {
-          return item.title + " $" + formatCents(item.amountCents);
+          return item.title.defaultText + " $" + formatCents(item.amountCents);
         }).join("; ");
 
         let total = 0;
