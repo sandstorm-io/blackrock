@@ -420,9 +420,15 @@ void NbdDevice::trimJournalIfClean() {
     // Read the journal inode. Since there is no inode 0, inode 8 is located 7 inodes away from
     // the table start.
     Ext4Record<256> inode(fd, inodeTableLocation * 4096ull + 7 * 256);
-    EXPECT(inode.le32(0x1C), == (128 << 11), "journal is not 128 MB?");
     EXPECT(inode.le32(0x20), & 0x80000, "journal not extents-based?");
     EXPECT(inode.le16(0x28 + 0x0), == 0xF30Au, "journal inode extent tree has bad magic number?");
+
+    size_t blockCount512 = inode.le32(0x1C);
+    EXPECT(blockCount512, >= (4 << 11), "journal size less than 4MB?");
+    EXPECT(blockCount512, <= (1024 << 11), "journal size greater than 1GB?");
+    KJ_ASSERT((blockCount512 & (blockCount512 - 1)) == 0, "journal size not power-of-two?",
+               blockCount512);
+    size_t blockCount4k = blockCount512 >> 3;
 
     uint extentCount = inode.le16(0x28 + 0x2);
     EXPECT(extentCount, <= 4, "journal inode has more than four extents?");
@@ -453,7 +459,7 @@ void NbdDevice::trimJournalIfClean() {
       logicalPos += len;
       physicalPos += len;
     }
-    EXPECT(logicalPos, == 32768, "journal extents do not add to 128MB?");
+    EXPECT(logicalPos, == blockCount4k, "journal extents do not add to expected size?");
 
     KJ_ASSERT(memcmp(superblock.bytes(0x10C), inode.bytes(0x28), 60) == 0,
               "superblock's backup of journal i_block doesn't match?");

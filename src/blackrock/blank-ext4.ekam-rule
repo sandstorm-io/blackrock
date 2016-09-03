@@ -26,6 +26,6 @@ truncate -s 8589934592 $TMPFILE
 # TODO(someday): Figure out if we can make this deterministic. It seems there's more randomness
 #   than just the UUID.
 /sbin/mkfs.ext4 -q -b 4096 -U 00000000-0000-0000-0000-000000000000 -m 0 -O sparse_super2 \
-    -E num_backup_sb=0,resize=4294967295 $TMPFILE
+    -E num_backup_sb=0,resize=4294967295 -J size=16 $TMPFILE
 $MKSPARSE $TMPFILE > $OUTPUT
 rm $TMPFILE
