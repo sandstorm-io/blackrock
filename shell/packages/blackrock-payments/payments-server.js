@@ -752,6 +752,33 @@ BlackrockPayments.getTotalCharges = function() {
   }, 0) / 100;
 };
 
+BlackrockPayments.suspendAccount = function (db, userId) {
+  var payments = db.collections.users.findOne({_id: userId}).payments;
+  if (payments && payments.id) {
+    var customerId = payments.id;
+    var data = Meteor.wrapAsync(stripe.customers.retrieve.bind(stripe.customers))(customerId);
+
+    if (data.subscriptions && data.subscriptions.data.length > 0) {
+      // Only cancel subscription if one exists.
+      Meteor.wrapAsync(stripe.customers.cancelSubscription.bind(stripe.customers))(
+        customerId,
+        data.subscriptions.data[0].id
+      );
+    }
+
+    db.collections.users.update({_id: userId}, {$set: { plan: "free" }});
+    // TODO(someday): store the old plan and reset it on unsuspend?
+  }
+};
+
+BlackrockPayments.deleteAccount = function (db, user) {
+  var payments = user.payments;
+  if (payments && payments.id) {
+    var customerId = payments.id;
+    Meteor.wrapAsync(stripe.customers.del.bind(stripe.customers))(customerId);
+  }
+};
+
 SandstormDb.paymentsMigrationHook = function (SignupKeys, plans) {
   var db = this;
   var customers = getAllStripeCustomers();
