@@ -89,6 +89,7 @@ BlackrockPayments.registerPaymentsApi =
       return {
         descriptor: { tags: [{ id: PaymentsRpc.PaymentSource.typeId }] },
         requirements: [],
+        frontendRef: value,
       };
     },
 
@@ -194,6 +195,7 @@ BlackrockPayments.registerPaymentsApi =
       return {
         descriptor: { tags: [{ id: PaymentsRpc.PaymentAcceptor.typeId }] },
         requirements: [{ userIsAdmin: session.userId }],
+        frontendRef: value,
       };
     },
 
