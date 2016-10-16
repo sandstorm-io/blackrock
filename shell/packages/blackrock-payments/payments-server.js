@@ -413,7 +413,7 @@ function updateMailchimp(db) {
     MailchimpSubscribers.upsert({_id: member.email_address}, {$set: {
       canonical: canonicalizeEmail(member.email_address),
       subscribed: member.status === "subscribed",
-      lastChanged: new Date(member.last_changed + " GMT")
+      lastChanged: new Date(member.last_changed)
     }});
     var count = db.findAccountsByEmail(member.email_address).map(updateBonuses).length;
     console.log("Mailchimp:", member.email_address, member.status, "(" + count + " users)");
