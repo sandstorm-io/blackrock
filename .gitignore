@@ -35,6 +35,7 @@ oasis-config
 testrock-config
 blackrock.tar.xz
 shell/packages/accounts-email-token
+shell/packages/accounts-saml
 shell/packages/bignum
 shell/packages/connect
 shell/packages/sandstorm-autoupdate-apps
