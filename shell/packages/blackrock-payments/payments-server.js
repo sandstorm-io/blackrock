@@ -286,6 +286,8 @@ function handleWebhookEvent(db, event) {
       settingsUrl: ROOT_URL + "/account",
     };
 
+    let needExitBeta = false;
+
     // Send an email.
     if (event.type === "invoice.payment_failed") {
       const mailSubject = "URGENT: Payment failed for " + config.acceptorTitle;
@@ -312,6 +314,10 @@ function handleWebhookEvent(db, event) {
         if (line.type === "subscription") {
           const parts = line.plan.id.split("-");
           const planName = parts[0];
+
+          if (parts[1] === "beta" && Meteor.settings.public.outOfBeta) {
+            needExitBeta = true;
+          }
 
           const plan = db.getPlan(planName);
           const planTitle = plan.title || (plan._id.charAt(0).toUpperCase() + plan._id.slice(1));
@@ -347,7 +353,11 @@ function handleWebhookEvent(db, event) {
         });
       }
 
-      sendInvoice(db, user, { items }, config);
+      if (needExitBeta) {
+        // Don't send invoice because we're about to generate another, below.
+      } else {
+        sendInvoice(db, user, { items }, config);
+      }
     }
 
     var mod = {"payments.lastInvoiceTime": event.created};
@@ -355,7 +365,7 @@ function handleWebhookEvent(db, event) {
       // Cancel plan.
       // TODO(soon): Some sort of grace period.
       mod.plan = "free";
-      var data = Meteor.wrapAsync(
+      const data = Meteor.wrapAsync(
           stripe.customers.retrieve.bind(stripe.customers))(invoice.customer);
       if (data.subscriptions && data.subscriptions.data.length > 0) {
         Meteor.wrapAsync(stripe.customers.cancelSubscription.bind(stripe.customers))(
@@ -364,6 +374,27 @@ function handleWebhookEvent(db, event) {
     }
 
     Meteor.users.update({_id: user._id}, {$set: mod});
+
+    if (needExitBeta) {
+      // We noticed the user is still on a beta plan but we're out of beta now. Switch them to
+      // a real plan.
+
+      const data = Meteor.wrapAsync(
+          stripe.customers.retrieve.bind(stripe.customers))(invoice.customer);
+      if (data.subscriptions && data.subscriptions.data.length > 0) {
+        const subscription = data.subscriptions.data[0];
+        const parts = subscription.plan.id.split("-");
+
+        // Check again that the user really is still in a beta plan.
+        if (parts[1] === "beta") {
+          console.log("Switching user to paid non-beta plan:",
+                      user._id, invoice.customer, parts[0]);
+
+          Meteor.wrapAsync(stripe.customers.updateSubscription.bind(stripe.customers))(
+              invoice.customer, subscription.id, {plan: parts[0]});
+        }
+      }
+    }
   } else if (event.type === "customer.subscription.deleted") {
     const customerId = event.data.object.customer;
     const user = Meteor.users.findOne({"payments.id": customerId});
