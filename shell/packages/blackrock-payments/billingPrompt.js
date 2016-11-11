@@ -404,7 +404,8 @@ var helpers = {
     var data = StripeCards.find();
     return this.price && !this.isCurrent && data.count() === 0;
   },
-  MAILING_LIST_BONUS: MAILING_LIST_BONUS
+  MAILING_LIST_BONUS: MAILING_LIST_BONUS,
+  OUT_OF_BETA: Meteor.settings.public.outOfBeta,
 };
 
 Template._billingPromptBody.helpers(helpers);
