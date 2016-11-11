@@ -325,6 +325,14 @@ var helpers = {
   myPlan: function () {
     return this.db.getMyPlan();
   },
+  myPlanEnds: function () {
+    const data = StripeCustomerData.findOne();
+    if (data && data.subscriptionEnds) {
+      return data.subscriptionEnds.toLocaleDateString();
+    } else {
+      return null;
+    }
+  },
   isPaid: function () {
     return (Meteor.user() && Meteor.user().plan && Meteor.user().plan !== "free");
   },

@@ -214,8 +214,11 @@ All Rights Reserved
       <table>
         <tr>
           <td>Current Plan:</td>
-          <td>
+          <td class="current-plan">
             <span class="plan-name">{{planTitle plan}}</span>
+            {{#with myPlanEnds}}
+              <span class="plan-ends">(canceled; ends {{.}})</span>
+            {{/with}}
             <button class="change-plan">Change plan</button>
           </td>
         </tr>
