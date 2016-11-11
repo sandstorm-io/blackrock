@@ -526,6 +526,35 @@ function createUser(token, email) {
   return data;
 }
 
+function cancelSubscription(userId, customerId) {
+  const data = Meteor.wrapAsync(stripe.customers.retrieve.bind(stripe.customers))(customerId);
+
+  if (data.subscriptions && data.subscriptions.data.length > 0) {
+    const current = data.subscriptions.data[0];
+    if (current.cancel_at_period_end) {
+      // Already canceled.
+      return { subscriptionEnds: new Date(current.current_period_end * 1000) };
+    } else {
+      const info = Meteor.wrapAsync(stripe.customers.cancelSubscription.bind(stripe.customers))(
+        customerId,
+        data.subscriptions.data[0].id,
+        { at_period_end: true },
+      );
+
+      const ends = new Date(info.current_period_end * 1000);
+
+      // The subscription continues until the end of the pay period, so don't update the user's
+      // plan now.
+
+      return { subscriptionEnds: ends };
+    }
+  } else {
+    // Hmm, no current subscription. Set to free.
+    Meteor.users.update({_id: this.userId}, {$set: { plan: "free" }});
+    return {};
+  }
+}
+
 var methods = {
   addCardForUser: function (token, email) {
     if (!this.userId) {
@@ -608,20 +637,31 @@ var methods = {
       }
     }
 
-    var subscription;
+    let subscriptionName;
+    let subscriptionEnds;
     if (data.subscriptions && data.subscriptions.data[0]) {
       // Plan names end with "-beta".
-      subscription = data.subscriptions.data[0].plan.id.split("-")[0];
+      const subscription = data.subscriptions.data[0];
+      subscriptionName = subscription.plan.id.split("-")[0];
+
+      if (subscription.cancel_at_period_end) {
+        subscriptionEnds = new Date(subscription.current_period_end * 1000);
+      }
     }
     return {
       email: data.email,
-      subscription: subscription,
+      subscription: subscriptionName,
+      subscriptionEnds: subscriptionEnds,
       sources: data.sources && data.sources.data,
       credit: -(data.account_balance || -0)
     };
   },
 
   updateUserSubscription: function (newPlan) {
+    // Sets the user's plan to newPlan. Returns an object containing StripeCustomerData
+    // modifications. Note that if newPlan is "free", the plan might not actually be changed to
+    // "free" yet, but rather may be scheduled for cancelation.
+
     if (!this.userId) {
       throw new Meteor.Error(403, "Must be logged in to update subscription");
     }
@@ -635,19 +675,12 @@ var methods = {
 
     var payments = Meteor.user().payments;
     if (payments && payments.id) {
-      var customerId = payments.id;
-      var data = Meteor.wrapAsync(stripe.customers.retrieve.bind(stripe.customers))(customerId);
-
       if (newPlan === "free") {
-        if (data.subscriptions && data.subscriptions.data.length > 0) {
-          // TODO(soon): pass in at_period_end and properly handle pending cancelled subscriptions
-          Meteor.wrapAsync(stripe.customers.cancelSubscription.bind(stripe.customers))(
-            customerId,
-            data.subscriptions.data[0].id
-          );
-        }
-        // else: no subscriptions exist so we're already set to free
+        return cancelSubscription(this.userId, payments.id);
       } else {
+        var customerId = payments.id;
+        var data = Meteor.wrapAsync(stripe.customers.retrieve.bind(stripe.customers))(customerId);
+
         if (data.subscriptions && data.subscriptions.data.length > 0) {
           Meteor.wrapAsync(stripe.customers.updateSubscription.bind(stripe.customers))(
             customerId,
@@ -668,6 +701,7 @@ var methods = {
     }
 
     Meteor.users.update({_id: this.userId}, {$set: { plan: newPlan }});
+    return { subscription: newPlan, subscriptionEnds: null };
   },
 
   createUserSubscription: function (token, email, plan) {
@@ -812,19 +846,9 @@ BlackrockPayments.getTotalCharges = function() {
 BlackrockPayments.suspendAccount = function (db, userId) {
   var payments = db.collections.users.findOne({_id: userId}).payments;
   if (payments && payments.id) {
-    var customerId = payments.id;
-    var data = Meteor.wrapAsync(stripe.customers.retrieve.bind(stripe.customers))(customerId);
+    cancelSubscription(userId, payments.id);
 
-    if (data.subscriptions && data.subscriptions.data.length > 0) {
-      // Only cancel subscription if one exists.
-      Meteor.wrapAsync(stripe.customers.cancelSubscription.bind(stripe.customers))(
-        customerId,
-        data.subscriptions.data[0].id
-      );
-    }
-
-    db.collections.users.update({_id: userId}, {$set: { plan: "free" }});
-    // TODO(someday): store the old plan and reset it on unsuspend?
+    // TODO(someday): un-cancel plan on un-suspend?
   }
 };
 
