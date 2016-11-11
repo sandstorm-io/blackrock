@@ -174,20 +174,22 @@ function clickPlanHelper(context, ev) {
   var data = StripeCards.find();
   if (data.count() > 0 || context.price === 0) {
     template.isSelectingPlan.set(planName);
-    Meteor.call("updateUserSubscription", planName, function (err) {
+    Meteor.call("updateUserSubscription", planName, function (err, changes) {
       if (err) {
         alert(err); // TODO(soon): make this UI better;
         return;
       }
 
+      const old = StripeCustomerData.findOne();
+
       // Non-error return means the plan was updated successfully, so update our client-side copy.
-      StripeCustomerData.update("0", {$set: {subscription: planName }});
+      StripeCustomerData.update("0", {$set: changes});
       template.isSelectingPlan.set(null);
 
       template.eventuallyCheckConsistency();
 
       if (template.data.onComplete) {
-        template.data.onComplete(true);
+        template.data.onComplete(true, old);
       }
     });
   } else {
