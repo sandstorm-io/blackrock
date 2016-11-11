@@ -249,6 +249,11 @@ var helpers = {
     var plans = this.db.listPlans().fetch();
     var data = StripeCustomerData.findOne();
     var myPlanName = (data && data.subscription) || "unknown";
+    if (data && data.subscriptionEnds) {
+      // The user previously canceled their plan, so show them as on the "free" plan in the
+      // plan chooser.
+      myPlanName = "free";
+    }
     var myPlan;
     plans.forEach(function (plan) {
       if (plan._id === myPlanName) myPlan = plan;
