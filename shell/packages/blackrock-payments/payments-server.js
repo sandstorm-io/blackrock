@@ -293,17 +293,48 @@ function handleWebhookEvent(db, event) {
           "<p><a href=\"" + ROOT_URL + "/account\">" + ROOT_URL + "/account</a></p>\n";
       sendEmail(db, user, mailSubject, mailText, mailHtml, config);
     } else {
-      const plan = db.getPlan(user.plan || free);
-      const planTitle = plan.title || (plan._id.charAt(0).toUpperCase() + plan._id.slice(1));
+      const items = [];
 
-      const sandstormInvoice = {
-        items: [
-          { title: { defaultText: "1 month " + planTitle + " plan" }, amountCents: plan.price },
-          { title: { defaultText: "Beta discount" }, amountCents: -plan.price },
-        ],
-      };
+      invoice.lines.data.forEach(line => {
+        if (line.type === "subscription") {
+          const parts = line.plan.id.split("-");
+          const planName = parts[0];
 
-      sendInvoice(db, user, sandstormInvoice, config);
+          const plan = db.getPlan(planName);
+          const planTitle = plan.title || (plan._id.charAt(0).toUpperCase() + plan._id.slice(1));
+
+          if (line.amount === 0 && parts[1] === "beta") {
+            // This is a beta plan, so show the beta discount.
+            items.push({
+              title: { defaultText: "1 month " + planTitle + " plan" },
+              amountCents: plan.price,
+            });
+            items.push({
+              title: { defaultText: "Beta discount" },
+              amountCents: -plan.price,
+            });
+          } else {
+            items.push({
+              title: { defaultText: "1 month " + planTitle + " plan" },
+              amountCents: line.amount,
+            });
+          }
+        } else {
+          items.push({
+            title: { defaultText: line.description },
+            amountCents: line.amount,
+          });
+        }
+      });
+
+      if (invoice.amount_due < invoice.total) {
+        items.push({
+          title: { defaultText: "Paid from account credit" },
+          amountCents: invoice.amount_due - invoice.total,
+        });
+      }
+
+      sendInvoice(db, user, { items }, config);
     }
 
     var mod = {"payments.lastInvoiceTime": event.created};
