@@ -15,6 +15,8 @@ var Url = Npm.require('url');
 var ROOT_URL = process.env.ROOT_URL;
 var HOSTNAME = Url.parse(ROOT_URL).hostname;
 
+const MAYBE_BETA = Meteor.settings.public.outOfBeta ? "" : "-beta";
+
 stripe = Npm.require("stripe")(Meteor.settings.stripeKey);
 
 BlackrockPayments = {};
@@ -640,7 +642,7 @@ var methods = {
     let subscriptionName;
     let subscriptionEnds;
     if (data.subscriptions && data.subscriptions.data[0]) {
-      // Plan names end with "-beta".
+      // Plan names may end with "-beta".
       const subscription = data.subscriptions.data[0];
       subscriptionName = subscription.plan.id.split("-")[0];
 
@@ -685,12 +687,12 @@ var methods = {
           Meteor.wrapAsync(stripe.customers.updateSubscription.bind(stripe.customers))(
             customerId,
             data.subscriptions.data[0].id,
-            {plan: newPlan + "-beta"}
+            {plan: newPlan + MAYBE_BETA}
           );
         } else {
           Meteor.wrapAsync(stripe.customers.createSubscription.bind(stripe.customers))(
             customerId,
-            {plan: newPlan + "-beta"}
+            {plan: newPlan + MAYBE_BETA}
           );
         }
       }
@@ -727,7 +729,7 @@ var methods = {
     }
     Meteor.wrapAsync(stripe.customers.createSubscription.bind(stripe.customers))(
       customerId,
-      {plan: plan + "-beta"}
+      {plan: plan + MAYBE_BETA}
     );
     Meteor.users.update({_id: this.userId}, {$set: { plan: plan }});
     return sanitizedSource;
@@ -885,7 +887,7 @@ SandstormDb.paymentsMigrationHook = function (SignupKeys, plans) {
     if (customer) {
       var plan;
       if (customer.subscriptions && customer.subscriptions.data[0]) {
-        // Plan names end with "-beta".
+        // Plan names may end with "-beta".
         plan = customer.subscriptions.data[0].plan.id.split("-")[0];
       } else {
         plan = "free";
