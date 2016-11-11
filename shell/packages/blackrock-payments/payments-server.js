@@ -140,16 +140,22 @@ var inFiber = Meteor.bindEnvironment(function (callback) {
 });
 
 function renderPrice(amount) {
-  var prefix = " $";
+  let credit = false;
   if (amount < 0) {
-    prefix = "-$";
+    credit = true;
     amount *= -1;
   }
 
   var dollars = Math.floor(amount / 100);
   var cents = amount % 100;
   if (cents < 10) cents = "0" + cents;
-  return prefix + dollars + "." + cents;
+  var dollarsAndCents = dollars + "." + cents;
+
+  if (credit) {
+    return "($" + dollarsAndCents + ")";
+  } else {
+    return " $" + dollarsAndCents + " ";
+  }
 }
 
 function sendEmail(db, user, mailSubject, mailText, mailHtml, config) {
@@ -200,6 +206,11 @@ sendInvoice = (db, user, invoice, config) => {
   let total = 0;
   invoice.items.forEach(item => total += item.amountCents);
 
+  let totalTitle = "Total";
+  if (total < 0) {
+    totalTitle += " (credit applied)";
+  }
+
   const mailSubject = "Invoice from " + config.acceptorTitle;
   const priceColStyle = "text-align: right; white-space: nowrap;";
   const mailText =
@@ -209,7 +220,7 @@ sendInvoice = (db, user, invoice, config) => {
         return renderPrice(item.amountCents) + "  " + item.title.defaultText + "\n";
       }).join("") +
       "-----------------------------------------------\n" +
-      renderPrice(total) + "  Total\n" +
+      renderPrice(total) + "  " + totalTitle + "\n" +
       "\n" +
       "This invoice has already been paid using the payment info we have on file.\n" +
       "\n" +
@@ -226,7 +237,7 @@ sendInvoice = (db, user, invoice, config) => {
             '</td></tr>\n'
       }).join("") +
       '  <tr><td colspan="2"><hr style="border-style: none; border-top-style: solid; border-color: #bbb;"></td></tr>\n' +
-      '  <tr><td><b>Total</b></td><td style="'+priceColStyle+'">' + renderPrice(total) + '</td></tr>\n' +
+      '  <tr><td><b>' + totalTitle + '</b></td><td style="'+priceColStyle+'">' + renderPrice(total) + '</td></tr>\n' +
       '</table>\n' +
       '<p>This invoice has already been paid using the payment info we have on file.</p>\n' +
       '<p>To update your settings, visit:<br>\n' +
