@@ -263,8 +263,8 @@ function handleWebhookEvent(db, event) {
   event = Meteor.wrapAsync(stripe.events.retrieve.bind(stripe.events))(event.id);
 
   if (event.type === "invoice.payment_succeeded" || event.type === "invoice.payment_failed") {
-    var invoice = event.data.object;
-    var user = Meteor.users.findOne({"payments.id": invoice.customer});
+    const invoice = event.data.object;
+    const user = Meteor.users.findOne({"payments.id": invoice.customer});
     if (!user) {
       console.error("Stripe event didn't match any user: " + event.id);
       return;
@@ -362,6 +362,21 @@ function handleWebhookEvent(db, event) {
     }
 
     Meteor.users.update({_id: user._id}, {$set: mod});
+  } else if (event.type === "customer.subscription.deleted") {
+    const customerId = event.data.object.customer;
+    const user = Meteor.users.findOne({"payments.id": customerId});
+    if (!user) {
+      console.error("Stripe event didn't match any user: " + event.id);
+      return;
+    }
+
+    // Avoid replay attacks by checking the customer's current subscription.
+    const customer = Meteor.wrapAsync(stripe.customers.retrieve.bind(stripe.customers))(customerId);
+
+    if (!customer.subscriptions || customer.subscriptions.data.length === 0) {
+      // OK, the customer really is unsubscribed. Downgrade them.
+      Meteor.users.update(user._id, { $set: { plan: "free" } });
+    }
   }
 }
 
