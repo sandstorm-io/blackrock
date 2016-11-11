@@ -375,9 +375,12 @@ var helpers = {
   },
   onCompleteWrapper: function () {
     var template = Template.instance();
-    return function (success) {
+    return function (success, oldData) {
       if (success) {
         template._isComplete.set(true);
+        if (oldData) {
+          template._oldPlanEnds = oldData.subscriptionEnds;
+        }
       } else {
         template.data.onComplete(false);
       }
@@ -392,6 +395,10 @@ var helpers = {
   },
   oldPlan: function () {
     return Template.instance()._oldPlanTitle;
+  },
+  oldPlanEnds: function () {
+    const ends = Template.instance()._oldPlanEnds;
+    return ends && ends.toLocaleDateString();
   },
   isShowingIframe: function () {
     var data = StripeCards.find();

@@ -40,8 +40,16 @@ All Rights Reserved
 <template name="_billingPromptPopup">
   {{#if isComplete}}
     <h2>Success!</h2>
-    <p class="success-note">You've changed your plan from <strong>{{oldPlan}}</strong> to
-      <strong>{{planTitle myPlan}}</strong>.</p>
+    <p class="success-note">
+      {{#with myPlanEnds}}
+        You've canceled your subscription. It will end on <strong>{{.}}</strong>.
+      {{else}}{{#if oldPlanEnds}}
+        You've restored your canceled subscription to <strong>{{planTitle myPlan}}</strong>.
+      {{else}}
+        You've changed your plan from <strong>{{oldPlan}}</strong> to <strong>{{planTitle myPlan}}</strong>.
+      {{/if}}
+      {{/with}}
+    </p>
     <button class="continue">Continue</button>
   {{else}}
 
