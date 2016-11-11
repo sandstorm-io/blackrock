@@ -1001,6 +1001,7 @@ kj::Promise<void> FrontendImpl::execLoop(MongoInfo&& mongoInfo, uint replicaNumb
           ", \"wildcardHost\":\"", config.getWildcardHost(), "\""
           ", \"quotaEnabled\": true"
           ", \"stripePublicKey\":\"", config.getStripePublicKey(), "\""
+          ", \"outOfBeta\": ", config.getOutOfBeta() ? "true" : "false",
           ", \"allowUninvited\":", config.getAllowUninvited() ? "true" : "false",
           "}"
           ", \"stripeKey\":\"", config.getStripeKey(), "\""
