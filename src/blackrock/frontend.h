@@ -50,13 +50,13 @@ private:
   kj::Own<BackendSetImpl<Worker>> workers;
   kj::Own<BackendSetImpl<Mongo>> mongos;
 
-  pid_t frontendPid = 0;
+  kj::Array<pid_t> frontendPids = 0;
   kj::TaskSet tasks;
 
   kj::Promise<void> startExecLoop(MongoInfo&& mongoInfo, uint replicaNumber,
-                                  uint port, uint smtpPort);
+                                  uint port, uint smtpPort, pid_t& pid);
   kj::Promise<void> execLoop(MongoInfo&& mongoInfo, uint replicaNumber,
-                             kj::AutoCloseFd&& http, kj::AutoCloseFd&& smtp);
+                             kj::AutoCloseFd&& http, kj::AutoCloseFd&& smtp, pid_t& pid);
 
   void taskFailed(kj::Exception&& exception) override;
 };

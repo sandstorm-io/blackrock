@@ -879,8 +879,11 @@ FrontendImpl::FrontendImpl(kj::Network& network, kj::Timer& timer,
       // Now that we're listening on the socket, and we have Mongo's address, it's safe to start
       // the front-end.
       uint n = this->config.getReplicasPerMachine();
+      frontendPids = kj::heapArray<pid_t>(n);
       for (uint i = 0; i < n; i++) {
-        tasks.add(startExecLoop(MongoInfo(mongoInfo), replicaNumber * n + i, 6080 + i, 30025 + i));
+        frontendPids[i] = 0;
+        tasks.add(startExecLoop(MongoInfo(mongoInfo), replicaNumber * n + i, 6080 + i, 30025 + i,
+                                frontendPids[i]));
       }
 
       return capnpServer.listen(kj::mv(listener));
@@ -896,10 +899,12 @@ void FrontendImpl::setConfig(FrontendConfig::Reader config) {
   configMessage = kj::heap<capnp::MallocMessageBuilder>();
   configMessage->setRoot(config);
   this->config = configMessage->getRoot<FrontendConfig>();
-  if (frontendPid != 0) {
-    // Restart frontend.
-    KJ_LOG(INFO, "restarting front-end due to config change");
-    KJ_SYSCALL(kill(frontendPid, SIGTERM));
+  for (auto& pid: frontendPids) {
+    if (pid != 0) {
+      // Restart frontend.
+      KJ_LOG(INFO, "restarting front-end due to config change");
+      KJ_SYSCALL(kill(pid, SIGTERM));
+    }
   }
 }
 
@@ -933,7 +938,7 @@ static kj::AutoCloseFd ensureFdGt(kj::AutoCloseFd&& fd, int min) {
 }
 
 kj::Promise<void> FrontendImpl::startExecLoop(MongoInfo&& mongoInfo, uint replicaNumber,
-                                              uint port, uint smtpPort) {
+                                              uint port, uint smtpPort, pid_t& pid) {
   // Create the HTTP and SMTP listen ports in advance so that when node dies, connections will
   // wait for a new node process to start rather than fail outright.
   auto http = ensureFdGt(raiiSocket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0), 5);
@@ -953,11 +958,12 @@ kj::Promise<void> FrontendImpl::startExecLoop(MongoInfo&& mongoInfo, uint replic
   KJ_SYSCALL(listen(http, SOMAXCONN));
   KJ_SYSCALL(listen(smtp, SOMAXCONN));
 
-  return execLoop(kj::mv(mongoInfo), replicaNumber, kj::mv(http), kj::mv(smtp));
+  return execLoop(kj::mv(mongoInfo), replicaNumber, kj::mv(http), kj::mv(smtp), pid);
 }
 
 kj::Promise<void> FrontendImpl::execLoop(MongoInfo&& mongoInfo, uint replicaNumber,
-                                         kj::AutoCloseFd&& http, kj::AutoCloseFd&& smtp) {
+                                         kj::AutoCloseFd&& http, kj::AutoCloseFd&& smtp,
+                                         pid_t& pid) {
   // If node fails, we will wait until at least 10 seconds from now before restarting it.
   auto rateLimit = timer.afterDelay(10 * kj::SECONDS);
 
@@ -1019,17 +1025,18 @@ kj::Promise<void> FrontendImpl::execLoop(MongoInfo&& mongoInfo, uint replicaNumb
       KJ_UNREACHABLE;
     });
 
-    frontendPid = subprocess.getPid();
+    pid = subprocess.getPid();
 
-    return subprocessSet.waitForSuccess(kj::mv(subprocess));
+    return subprocessSet.waitForSuccess(kj::mv(subprocess))
+        .attach(kj::defer([&pid]() { pid = 0; }));
   });
   return promise.then([]() {
     KJ_FAIL_ASSERT("frontend exited 'successfully' (shouldn't happen); restarting");
   }).catch_([KJ_MVCAP(rateLimit)](kj::Exception&& exception) mutable {
     KJ_LOG(ERROR, "frontend died; restarting", exception);
     return kj::mv(rateLimit);
-  }).then([this,KJ_MVCAP(mongoInfo),replicaNumber,KJ_MVCAP(http),KJ_MVCAP(smtp)]() mutable {
-    return execLoop(kj::mv(mongoInfo), replicaNumber, kj::mv(http), kj::mv(smtp));
+  }).then([this,KJ_MVCAP(mongoInfo),replicaNumber,&pid,KJ_MVCAP(http),KJ_MVCAP(smtp)]() mutable {
+    return execLoop(kj::mv(mongoInfo), replicaNumber, kj::mv(http), kj::mv(smtp), pid);
   });
 }
 
