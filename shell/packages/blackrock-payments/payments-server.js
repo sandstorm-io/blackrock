@@ -748,7 +748,8 @@ BlackrockPayments.getTotalCharges = function() {
     }
   }
   return _.reduce(results, (total, elem) => {
-    return (elem.amount || 0) - (elem.amount_refunded || 0) + total;
+    return (elem.paid ? elem.amount || 0 : 0) - (elem.refunded ? elem.amount_refunded || 0 : 0) +
+      total;
   }, 0) / 100;
 };
 
