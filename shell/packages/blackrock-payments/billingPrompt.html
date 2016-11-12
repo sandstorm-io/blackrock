@@ -40,8 +40,16 @@ All Rights Reserved
 <template name="_billingPromptPopup">
   {{#if isComplete}}
     <h2>Success!</h2>
-    <p class="success-note">You've changed your plan from <strong>{{oldPlan}}</strong> to
-      <strong>{{planTitle myPlan}}</strong>.</p>
+    <p class="success-note">
+      {{#with myPlanEnds}}
+        You've canceled your subscription. It will end on <strong>{{.}}</strong>.
+      {{else}}{{#if oldPlanEnds}}
+        You've restored your canceled subscription to <strong>{{planTitle myPlan}}</strong>.
+      {{else}}
+        You've changed your plan from <strong>{{oldPlan}}</strong> to <strong>{{planTitle myPlan}}</strong>.
+      {{/if}}
+      {{/with}}
+    </p>
     <button class="continue">Continue</button>
   {{else}}
 
@@ -111,9 +119,11 @@ All Rights Reserved
 
 <template name="_billingPromptBody">
   <div class="subscriptions">
-    <a class="free-note" href="https://blog.sandstorm.io/news/2015-08-31-oasis-beta-launch.html" target="_blank">
-      All plans are <strong>FREE</strong> during beta.
-    </a>
+    {{#unless OUT_OF_BETA}}
+      <a class="free-note" href="https://blog.sandstorm.io/news/2015-08-31-oasis-beta-launch.html" target="_blank">
+        All plans are <strong>FREE</strong> during beta.
+      </a>
+    {{/unless}}
 
     {{#each plans}}
       <div class="subscription {{_id}} {{#if isCurrent}}selected{{/if}} {{#if isSelecting}}selecting{{/if}} {{#if isFullscreen}}iframe-active{{/if}}">
@@ -127,7 +137,7 @@ All Rights Reserved
           <tr><td>
             {{#if price}}
               <p>${{renderDollars price}}</p>
-              <p>/ month<br>(FREE during beta)</p>
+              <p>/ month<br>{{#if OUT_OF_BETA}}&nbsp;{{else}}(FREE during beta){{/if}}</p>
             {{else}}
               <p>FREE</p>
               <p>&nbsp;<br>&nbsp;</p>
@@ -214,8 +224,11 @@ All Rights Reserved
       <table>
         <tr>
           <td>Current Plan:</td>
-          <td>
+          <td class="current-plan">
             <span class="plan-name">{{planTitle plan}}</span>
+            {{#with myPlanEnds}}
+              <span class="plan-ends">(canceled; ends {{.}})</span>
+            {{/with}}
             <button class="change-plan">Change plan</button>
           </td>
         </tr>

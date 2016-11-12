@@ -70,7 +70,6 @@ Template._billingPromptBody.onCreated(function () {
 
   this.checkoutPlan = new ReactiveVar(null);
   this.isSelectingPlan = new ReactiveVar(null);
-  this.subscribe("stripeCustomerData");
   this.subscribe("plans");
   updateStripeData();
 
@@ -175,20 +174,22 @@ function clickPlanHelper(context, ev) {
   var data = StripeCards.find();
   if (data.count() > 0 || context.price === 0) {
     template.isSelectingPlan.set(planName);
-    Meteor.call("updateUserSubscription", planName, function (err) {
+    Meteor.call("updateUserSubscription", planName, function (err, changes) {
       if (err) {
         alert(err); // TODO(soon): make this UI better;
         return;
       }
 
+      const old = StripeCustomerData.findOne();
+
       // Non-error return means the plan was updated successfully, so update our client-side copy.
-      StripeCustomerData.update("0", {$set: {subscription: planName }});
+      StripeCustomerData.update("0", {$set: changes});
       template.isSelectingPlan.set(null);
 
       template.eventuallyCheckConsistency();
 
       if (template.data.onComplete) {
-        template.data.onComplete(true);
+        template.data.onComplete(true, old);
       }
     });
   } else {
@@ -248,6 +249,11 @@ var helpers = {
     var plans = this.db.listPlans().fetch();
     var data = StripeCustomerData.findOne();
     var myPlanName = (data && data.subscription) || "unknown";
+    if (data && data.subscriptionEnds) {
+      // The user previously canceled their plan, so show them as on the "free" plan in the
+      // plan chooser.
+      myPlanName = "free";
+    }
     var myPlan;
     plans.forEach(function (plan) {
       if (plan._id === myPlanName) myPlan = plan;
@@ -324,6 +330,14 @@ var helpers = {
   myPlan: function () {
     return this.db.getMyPlan();
   },
+  myPlanEnds: function () {
+    const data = StripeCustomerData.findOne();
+    if (data && data.subscriptionEnds) {
+      return data.subscriptionEnds.toLocaleDateString();
+    } else {
+      return null;
+    }
+  },
   isPaid: function () {
     return (Meteor.user() && Meteor.user().plan && Meteor.user().plan !== "free");
   },
@@ -361,9 +375,12 @@ var helpers = {
   },
   onCompleteWrapper: function () {
     var template = Template.instance();
-    return function (success) {
+    return function (success, oldData) {
       if (success) {
         template._isComplete.set(true);
+        if (oldData) {
+          template._oldPlanEnds = oldData.subscriptionEnds;
+        }
       } else {
         template.data.onComplete(false);
       }
@@ -379,11 +396,16 @@ var helpers = {
   oldPlan: function () {
     return Template.instance()._oldPlanTitle;
   },
+  oldPlanEnds: function () {
+    const ends = Template.instance()._oldPlanEnds;
+    return ends && ends.toLocaleDateString();
+  },
   isShowingIframe: function () {
     var data = StripeCards.find();
     return this.price && !this.isCurrent && data.count() === 0;
   },
-  MAILING_LIST_BONUS: MAILING_LIST_BONUS
+  MAILING_LIST_BONUS: MAILING_LIST_BONUS,
+  OUT_OF_BETA: Meteor.settings.public.outOfBeta,
 };
 
 Template._billingPromptBody.helpers(helpers);

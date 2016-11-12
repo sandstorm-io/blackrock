@@ -46,6 +46,7 @@ struct FrontendConfig {
 
   stripeKey @6 :Text;
   stripePublicKey @7 :Text;
+  outOfBeta @12 :Bool;
 
   mailchimpKey @10 :Text;
   mailchimpListId @11 :Text;

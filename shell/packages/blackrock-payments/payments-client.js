@@ -14,6 +14,7 @@ updateStripeData = function (cb) {
           email: data.email,
           subscription: data.subscription ||
               (Meteor.user().plan === "free" ? "free" : undefined),
+          subscriptionEnds: data.subscriptionEnds,
           credit: data.credit});
       if (data.sources) {
         sources = data.sources;

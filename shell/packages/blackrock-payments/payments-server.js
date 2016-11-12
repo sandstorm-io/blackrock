@@ -15,6 +15,8 @@ var Url = Npm.require('url');
 var ROOT_URL = process.env.ROOT_URL;
 var HOSTNAME = Url.parse(ROOT_URL).hostname;
 
+const MAYBE_BETA = Meteor.settings.public.outOfBeta ? "" : "-beta";
+
 stripe = Npm.require("stripe")(Meteor.settings.stripeKey);
 
 BlackrockPayments = {};
@@ -140,16 +142,22 @@ var inFiber = Meteor.bindEnvironment(function (callback) {
 });
 
 function renderPrice(amount) {
-  var prefix = " $";
+  let credit = false;
   if (amount < 0) {
-    prefix = "-$";
+    credit = true;
     amount *= -1;
   }
 
   var dollars = Math.floor(amount / 100);
   var cents = amount % 100;
   if (cents < 10) cents = "0" + cents;
-  return prefix + dollars + "." + cents;
+  var dollarsAndCents = dollars + "." + cents;
+
+  if (credit) {
+    return "($" + dollarsAndCents + ")";
+  } else {
+    return " $" + dollarsAndCents + " ";
+  }
 }
 
 function sendEmail(db, user, mailSubject, mailText, mailHtml, config) {
@@ -200,6 +208,11 @@ sendInvoice = (db, user, invoice, config) => {
   let total = 0;
   invoice.items.forEach(item => total += item.amountCents);
 
+  let totalTitle = "Total";
+  if (total < 0) {
+    totalTitle += " (credit applied)";
+  }
+
   const mailSubject = "Invoice from " + config.acceptorTitle;
   const priceColStyle = "text-align: right; white-space: nowrap;";
   const mailText =
@@ -209,7 +222,7 @@ sendInvoice = (db, user, invoice, config) => {
         return renderPrice(item.amountCents) + "  " + item.title.defaultText + "\n";
       }).join("") +
       "-----------------------------------------------\n" +
-      renderPrice(total) + "  Total\n" +
+      renderPrice(total) + "  " + totalTitle + "\n" +
       "\n" +
       "This invoice has already been paid using the payment info we have on file.\n" +
       "\n" +
@@ -226,7 +239,7 @@ sendInvoice = (db, user, invoice, config) => {
             '</td></tr>\n'
       }).join("") +
       '  <tr><td colspan="2"><hr style="border-style: none; border-top-style: solid; border-color: #bbb;"></td></tr>\n' +
-      '  <tr><td><b>Total</b></td><td style="'+priceColStyle+'">' + renderPrice(total) + '</td></tr>\n' +
+      '  <tr><td><b>' + totalTitle + '</b></td><td style="'+priceColStyle+'">' + renderPrice(total) + '</td></tr>\n' +
       '</table>\n' +
       '<p>This invoice has already been paid using the payment info we have on file.</p>\n' +
       '<p>To update your settings, visit:<br>\n' +
@@ -252,8 +265,8 @@ function handleWebhookEvent(db, event) {
   event = Meteor.wrapAsync(stripe.events.retrieve.bind(stripe.events))(event.id);
 
   if (event.type === "invoice.payment_succeeded" || event.type === "invoice.payment_failed") {
-    var invoice = event.data.object;
-    var user = Meteor.users.findOne({"payments.id": invoice.customer});
+    const invoice = event.data.object;
+    const user = Meteor.users.findOne({"payments.id": invoice.customer});
     if (!user) {
       console.error("Stripe event didn't match any user: " + event.id);
       return;
@@ -272,6 +285,8 @@ function handleWebhookEvent(db, event) {
       returnAddress: db.getReturnAddress(),
       settingsUrl: ROOT_URL + "/account",
     };
+
+    let needExitBeta = false;
 
     // Send an email.
     if (event.type === "invoice.payment_failed") {
@@ -293,17 +308,56 @@ function handleWebhookEvent(db, event) {
           "<p><a href=\"" + ROOT_URL + "/account\">" + ROOT_URL + "/account</a></p>\n";
       sendEmail(db, user, mailSubject, mailText, mailHtml, config);
     } else {
-      const plan = db.getPlan(user.plan || free);
-      const planTitle = plan.title || (plan._id.charAt(0).toUpperCase() + plan._id.slice(1));
+      const items = [];
 
-      const sandstormInvoice = {
-        items: [
-          { title: { defaultText: "1 month " + planTitle + " plan" }, amountCents: plan.price },
-          { title: { defaultText: "Beta discount" }, amountCents: -plan.price },
-        ],
-      };
+      invoice.lines.data.forEach(line => {
+        if (line.type === "subscription") {
+          const parts = line.plan.id.split("-");
+          const planName = parts[0];
 
-      sendInvoice(db, user, sandstormInvoice, config);
+          if (parts[1] === "beta" && Meteor.settings.public.outOfBeta) {
+            needExitBeta = true;
+          }
+
+          const plan = db.getPlan(planName);
+          const planTitle = plan.title || (plan._id.charAt(0).toUpperCase() + plan._id.slice(1));
+
+          if (line.amount === 0 && parts[1] === "beta") {
+            // This is a beta plan, so show the beta discount.
+            items.push({
+              title: { defaultText: "1 month " + planTitle + " plan" },
+              amountCents: plan.price,
+            });
+            items.push({
+              title: { defaultText: "Beta discount" },
+              amountCents: -plan.price,
+            });
+          } else {
+            items.push({
+              title: { defaultText: "1 month " + planTitle + " plan" },
+              amountCents: line.amount,
+            });
+          }
+        } else {
+          items.push({
+            title: { defaultText: line.description },
+            amountCents: line.amount,
+          });
+        }
+      });
+
+      if (invoice.amount_due < invoice.total) {
+        items.push({
+          title: { defaultText: "Paid from account credit" },
+          amountCents: invoice.amount_due - invoice.total,
+        });
+      }
+
+      if (needExitBeta) {
+        // Don't send invoice because we're about to generate another, below.
+      } else {
+        sendInvoice(db, user, { items }, config);
+      }
     }
 
     var mod = {"payments.lastInvoiceTime": event.created};
@@ -311,7 +365,7 @@ function handleWebhookEvent(db, event) {
       // Cancel plan.
       // TODO(soon): Some sort of grace period.
       mod.plan = "free";
-      var data = Meteor.wrapAsync(
+      const data = Meteor.wrapAsync(
           stripe.customers.retrieve.bind(stripe.customers))(invoice.customer);
       if (data.subscriptions && data.subscriptions.data.length > 0) {
         Meteor.wrapAsync(stripe.customers.cancelSubscription.bind(stripe.customers))(
@@ -320,6 +374,42 @@ function handleWebhookEvent(db, event) {
     }
 
     Meteor.users.update({_id: user._id}, {$set: mod});
+
+    if (needExitBeta) {
+      // We noticed the user is still on a beta plan but we're out of beta now. Switch them to
+      // a real plan.
+
+      const data = Meteor.wrapAsync(
+          stripe.customers.retrieve.bind(stripe.customers))(invoice.customer);
+      if (data.subscriptions && data.subscriptions.data.length > 0) {
+        const subscription = data.subscriptions.data[0];
+        const parts = subscription.plan.id.split("-");
+
+        // Check again that the user really is still in a beta plan.
+        if (parts[1] === "beta") {
+          console.log("Switching user to paid non-beta plan:",
+                      user._id, invoice.customer, parts[0]);
+
+          Meteor.wrapAsync(stripe.customers.updateSubscription.bind(stripe.customers))(
+              invoice.customer, subscription.id, {plan: parts[0]});
+        }
+      }
+    }
+  } else if (event.type === "customer.subscription.deleted") {
+    const customerId = event.data.object.customer;
+    const user = Meteor.users.findOne({"payments.id": customerId});
+    if (!user) {
+      console.error("Stripe event didn't match any user: " + event.id);
+      return;
+    }
+
+    // Avoid replay attacks by checking the customer's current subscription.
+    const customer = Meteor.wrapAsync(stripe.customers.retrieve.bind(stripe.customers))(customerId);
+
+    if (!customer.subscriptions || customer.subscriptions.data.length === 0) {
+      // OK, the customer really is unsubscribed. Downgrade them.
+      Meteor.users.update(user._id, { $set: { plan: "free" } });
+    }
   }
 }
 
@@ -469,6 +559,35 @@ function createUser(token, email) {
   return data;
 }
 
+function cancelSubscription(userId, customerId) {
+  const data = Meteor.wrapAsync(stripe.customers.retrieve.bind(stripe.customers))(customerId);
+
+  if (data.subscriptions && data.subscriptions.data.length > 0) {
+    const current = data.subscriptions.data[0];
+    if (current.cancel_at_period_end) {
+      // Already canceled.
+      return { subscriptionEnds: new Date(current.current_period_end * 1000) };
+    } else {
+      const info = Meteor.wrapAsync(stripe.customers.cancelSubscription.bind(stripe.customers))(
+        customerId,
+        data.subscriptions.data[0].id,
+        { at_period_end: true },
+      );
+
+      const ends = new Date(info.current_period_end * 1000);
+
+      // The subscription continues until the end of the pay period, so don't update the user's
+      // plan now.
+
+      return { subscriptionEnds: ends };
+    }
+  } else {
+    // Hmm, no current subscription. Set to free.
+    Meteor.users.update({_id: this.userId}, {$set: { plan: "free" }});
+    return {};
+  }
+}
+
 var methods = {
   addCardForUser: function (token, email) {
     if (!this.userId) {
@@ -551,20 +670,31 @@ var methods = {
       }
     }
 
-    var subscription;
+    let subscriptionName;
+    let subscriptionEnds;
     if (data.subscriptions && data.subscriptions.data[0]) {
-      // Plan names end with "-beta".
-      subscription = data.subscriptions.data[0].plan.id.split("-")[0];
+      // Plan names may end with "-beta".
+      const subscription = data.subscriptions.data[0];
+      subscriptionName = subscription.plan.id.split("-")[0];
+
+      if (subscription.cancel_at_period_end) {
+        subscriptionEnds = new Date(subscription.current_period_end * 1000);
+      }
     }
     return {
       email: data.email,
-      subscription: subscription,
+      subscription: subscriptionName,
+      subscriptionEnds: subscriptionEnds,
       sources: data.sources && data.sources.data,
       credit: -(data.account_balance || -0)
     };
   },
 
   updateUserSubscription: function (newPlan) {
+    // Sets the user's plan to newPlan. Returns an object containing StripeCustomerData
+    // modifications. Note that if newPlan is "free", the plan might not actually be changed to
+    // "free" yet, but rather may be scheduled for cancelation.
+
     if (!this.userId) {
       throw new Meteor.Error(403, "Must be logged in to update subscription");
     }
@@ -578,29 +708,22 @@ var methods = {
 
     var payments = Meteor.user().payments;
     if (payments && payments.id) {
-      var customerId = payments.id;
-      var data = Meteor.wrapAsync(stripe.customers.retrieve.bind(stripe.customers))(customerId);
-
       if (newPlan === "free") {
-        if (data.subscriptions && data.subscriptions.data.length > 0) {
-          // TODO(soon): pass in at_period_end and properly handle pending cancelled subscriptions
-          Meteor.wrapAsync(stripe.customers.cancelSubscription.bind(stripe.customers))(
-            customerId,
-            data.subscriptions.data[0].id
-          );
-        }
-        // else: no subscriptions exist so we're already set to free
+        return cancelSubscription(this.userId, payments.id);
       } else {
+        var customerId = payments.id;
+        var data = Meteor.wrapAsync(stripe.customers.retrieve.bind(stripe.customers))(customerId);
+
         if (data.subscriptions && data.subscriptions.data.length > 0) {
           Meteor.wrapAsync(stripe.customers.updateSubscription.bind(stripe.customers))(
             customerId,
             data.subscriptions.data[0].id,
-            {plan: newPlan + "-beta"}
+            {plan: newPlan + MAYBE_BETA}
           );
         } else {
           Meteor.wrapAsync(stripe.customers.createSubscription.bind(stripe.customers))(
             customerId,
-            {plan: newPlan + "-beta"}
+            {plan: newPlan + MAYBE_BETA}
           );
         }
       }
@@ -611,6 +734,7 @@ var methods = {
     }
 
     Meteor.users.update({_id: this.userId}, {$set: { plan: newPlan }});
+    return { subscription: newPlan, subscriptionEnds: null };
   },
 
   createUserSubscription: function (token, email, plan) {
@@ -636,7 +760,7 @@ var methods = {
     }
     Meteor.wrapAsync(stripe.customers.createSubscription.bind(stripe.customers))(
       customerId,
-      {plan: plan + "-beta"}
+      {plan: plan + MAYBE_BETA}
     );
     Meteor.users.update({_id: this.userId}, {$set: { plan: plan }});
     return sanitizedSource;
@@ -756,19 +880,9 @@ BlackrockPayments.getTotalCharges = function() {
 BlackrockPayments.suspendAccount = function (db, userId) {
   var payments = db.collections.users.findOne({_id: userId}).payments;
   if (payments && payments.id) {
-    var customerId = payments.id;
-    var data = Meteor.wrapAsync(stripe.customers.retrieve.bind(stripe.customers))(customerId);
+    cancelSubscription(userId, payments.id);
 
-    if (data.subscriptions && data.subscriptions.data.length > 0) {
-      // Only cancel subscription if one exists.
-      Meteor.wrapAsync(stripe.customers.cancelSubscription.bind(stripe.customers))(
-        customerId,
-        data.subscriptions.data[0].id
-      );
-    }
-
-    db.collections.users.update({_id: userId}, {$set: { plan: "free" }});
-    // TODO(someday): store the old plan and reset it on unsuspend?
+    // TODO(someday): un-cancel plan on un-suspend?
   }
 };
 
@@ -805,7 +919,7 @@ SandstormDb.paymentsMigrationHook = function (SignupKeys, plans) {
     if (customer) {
       var plan;
       if (customer.subscriptions && customer.subscriptions.data[0]) {
-        // Plan names end with "-beta".
+        // Plan names may end with "-beta".
         plan = customer.subscriptions.data[0].plan.id.split("-")[0];
       } else {
         plan = "free";
