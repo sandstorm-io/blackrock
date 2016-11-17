@@ -119,12 +119,6 @@ All Rights Reserved
 
 <template name="_billingPromptBody">
   <div class="subscriptions">
-    {{#unless OUT_OF_BETA}}
-      <a class="free-note" href="https://blog.sandstorm.io/news/2015-08-31-oasis-beta-launch.html" target="_blank">
-        All plans are <strong>FREE</strong> during beta.
-      </a>
-    {{/unless}}
-
     {{#each plans}}
       <div class="subscription {{_id}} {{#if isCurrent}}selected{{/if}} {{#if isSelecting}}selecting{{/if}} {{#if isFullscreen}}iframe-active{{/if}}">
         {{#if isShowingIframe}}
