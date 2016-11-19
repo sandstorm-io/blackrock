@@ -246,7 +246,7 @@ var helpers = {
     return !!Meteor.user().plan;
   },
   plans: function () {
-    var plans = this.db.listPlans().fetch();
+    var plans = this.db.listPlans();
     var data = StripeCustomerData.findOne();
     var myPlanName = (data && data.subscription) || "unknown";
     if (data && data.subscriptionEnds) {

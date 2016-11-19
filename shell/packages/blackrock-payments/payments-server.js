@@ -319,7 +319,7 @@ function handleWebhookEvent(db, event) {
             needExitBeta = true;
           }
 
-          const plan = db.getPlan(planName);
+          const plan = db.getPlan(planName, user);
           const planTitle = plan.title || (plan._id.charAt(0).toUpperCase() + plan._id.slice(1));
 
           if (line.amount === 0 && parts[1] === "beta") {
@@ -839,7 +839,7 @@ var methods = {
 Meteor.methods(methods);
 
 Meteor.publish("plans", function () {
-  return this.connection.sandstormDb.listPlans();
+  return this.connection.sandstormDb.plans.find();
 });
 
 function getAllStripeCustomers() {
