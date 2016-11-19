@@ -838,10 +838,6 @@ var methods = {
 };
 Meteor.methods(methods);
 
-Meteor.publish("plans", function () {
-  return this.connection.sandstormDb.plans.find();
-});
-
 function getAllStripeCustomers() {
   var hasMore = true;
   var results = [];

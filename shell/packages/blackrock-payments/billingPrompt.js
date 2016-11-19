@@ -70,7 +70,6 @@ Template._billingPromptBody.onCreated(function () {
 
   this.checkoutPlan = new ReactiveVar(null);
   this.isSelectingPlan = new ReactiveVar(null);
-  this.subscribe("plans");
   updateStripeData();
 
   this.eventuallyCheckConsistency = function () {
