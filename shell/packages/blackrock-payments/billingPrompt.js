@@ -174,8 +174,15 @@ function clickPlanHelper(context, ev) {
   if (data.count() > 0 || context.price === 0) {
     template.isSelectingPlan.set(planName);
     Meteor.call("updateUserSubscription", planName, function (err, changes) {
+      template.isSelectingPlan.set(null);
+
       if (err) {
-        alert(err); // TODO(soon): make this UI better;
+        // TODO(soon): make this UI better.
+        if (err instanceof Meteor.Error) {
+          alert(err.reason);
+        } else {
+          alert(err);
+        }
         return;
       }
 
@@ -183,7 +190,6 @@ function clickPlanHelper(context, ev) {
 
       // Non-error return means the plan was updated successfully, so update our client-side copy.
       StripeCustomerData.update("0", {$set: changes});
-      template.isSelectingPlan.set(null);
 
       template.eventuallyCheckConsistency();
 

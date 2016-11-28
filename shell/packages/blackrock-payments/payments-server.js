@@ -247,6 +247,38 @@ sendInvoice = (db, user, invoice, config) => {
       '<p>Thank you!</p>\n';
 
   sendEmail(db, user, mailSubject, mailText, mailHtml, config);
+};
+
+function paymentFailed(db, user, customerId, config, userMod) {
+  console.log("Payment failed for user: " + user._id + " (" + customerId + ")");
+
+  const mailSubject = "URGENT: Payment failed for " + config.acceptorTitle;
+  const mailText =
+      "We were unable to charge your payment method to renew your " +
+      "subscription to " + config.acceptorTitle + ". Your account has been " +
+      "demoted to the free plan. Please click on the link below to " +
+      "log into your account and update your payment info, then " +
+      "switch back to a paid plan.\n" +
+      "\n" +
+      ROOT_URL + "/account\n";
+  const mailHtml =
+      "<p>We were unable to charge your payment method to renew your " +
+      "subscription to " + config.acceptorTitle + ". Your account has been " +
+      "demoted to the free plan. Please click on the link below to " +
+      "log into your account and update your payment info, then " +
+      "switch back to a paid plan.</p>\n" +
+      "<p><a href=\"" + ROOT_URL + "/account\">" + ROOT_URL + "/account</a></p>\n";
+  sendEmail(db, user, mailSubject, mailText, mailHtml, config);
+
+  // Cancel plan.
+  // TODO(someday): Some sort of grace period?
+  userMod.plan = "free";
+  const data = Meteor.wrapAsync(
+      stripe.customers.retrieve.bind(stripe.customers))(customerId);
+  if (data.subscriptions && data.subscriptions.data.length > 0) {
+    Meteor.wrapAsync(stripe.customers.cancelSubscription.bind(stripe.customers))(
+        customerId, data.subscriptions.data[0].id);
+  }
 }
 
 function handleWebhookEvent(db, event) {
@@ -288,25 +320,11 @@ function handleWebhookEvent(db, event) {
 
     let needExitBeta = false;
 
+    var mod = {"payments.lastInvoiceTime": event.created};
+
     // Send an email.
     if (event.type === "invoice.payment_failed") {
-      const mailSubject = "URGENT: Payment failed for " + config.acceptorTitle;
-      const mailText =
-          "We were unable to charge your payment method to renew your " +
-          "subscription to " + config.acceptorTitle + ". Your account has been " +
-          "demoted to the free plan. Please click on the link below to " +
-          "log into your account and update your payment info, then " +
-          "switch back to a paid plan.\n" +
-          "\n" +
-          ROOT_URL + "/account\n";
-      const mailHtml =
-          "<p>We were unable to charge your payment method to renew your " +
-          "subscription to " + config.acceptorTitle + ". Your account has been " +
-          "demoted to the free plan. Please click on the link below to " +
-          "log into your account and update your payment info, then " +
-          "switch back to a paid plan.</p>\n" +
-          "<p><a href=\"" + ROOT_URL + "/account\">" + ROOT_URL + "/account</a></p>\n";
-      sendEmail(db, user, mailSubject, mailText, mailHtml, config);
+      paymentFailed(db, user, invoice.customer, config, mod);
     } else {
       const items = [];
 
@@ -354,47 +372,38 @@ function handleWebhookEvent(db, event) {
       }
 
       if (needExitBeta) {
-        // Don't send invoice because we're about to generate another, below.
+        // We noticed the user is still on a beta plan but we're out of beta now. Switch them to
+        // a real plan. Don't send an invoice for the old plan.
+
+        const data = Meteor.wrapAsync(
+            stripe.customers.retrieve.bind(stripe.customers))(invoice.customer);
+        if (data.subscriptions && data.subscriptions.data.length > 0) {
+          const subscription = data.subscriptions.data[0];
+          const parts = subscription.plan.id.split("-");
+
+          // Check again that the user really is still in a beta plan.
+          if (parts[1] === "beta") {
+            console.log("Switching user to paid non-beta plan:",
+                        user._id, invoice.customer, parts[0]);
+
+            try {
+              Meteor.wrapAsync(stripe.customers.updateSubscription.bind(stripe.customers))(
+                  invoice.customer, subscription.id, {plan: parts[0]});
+            } catch (err) {
+              if (!err.raw || err.raw.type !== "card_error") {
+                throw err;
+              }
+
+              paymentFailed(db, user, invoice.customer, config, mod);
+            }
+          }
+        }
       } else {
         sendInvoice(db, user, { items }, config);
       }
     }
 
-    var mod = {"payments.lastInvoiceTime": event.created};
-    if (event.type === "invoice.payment_failed") {
-      // Cancel plan.
-      // TODO(soon): Some sort of grace period.
-      mod.plan = "free";
-      const data = Meteor.wrapAsync(
-          stripe.customers.retrieve.bind(stripe.customers))(invoice.customer);
-      if (data.subscriptions && data.subscriptions.data.length > 0) {
-        Meteor.wrapAsync(stripe.customers.cancelSubscription.bind(stripe.customers))(
-            invoice.customer, data.subscriptions.data[0].id);
-      }
-    }
-
     Meteor.users.update({_id: user._id}, {$set: mod});
-
-    if (needExitBeta) {
-      // We noticed the user is still on a beta plan but we're out of beta now. Switch them to
-      // a real plan.
-
-      const data = Meteor.wrapAsync(
-          stripe.customers.retrieve.bind(stripe.customers))(invoice.customer);
-      if (data.subscriptions && data.subscriptions.data.length > 0) {
-        const subscription = data.subscriptions.data[0];
-        const parts = subscription.plan.id.split("-");
-
-        // Check again that the user really is still in a beta plan.
-        if (parts[1] === "beta") {
-          console.log("Switching user to paid non-beta plan:",
-                      user._id, invoice.customer, parts[0]);
-
-          Meteor.wrapAsync(stripe.customers.updateSubscription.bind(stripe.customers))(
-              invoice.customer, subscription.id, {plan: parts[0]});
-        }
-      }
-    }
   } else if (event.type === "customer.subscription.deleted") {
     const customerId = event.data.object.customer;
     const user = Meteor.users.findOne({"payments.id": customerId});
@@ -714,17 +723,25 @@ var methods = {
         var customerId = payments.id;
         var data = Meteor.wrapAsync(stripe.customers.retrieve.bind(stripe.customers))(customerId);
 
-        if (data.subscriptions && data.subscriptions.data.length > 0) {
-          Meteor.wrapAsync(stripe.customers.updateSubscription.bind(stripe.customers))(
-            customerId,
-            data.subscriptions.data[0].id,
-            {plan: newPlan + MAYBE_BETA}
-          );
-        } else {
-          Meteor.wrapAsync(stripe.customers.createSubscription.bind(stripe.customers))(
-            customerId,
-            {plan: newPlan + MAYBE_BETA}
-          );
+        try {
+          if (data.subscriptions && data.subscriptions.data.length > 0) {
+            Meteor.wrapAsync(stripe.customers.updateSubscription.bind(stripe.customers))(
+              customerId,
+              data.subscriptions.data[0].id,
+              {plan: newPlan + MAYBE_BETA}
+            );
+          } else {
+            Meteor.wrapAsync(stripe.customers.createSubscription.bind(stripe.customers))(
+              customerId,
+              {plan: newPlan + MAYBE_BETA}
+            );
+          }
+        } catch (err) {
+          if (err.raw && err.raw.type === "card_error") {
+            throw new Meteor.Error("cardError", err.raw.message);
+          } else {
+            throw err;
+          }
         }
       }
     } else {
