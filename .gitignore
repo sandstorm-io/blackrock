@@ -52,4 +52,5 @@ shell/packages/sandstorm-ui-grainlist
 shell/packages/sandstorm-ui-topbar
 shell/packages/sandstorm-ui-powerbox
 shell/packages/simplesmtp
+local-config
 .local
