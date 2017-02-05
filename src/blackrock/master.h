@@ -103,6 +103,8 @@ private:
   LogSink logSink;
   kj::Promise<void> logTask;
   SimpleAddress logSinkAddress;
+
+  kj::Promise<void> bootQueue = kj::READY_NOW;
 };
 
 } // namespace blackrock

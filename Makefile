@@ -109,13 +109,13 @@ blackrock-fast.tar.xz: bundle bin/e2fsck bin/blackrock.unstripped
 	truncate -s 10737418240 .local/storage
 	/sbin/mkfs.ext4 .local/storage
 
-local-config: ../prod/blackrock-config.capnp
-	capnp eval --binary -Isrc ../prod/blackrock-config.capnp vagrant > local-config
+local-config: test-config.capnp
+	capnp eval --binary -Isrc test-config.capnp vagrant > local-config
 
 run-local: bundle bin/e2fsck local-config .local/mongo .local/storage
 	# We need to bring up one VM in advance to make the vboxnet0 network interface appear.
-	vagrant up storage0
-	bin/blackrock master local-config
+	(vagrant status --machine-readable | grep -q 'storage0,state,running') || vagrant up storage0
+	bin/blackrock master local-config -r
 
 kill-local:
 	vagrant destroy -f
@@ -125,4 +125,4 @@ local-mongo:
 
 local-admintoken:
 	vagrant ssh frontend0 -c 'echo -n testtoken > /var/blackrock/bundle/sandstorm/adminToken'
-	@echo "Now go to: http://localrock.sandstorm.io:6080/admin/testtoken"
+	@echo "Now go to: http://localrock.sandstorm.io:6080/setup/token/testtoken"

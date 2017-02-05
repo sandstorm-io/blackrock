@@ -1,6 +1,6 @@
 # Blackrock
 
-See [Blackrock roadmap](https://github.com/sandstorm-io/roadmap/tree/master/technology/blackrock).
+See [Blackrock roadmap](https://github.com/sandstorm-io/sandstorm/tree/master/roadmap/blackrock).
 
 ## Running locally
 

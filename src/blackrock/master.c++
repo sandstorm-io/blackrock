@@ -447,7 +447,15 @@ auto VagrantDriver::listMachines() -> kj::Promise<kj::Array<MachineId>> {
 }
 
 kj::Promise<void> VagrantDriver::boot(MachineId id) {
-  return subprocessSet.waitForSuccess({"vagrant", "up", kj::str(id)});
+  // Vagrant (or maybe VirtualBox) is incredibly bad about booting multiple machines in parallel.
+  // It deadlocks frequently, or throws weird errors. So we force serialization. :(
+
+  auto fork = bootQueue.then([this,id]() {
+    return subprocessSet.waitForSuccess({"vagrant", "up", kj::str(id)});
+  }).fork();
+
+  bootQueue = fork.addBranch();
+  return fork.addBranch();
 }
 
 kj::Promise<VatPath::Reader> VagrantDriver::run(
