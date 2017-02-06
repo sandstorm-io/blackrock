@@ -25,7 +25,7 @@ To create an admin token:
 
     make local-admintoken
 
-Then go to: http://localrock.sandstorm.io:6080/admin/testtoken
+Then go to: http://localrock.sandstorm.io:6080/setup/token/testtoken
 
 To get a Mongo shell:
 
