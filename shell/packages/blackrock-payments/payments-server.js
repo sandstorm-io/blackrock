@@ -198,7 +198,7 @@ function sendEmail(db, user, mailSubject, mailText, mailHtml, config) {
   if (email) {
     SandstormEmail.send({
       to: email,
-      from: config.acceptorTitle + " <" + config.returnAddress + ">",
+      from: { name: config.acceptorTitle, address: config.returnAddress },
       subject: mailSubject,
       text: mailText,
       html: mailHtml,
