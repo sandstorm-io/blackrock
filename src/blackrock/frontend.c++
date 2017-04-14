@@ -1017,7 +1017,7 @@ kj::Promise<void> FrontendImpl::execLoop(MongoInfo&& mongoInfo, uint replicaNumb
           ", \"isTesting\":", config.getIsTesting() ? "true" : "false",
           ", \"hideTroubleshooting\": true",
           ", \"wildcardHost\":\"", config.getWildcardHost(), "\""
-          ", \"quotaEnabled\": true"
+          ", \"quotaEnabled\":", config.getIsQuotaEnabled() ? "true" : "false",
           ", \"stripePublicKey\":\"", config.getStripePublicKey(), "\""
           ", \"outOfBeta\": ", config.getOutOfBeta() ? "true" : "false",
           ", \"allowUninvited\":", config.getAllowUninvited() ? "true" : "false",

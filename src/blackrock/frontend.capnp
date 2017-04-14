@@ -56,6 +56,8 @@ struct FrontendConfig {
   isTesting @5 :Bool;
   # Equivalent to IS_TESTING from sandstorm.conf.
 
+  isQuotaEnabled @13 :Bool;
+
   stripeKey @6 :Text;
   stripePublicKey @7 :Text;
   outOfBeta @12 :Bool;
