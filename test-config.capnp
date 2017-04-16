@@ -10,7 +10,6 @@ const vagrant :MasterConfig = (
     wildcardHost = "*.localrock.sandstorm.io:6080",
     allowDemoAccounts = true,
     isTesting = true,
-    isQuotaEnabled = false,
 #    stripeKey = "sk_test_???",
 #    stripePublicKey = "pk_test_???",
     outOfBeta = true,
