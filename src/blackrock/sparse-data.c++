@@ -16,6 +16,7 @@
 
 #include <blackrock/sparse-data.capnp.h>
 #include <kj/main.h>
+#include <kj/encoding.h>
 #include <sandstorm/util.h>
 #include <capnp/message.h>
 #include <capnp/serialize.h>
@@ -73,7 +74,7 @@ public:
       size_t n = kj::FdInputStream(fd.get()).tryRead(block, sizeof(block), sizeof(block));
       KJ_ASSERT(n > 0);
 
-      KJ_LOG(INFO, kj::hex((uint64_t)offset / sizeof(block)), sandstorm::hexEncode(block));
+      KJ_LOG(INFO, kj::hex((uint64_t)offset / sizeof(block)), kj::encodeHex(block));
 
       for (kj::byte b: block) {
         if (b != 0) {

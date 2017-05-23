@@ -15,6 +15,7 @@
 // limitations under the License.
 
 #include "frontend.h"
+#include <kj/encoding.h>
 #include <grp.h>
 #include <signal.h>
 #include <sandstorm/version.h>
@@ -244,7 +245,7 @@ protected:
 
     byte random[16];
     randombytes(random, sizeof(random));
-    auto backupId = sandstorm::hexEncode(random);
+    auto backupId = kj::encodeHex(random);
 
     auto backup = thisCap().backupGrainRequest();
     backup.setBackupId(backupId);
