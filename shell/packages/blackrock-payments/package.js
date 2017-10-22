@@ -25,7 +25,7 @@ Npm.depends({
 
 Package.onUse(function (api) {
   api.use("ecmascript");
-  api.use(["mongo", "sandstorm-db"], "server");
+  api.use(["mongo", "sandstorm-db", "sandstorm-capnp"], "server");
   api.use(["mongo", "reactive-var", "templating"], "client");
 
   api.addFiles([

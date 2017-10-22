@@ -43,6 +43,7 @@ shell/packages/sandstorm-accounts-oauth
 shell/packages/sandstorm-accounts-packages
 shell/packages/sandstorm-accounts-ui
 shell/packages/sandstorm-backend
+shell/packages/sandstorm-capnp
 shell/packages/sandstorm-db
 shell/packages/sandstorm-email
 shell/packages/sandstorm-identicons
