@@ -993,6 +993,7 @@ kj::Promise<void> FrontendImpl::execLoop(MongoInfo&& mongoInfo, uint replicaNumb
       // Set up environment.
       KJ_SYSCALL(setenv("ROOT_URL", config.getBaseUrl().cStr(), true));
       KJ_SYSCALL(setenv("PORT", "4321", true));  // a lie, doesn't matter
+      KJ_SYSCALL(setenv("PORTS", "4321", true));  // a lie, doesn't matter
       KJ_SYSCALL(setenv("MONGO_URL",
           kj::str("mongodb://", mongoInfo, "/meteor?authSource=admin").cStr(), true));
       KJ_SYSCALL(setenv("MONGO_OPLOG_URL",
