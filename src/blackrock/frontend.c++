@@ -853,11 +853,27 @@ struct FrontendImpl::MongoInfo {
   }
 };
 
-FrontendImpl::FrontendImpl(kj::Network& network, kj::Timer& timer,
+static kj::AutoCloseFd raiiSocket(int domain, int type, int protocol) {
+  int fd;
+  KJ_SYSCALL(fd = socket(domain, type | SOCK_CLOEXEC, protocol));
+  return kj::AutoCloseFd(fd);
+}
+
+static kj::AutoCloseFd ensureFdGt(kj::AutoCloseFd&& fd, int min) {
+  if (fd.get() < min) {
+    int newFd;
+    KJ_SYSCALL(newFd = fcntl(fd, F_DUPFD_CLOEXEC, min));
+    return kj::AutoCloseFd(newFd);
+  } else {
+    return kj::mv(fd);
+  }
+}
+
+FrontendImpl::FrontendImpl(kj::LowLevelAsyncIoProvider& llaiop,
                            sandstorm::SubprocessSet& subprocessSet,
                            FrontendConfig::Reader config, uint replicaNumber,
                            kj::PromiseFulfillerPair<sandstorm::Backend::Client> paf)
-    : timer(timer),
+    : timer(llaiop.getTimer()),
       subprocessSet(subprocessSet),
       capnpServer(kj::mv(paf.promise)),
       storageRoots(kj::refcounted<BackendSetImpl<StorageRootSet>>()),
@@ -870,37 +886,34 @@ FrontendImpl::FrontendImpl(kj::Network& network, kj::Timer& timer,
 
   setConfig(config);
 
-  kj::StringPtr socketPath = sandstorm::Backend::SOCKET_PATH;
-  KJ_ASSERT(socketPath.startsWith("/var/"));
-  kj::String outsideSandboxSocketPath =
-      kj::str("/var/blackrock/bundle", socketPath.slice(strlen("/var")));
-  sandstorm::recursivelyCreateParent(outsideSandboxSocketPath);
-  unlink(outsideSandboxSocketPath.cStr());
+  tasks.add(mongos->chooseOne().getConnectionInfoRequest().send()
+      .then([this,replicaNumber,&llaiop](auto&& mongoInfo) mutable {
+    int backendSocketpair[2];
+    KJ_SYSCALL(socketpair(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC,
+                          0, backendSocketpair));
+    kj::AutoCloseFd backendClient(backendSocketpair[0]);
+    kj::AutoCloseFd backendServer(backendSocketpair[1]);
 
-  auto mongoInfoPromise = mongos->chooseOne().getConnectionInfoRequest().send();
+    backendClient = ensureFdGt(kj::mv(backendClient), 6);
 
-  auto promise = network.parseAddress(kj::str("unix:", outsideSandboxSocketPath));
-  tasks.add(promise.then([this,KJ_MVCAP(outsideSandboxSocketPath),KJ_MVCAP(mongoInfoPromise),
-                          replicaNumber](kj::Own<kj::NetworkAddress>&& addr) mutable {
-    return mongoInfoPromise
-        .then([this,KJ_MVCAP(addr),KJ_MVCAP(outsideSandboxSocketPath),replicaNumber]
-              (auto&& mongoInfo) mutable {
-      auto listener = addr->listen();
-      KJ_SYSCALL(chown(outsideSandboxSocketPath.cStr(), 0, 1000));
-      KJ_SYSCALL(chmod(outsideSandboxSocketPath.cStr(), 0770));
+    auto backendServerStream = llaiop.wrapUnixSocketFd(kj::mv(backendServer),
+        kj::LowLevelAsyncIoProvider::ALREADY_CLOEXEC |
+        kj::LowLevelAsyncIoProvider::ALREADY_NONBLOCK);
 
-      // Now that we're listening on the socket, and we have Mongo's address, it's safe to start
-      // the front-end.
-      uint n = this->config.getReplicasPerMachine();
-      frontendPids = kj::heapArray<pid_t>(n);
-      for (uint i = 0; i < n; i++) {
-        frontendPids[i] = 0;
-        tasks.add(startExecLoop(MongoInfo(mongoInfo), replicaNumber * n + i, 6080 + i, 30025 + i,
-                                frontendPids[i]));
-      }
+    auto listener = kj::heap<kj::CapabilityStreamConnectionReceiver>(*backendServerStream);
+    listener = listener.attach(kj::mv(backendServerStream));
 
-      return capnpServer.listen(kj::mv(listener));
-    });
+    // Now that we're listening on the socket, and we have Mongo's address, it's safe to start
+    // the front-end.
+    uint n = this->config.getReplicasPerMachine();
+    frontendPids = kj::heapArray<pid_t>(n);
+    for (uint i = 0; i < n; i++) {
+      frontendPids[i] = 0;
+      tasks.add(startExecLoop(MongoInfo(mongoInfo), replicaNumber * n + i, 6080 + i, 30025 + i,
+                              frontendPids[i], backendClient));
+    }
+
+    return capnpServer.listen(kj::mv(listener)).attach(kj::mv(backendClient));
   }));
 }
 
@@ -934,28 +947,13 @@ BackendSet<Mongo>::Client FrontendImpl::getMongoBackendSet() {
   return kj::addRef(*mongos);
 }
 
-static kj::AutoCloseFd raiiSocket(int domain, int type, int protocol) {
-  int fd;
-  KJ_SYSCALL(fd = socket(domain, type | SOCK_CLOEXEC, protocol));
-  return kj::AutoCloseFd(fd);
-}
-
-static kj::AutoCloseFd ensureFdGt(kj::AutoCloseFd&& fd, int min) {
-  if (fd.get() < min) {
-    int newFd;
-    KJ_SYSCALL(newFd = fcntl(fd, F_DUPFD, min));
-    return kj::AutoCloseFd(newFd);
-  } else {
-    return kj::mv(fd);
-  }
-}
-
 kj::Promise<void> FrontendImpl::startExecLoop(MongoInfo&& mongoInfo, uint replicaNumber,
-                                              uint port, uint smtpPort, pid_t& pid) {
+                                              uint port, uint smtpPort, pid_t& pid,
+                                              int backendClientFd) {
   // Create the HTTP and SMTP listen ports in advance so that when node dies, connections will
   // wait for a new node process to start rather than fail outright.
-  auto http = ensureFdGt(raiiSocket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0), 5);
-  auto smtp = ensureFdGt(raiiSocket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0), 5);
+  auto http = ensureFdGt(raiiSocket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0), 6);
+  auto smtp = ensureFdGt(raiiSocket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0), 6);
 
   int optval = 1;
   KJ_SYSCALL(setsockopt(http, SOL_SOCKET, SO_REUSEADDR, &optval, sizeof(optval)));
@@ -971,12 +969,13 @@ kj::Promise<void> FrontendImpl::startExecLoop(MongoInfo&& mongoInfo, uint replic
   KJ_SYSCALL(listen(http, SOMAXCONN));
   KJ_SYSCALL(listen(smtp, SOMAXCONN));
 
-  return execLoop(kj::mv(mongoInfo), replicaNumber, kj::mv(http), kj::mv(smtp), pid);
+  return execLoop(kj::mv(mongoInfo), replicaNumber, kj::mv(http), backendClientFd,
+                  kj::mv(smtp), pid);
 }
 
 kj::Promise<void> FrontendImpl::execLoop(MongoInfo&& mongoInfo, uint replicaNumber,
-                                         kj::AutoCloseFd&& http, kj::AutoCloseFd&& smtp,
-                                         pid_t& pid) {
+                                         kj::AutoCloseFd&& http, int backendClientFd,
+                                         kj::AutoCloseFd&& smtp, pid_t& pid) {
   // If node fails, we will wait until at least 10 seconds from now before restarting it.
   auto rateLimit = timer.afterDelay(10 * kj::SECONDS);
 
@@ -1030,9 +1029,12 @@ kj::Promise<void> FrontendImpl::execLoop(MongoInfo&& mongoInfo, uint replicaNumb
           ", \"replicaNumber\":", replicaNumber,
           "}").cStr(), true));
 
+      KJ_SYSCALL(setenv("EXPERIMENTAL_GATEWAY", "remote", true));
+
       // Pass in special FDs.
-      KJ_SYSCALL(dup2(smtp, 3));
-      KJ_SYSCALL(dup2(http, 4));
+      KJ_SYSCALL(dup2(http, 3));
+      KJ_SYSCALL(dup2(backendClientFd, 4));
+      KJ_SYSCALL(dup2(smtp, 5));
 
       // Execute!
       KJ_SYSCALL(execl("bin/node", "bin/node", "--perf_basic_prof_only_functions", "sandstorm-main.js", (char*)nullptr));
@@ -1049,8 +1051,10 @@ kj::Promise<void> FrontendImpl::execLoop(MongoInfo&& mongoInfo, uint replicaNumb
   }).catch_([KJ_MVCAP(rateLimit)](kj::Exception&& exception) mutable {
     KJ_LOG(ERROR, "frontend died; restarting", exception);
     return kj::mv(rateLimit);
-  }).then([this,KJ_MVCAP(mongoInfo),replicaNumber,&pid,KJ_MVCAP(http),KJ_MVCAP(smtp)]() mutable {
-    return execLoop(kj::mv(mongoInfo), replicaNumber, kj::mv(http), kj::mv(smtp), pid);
+  }).then([this,KJ_MVCAP(mongoInfo),replicaNumber,&pid,
+           KJ_MVCAP(http),backendClientFd,KJ_MVCAP(smtp)]() mutable {
+    return execLoop(kj::mv(mongoInfo), replicaNumber, kj::mv(http), backendClientFd,
+                    kj::mv(smtp), pid);
   });
 }
 

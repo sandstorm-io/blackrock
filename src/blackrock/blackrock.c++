@@ -167,8 +167,7 @@ public:
       KJ_LOG(INFO, "become frontend...");
       auto params = context.getParams();
       auto ptr = kj::heap<FrontendInfo>(kj::heap<FrontendImpl>(
-          ioContext.provider->getNetwork(),
-          ioContext.provider->getTimer(),
+          *ioContext.lowLevelProvider,
           subprocessSet, params.getConfig(), params.getReplicaNumber()));
       info = ptr;
       frontendInfo = kj::mv(ptr);

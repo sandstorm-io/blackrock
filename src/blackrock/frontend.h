@@ -35,7 +35,8 @@ namespace blackrock {
 
 class FrontendImpl: public Frontend::Server, private kj::TaskSet::ErrorHandler {
 public:
-  FrontendImpl(kj::Network& network, kj::Timer& timer, sandstorm::SubprocessSet& subprocessSet,
+  FrontendImpl(kj::LowLevelAsyncIoProvider& llaiop,
+               sandstorm::SubprocessSet& subprocessSet,
                FrontendConfig::Reader config, uint replicaNumber,
                kj::PromiseFulfillerPair<sandstorm::Backend::Client> paf =
                    kj::newPromiseAndFulfiller<sandstorm::Backend::Client>());
@@ -66,9 +67,11 @@ private:
   kj::TaskSet tasks;
 
   kj::Promise<void> startExecLoop(MongoInfo&& mongoInfo, uint replicaNumber,
-                                  uint port, uint smtpPort, pid_t& pid);
+                                  uint port, uint smtpPort, pid_t& pid,
+                                  int backendClientFd);
   kj::Promise<void> execLoop(MongoInfo&& mongoInfo, uint replicaNumber,
-                             kj::AutoCloseFd&& http, kj::AutoCloseFd&& smtp, pid_t& pid);
+                             kj::AutoCloseFd&& http, int backendClientFd,
+                             kj::AutoCloseFd&& smtp, pid_t& pid);
 
   void taskFailed(kj::Exception&& exception) override;
 };
