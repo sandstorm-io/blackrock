@@ -22,13 +22,23 @@ using ClusterRpc = import "cluster-rpc.capnp";
 using Util = import "/sandstorm/util.capnp";
 using Package = import "/sandstorm/package.capnp";
 using Supervisor = import "/sandstorm/supervisor.capnp".Supervisor;
+using GatewayRouter = import "/sandstorm/backend.capnp".GatewayRouter;
 
 interface Frontend {
   # Front-ends run the Sandstorm shell UI (a Meteor app). They accept HTTP connections proxied
   # from the Gateways.
 
-  getHttpAddress @0 () -> (address :ClusterRpc.Address);
-  # Get the address and port of the frontend's HTTP interface.
+  struct Instance {
+    replicaNumber @0 :UInt32;
+    httpAddress @1 :ClusterRpc.Address;
+    smtpAddress @2 :ClusterRpc.Address;
+    router @3 :GatewayRouter;
+  }
+
+  getInstances @0 () -> (instances :List(Instance));
+  # A front-end machine may run multiple instances of the Sandstorm Shell server. This method gets
+  # a list of instances, so that the gateway can consitently route requests from a particular user
+  # to a particular instance.
 }
 
 interface Mongo {

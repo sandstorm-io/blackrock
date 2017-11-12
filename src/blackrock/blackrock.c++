@@ -165,10 +165,12 @@ public:
       info = *i;
     } else {
       KJ_LOG(INFO, "become frontend...");
+      SimpleAddress frontendAddr = selfAddress;
+      frontendAddr.setPort(0);
       auto params = context.getParams();
       auto ptr = kj::heap<FrontendInfo>(kj::heap<FrontendImpl>(
           *ioContext.lowLevelProvider,
-          subprocessSet, params.getConfig(), params.getReplicaNumber()));
+          subprocessSet, params.getConfig(), params.getReplicaNumber(), frontendAddr));
       info = ptr;
       frontendInfo = kj::mv(ptr);
     }

@@ -33,13 +33,12 @@
 
 namespace blackrock {
 
-class FrontendImpl: public Frontend::Server, private kj::TaskSet::ErrorHandler {
+class FrontendImpl: public Frontend::Server {
 public:
   FrontendImpl(kj::LowLevelAsyncIoProvider& llaiop,
                sandstorm::SubprocessSet& subprocessSet,
                FrontendConfig::Reader config, uint replicaNumber,
-               kj::PromiseFulfillerPair<sandstorm::Backend::Client> paf =
-                   kj::newPromiseAndFulfiller<sandstorm::Backend::Client>());
+               SimpleAddress bindAddress);
 
   void setConfig(FrontendConfig::Reader config);
 
@@ -48,32 +47,56 @@ public:
   BackendSet<Worker>::Client getWorkerBackendSet();
   BackendSet<Mongo>::Client getMongoBackendSet();
 
+protected:
+  kj::Promise<void> getInstances(GetInstancesContext context) override;
+
 private:
   class BackendImpl;
   struct MongoInfo;
+  class Instance;
 
-  kj::Timer& timer;
-  sandstorm::SubprocessSet& subprocessSet;
   kj::Own<capnp::MallocMessageBuilder> configMessage;
   FrontendConfig::Reader config;
-  sandstorm::TwoPartyServerWithClientBootstrap capnpServer;
 
   kj::Own<BackendSetImpl<StorageRootSet>> storageRoots;
   kj::Own<BackendSetImpl<StorageFactory>> storageFactories;
   kj::Own<BackendSetImpl<Worker>> workers;
   kj::Own<BackendSetImpl<Mongo>> mongos;
 
-  kj::Array<pid_t> frontendPids = 0;
-  kj::TaskSet tasks;
+  kj::Vector<kj::Own<Instance>> instances;
 
-  kj::Promise<void> startExecLoop(MongoInfo&& mongoInfo, uint replicaNumber,
-                                  uint port, uint smtpPort, pid_t& pid,
-                                  int backendClientFd);
-  kj::Promise<void> execLoop(MongoInfo&& mongoInfo, uint replicaNumber,
-                             kj::AutoCloseFd&& http, int backendClientFd,
-                             kj::AutoCloseFd&& smtp, pid_t& pid);
+  class Instance: private kj::TaskSet::ErrorHandler {
+  public:
+    Instance(FrontendImpl& frontend, kj::LowLevelAsyncIoProvider& llaiop,
+             sandstorm::SubprocessSet& subprocessSet, uint frontendNumber, uint instanceNumber,
+             SimpleAddress bindAddress,
+             kj::PromiseFulfillerPair<sandstorm::Backend::Client> paf =
+                   kj::newPromiseAndFulfiller<sandstorm::Backend::Client>());
 
-  void taskFailed(kj::Exception&& exception) override;
+    void restart(FrontendConfig::Reader config);
+
+    void getInfo(Frontend::Instance::Builder info);
+
+  private:
+    kj::Timer& timer;
+    sandstorm::SubprocessSet& subprocessSet;
+    FrontendConfig::Reader config;
+    uint replicaNumber;
+    uint httpPort;
+    uint smtpPort;
+    SimpleAddress bindAddress;
+
+    sandstorm::TwoPartyServerWithClientBootstrap capnpServer;
+    pid_t pid = 0;
+    kj::TaskSet tasks;
+
+    kj::Promise<void> startExecLoop(MongoInfo&& mongoInfo, kj::AutoCloseFd&& backendClientFd);
+
+    kj::Promise<void> execLoop(MongoInfo&& mongoInfo, kj::AutoCloseFd&& http,
+                               kj::AutoCloseFd&& backendClientFd, kj::AutoCloseFd&& smtp);
+
+    void taskFailed(kj::Exception&& exception) override;
+  };
 };
 
 class MongoImpl: public Mongo::Server {
