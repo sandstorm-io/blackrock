@@ -47,6 +47,9 @@ interface Gateway {
   # sure that IP is on the public internet, not internal; the best way to do that is to make
   # sure the connection is formed using a public network interface that can't even route to
   # internal IPs in the first place).
+  #
+  # On a more practical note, Gateway machines also accept HTTP traffic from the public internet,
+  # which they may forward to frontend machines or directly to grains.
 
   # TODO(soon): Methods for:
   # - Sending / receiving general internet traffic. (In-cluster traffic is NOT permitted.)
@@ -55,6 +58,9 @@ interface Gateway {
 
   # TODO(cleanup): Move to its own file.
 }
+
+interface GatewayImplBase extends(Gateway, BackendSet(Frontend.Frontend)) {}
+# Implementation detail. TODO(cleanup): Put this somewhere private.
 
 interface Machine {
   # A machine, ready to serve.
@@ -87,10 +93,8 @@ interface Machine {
                         hostedRestorer :MasterRestorer(SturdyRef.Hosted),
                         workerSet :BackendSet(Worker.Worker),
                         storageRestorerSet :BackendSet(Restorer(SturdyRef.Stored)));
-  becomeGateway @3 (storage :Storage.Assignable(StorageSchema.GatewayStorage))
+  becomeGateway @3 (config :Frontend.FrontendConfig)
                 -> (gateway :Gateway,
-                    externalRestorer :MasterRestorer(SturdyRef.External),
-                    storageRestorers :BackendSet(Restorer(SturdyRef.Stored)),
                     frontends :BackendSet(Frontend.Frontend));
   becomeFrontend @4 (config :Frontend.FrontendConfig, replicaNumber :UInt32)
                  -> (frontend :Frontend.Frontend,

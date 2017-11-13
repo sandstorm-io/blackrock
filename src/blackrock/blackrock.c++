@@ -39,6 +39,7 @@
 #include <sys/mount.h>
 #include "backend-set.h"
 #include "frontend.h"
+#include "gateway.h"
 #include "local-persistent-registry.h"
 #include <stdio.h>
 #include "nbd-bridge.h"
@@ -206,6 +207,30 @@ public:
     return kj::READY_NOW;
   }
 
+  kj::Promise<void> becomeGateway(BecomeGatewayContext context) override {
+    GatewayInfo* info = nullptr;
+    KJ_IF_MAYBE(i, gatewayInfo) {
+      KJ_LOG(INFO, "rebecome gateway...");
+      i->get()->impl->setConfig(context.getParams().getConfig());
+      info = *i;
+    } else {
+      KJ_LOG(INFO, "become gateway...");
+      auto params = context.getParams();
+      auto ptr = kj::heap<GatewayInfo>(kj::heap<GatewayImpl>(
+          ioContext.provider->getTimer(), ioContext.provider->getNetwork(), params.getConfig()));
+      info = ptr;
+      gatewayInfo = kj::mv(ptr);
+    }
+
+    auto results = context.getResults();
+    results.setGateway(info->client);
+    // TODO(security): We really shouldn't be implementing both interfaces using the same object,
+    //   since clients can cast.
+    results.setFrontends(info->client);
+
+    return kj::READY_NOW;
+  }
+
   kj::Promise<void> ping(PingContext context) override {
     if (context.getParams().getHang()) {
       return kj::NEVER_DONE;
@@ -255,6 +280,15 @@ private:
         : impl(impl), client(kj::mv(impl)) {}
   };
   kj::Maybe<kj::Own<FrontendInfo>> frontendInfo;
+
+  struct GatewayInfo {
+    GatewayImpl* impl;
+    GatewayImplBase::Client client;
+
+    GatewayInfo(kj::Own<GatewayImpl> impl)
+        : impl(impl), client(kj::mv(impl)) {}
+  };
+  kj::Maybe<kj::Own<GatewayInfo>> gatewayInfo;
 
   kj::Maybe<Mongo::Client> mongo;
 };
