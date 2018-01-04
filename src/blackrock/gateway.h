@@ -54,6 +54,7 @@ private:
     kj::Own<kj::NetworkAddress> smtpAddress;
     kj::Own<kj::HttpClient> shellHttp;
     sandstorm::GatewayService service;
+    kj::Promise<void> cleanupLoop;
 
     ShellReplica(GatewayImpl& gateway, uint64_t backendId, Frontend::Instance::Reader instance);
   };

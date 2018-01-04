@@ -109,7 +109,11 @@ GatewayImpl::ShellReplica::ShellReplica(
       shellHttp(kj::newHttpClient(gateway.timer, *gateway.headerTable, *httpAddress,
                                   gateway.clientSettings)),
       service(gateway.timer, *shellHttp, instance.getRouter(), gateway.gatewayServiceTables,
-              gateway.config.getBaseUrl(), gateway.config.getWildcardHost()) {}
+              gateway.config.getBaseUrl(), gateway.config.getWildcardHost()),
+      cleanupLoop(service.cleanupLoop().eagerlyEvaluate([](kj::Exception&& e) {
+        KJ_LOG(FATAL, "cleanupLoop() threw", e);
+        abort();
+      })) {}
 
 kj::Promise<void> GatewayImpl::addFrontend(uint64_t backendId, Frontend::Client frontend) {
   return frontend.getInstancesRequest().send()
