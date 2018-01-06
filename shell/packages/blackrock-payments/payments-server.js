@@ -796,28 +796,28 @@ var methods = {
   },
 
   unsubscribeMailingList: function () {
-    var listId = Meteor.settings.mailchimpListId;
-    var key = Meteor.settings.mailchimpKey;
-    if (!listId || !key) throw new Error("Mailchimp not configured!");
-    var shard = key.split("-")[1];
-
     var emails = SandstormDb.getUserEmails(Meteor.user()).filter(function (entry) {
       return entry.verified;
     }).map(function (entry) {
       return canonicalizeEmail(entry.email);
     });
 
+    var listId = Meteor.settings.mailchimpListId;
+    var key = Meteor.settings.mailchimpKey;
     MailchimpSubscribers.find({canonical: {$in: emails}, subscribed: true})
         .forEach(function (entry) {
-      var hash = Crypto.createHash("md5").update(entry._id).digest("hex");
-      var url = "https://"+shard+".api.mailchimp.com/3.0/lists/" + listId + "/members/" + hash;
+      if (key && listId) {
+        var shard = key.split("-")[1];
+        var hash = Crypto.createHash("md5").update(entry._id).digest("hex");
+        var url = "https://"+shard+".api.mailchimp.com/3.0/lists/" + listId + "/members/" + hash;
 
-      console.log("Mailchimp: unsubscribing", entry._id);
-      HTTP.call("PATCH", url, {
-        data: {status: "unsubscribed"},
-        headers: { "Authorization": "apikey " + key },
-        timeout: 10000
-      });
+        console.log("Mailchimp: unsubscribing", entry._id);
+        HTTP.call("PATCH", url, {
+          data: {status: "unsubscribed"},
+          headers: { "Authorization": "apikey " + key },
+          timeout: 10000
+        });
+      }
 
       MailchimpSubscribers.update({_id: entry._id}, {$set: {subscribed: false}});
     });
@@ -826,10 +826,6 @@ var methods = {
   },
 
   subscribeMailingList: function () {
-    var listId = Meteor.settings.mailchimpListId;
-    var key = Meteor.settings.mailchimpKey;
-    if (!listId || !key) throw new Error("Mailchimp not configured!");
-    var shard = key.split("-")[1];
 
     var emails = SandstormDb.getUserEmails(Meteor.user()).filter(function (entry) {
       return entry.primary;
@@ -840,24 +836,30 @@ var methods = {
     }
 
     var email = emails[0].email;
-    var hash = Crypto.createHash("md5").update(email).digest("hex");
-    var url = "https://"+shard+".api.mailchimp.com/3.0/lists/" + listId + "/members/" + hash;
 
-    if (MailchimpSubscribers.find({_id: email}).count() > 0) {
-      // User already exists in Mailchimp.
-      console.log("Mailchimp: re-subscribing", email);
-      HTTP.call("PATCH", url, {
-        data: {status: "subscribed"},
-        headers: { "Authorization": "apikey " + key },
-        timeout: 10000
-      });
-    } else {
-      console.log("Mailchimp: subscribing", email);
-      HTTP.call("PUT", url, {
-        data: {email_address: email, status: "subscribed"},
-        headers: { "Authorization": "apikey " + key },
-        timeout: 10000
-      });
+    var listId = Meteor.settings.mailchimpListId;
+    var key = Meteor.settings.mailchimpKey;
+    if (key && listId) {
+      var shard = key.split("-")[1];
+      var hash = Crypto.createHash("md5").update(email).digest("hex");
+      var url = "https://"+shard+".api.mailchimp.com/3.0/lists/" + listId + "/members/" + hash;
+
+      if (MailchimpSubscribers.find({_id: email}).count() > 0) {
+        // User already exists in Mailchimp.
+        console.log("Mailchimp: re-subscribing", email);
+        HTTP.call("PATCH", url, {
+          data: {status: "subscribed"},
+          headers: { "Authorization": "apikey " + key },
+          timeout: 10000
+        });
+      } else {
+        console.log("Mailchimp: subscribing", email);
+        HTTP.call("PUT", url, {
+          data: {email_address: email, status: "subscribed"},
+          headers: { "Authorization": "apikey " + key },
+          timeout: 10000
+        });
+      }
     }
 
     MailchimpSubscribers.upsert({_id: email},
