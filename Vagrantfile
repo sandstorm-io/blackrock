@@ -27,7 +27,7 @@
 VAGRANTFILE_API_VERSION = "2"
 
 Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
-  config.vm.box = "sandstorm/debian-jessie64"
+  config.vm.box = "debian/contrib-stretch64"
 
   # We build Blackrock outside of Vagrant, so there's no reason for the VM
   # to be modifying the source directory. Mount it read-only.
