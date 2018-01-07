@@ -602,7 +602,17 @@ NbdBinding::NbdBinding(NbdDevice& device, kj::AutoCloseFd socket, NbdAccessType 
 
         KJ_DEFER(KJ_SYSCALL(ioctl(device.getFd(), NBD_CLEAR_SOCK)) { break; });
         KJ_SYSCALL(ioctl(device.getFd(), NBD_DO_IT));
-      }) {}
+      }) {
+  // On Debian Stretch (kernel 4.9), the NBD device is not immediately readable. We need to wait
+  // a bit, otherwise pread() will return zero for perfectly valid reads. This did not occur on
+  // Debian Jessie (3.16).
+  //
+  // Notes: With no delay, it fails every time. With a delay of 100us, I noticed one failure in
+  //   four tries. With 1000, I saw no failures in ~10 tries. Set to 10,000 for extra buffer.
+  // TODO(perf): Investigate further, see if we can find a better approach than inserting a
+  //   delay.
+  usleep(10000);
+}
 
 NbdBinding::~NbdBinding() noexcept(false) {
   KJ_DEFER(KJ_SYSCALL(ioctl(device.getFd(), NBD_DISCONNECT)) { break; });
