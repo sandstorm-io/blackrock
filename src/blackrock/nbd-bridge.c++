@@ -391,7 +391,7 @@ public:
   Ext4Record(int fd, uint64_t offset) {
     ssize_t n;
     KJ_SYSCALL(n = pread(fd, data, size, offset));
-    KJ_ASSERT(n == size);
+    KJ_ASSERT(n == size, offset, n, size);
   }
 
   uint16_t le16(uint offset) { return *reinterpret_cast<uint16_t*>(data + offset); }
