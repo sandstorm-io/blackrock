@@ -53,6 +53,7 @@ private:
     kj::Own<kj::NetworkAddress> httpAddress;
     kj::Own<kj::NetworkAddress> smtpAddress;
     kj::Own<kj::HttpClient> shellHttp;
+    sandstorm::GatewayRouter::Client router;
     sandstorm::GatewayService service;
     kj::Promise<void> cleanupLoop;
 
@@ -84,6 +85,14 @@ private:
 
   kj::Own<kj::HttpHeaderTable> headerTable;
   kj::HttpServer httpServer;
+  sandstorm::GatewayTlsManager tlsManager;
+
+  struct ReadyPair {
+    kj::ForkedPromise<void> promise;
+    kj::Own<kj::PromiseFulfiller<void>> fulfiller;
+  };
+  kj::Maybe<ReadyPair> readyPaf;
+
   kj::TaskSet tasks;
 
   GatewayImpl(kj::Timer& timer, kj::Network& network, FrontendConfig::Reader config,
@@ -95,7 +104,7 @@ private:
 
   void setReplica(uint replicaNumber, kj::Maybe<kj::Own<ShellReplica>> newReplica,
                   kj::Maybe<uint64_t> requireBackendId = nullptr);
-  kj::Own<ShellReplica> chooseReplica(uint64_t hash);
+  kj::Promise<kj::Own<ShellReplica>> chooseReplica(uint64_t hash);
 
   uint64_t urlSessionHash(kj::StringPtr url, const kj::HttpHeaders& headers);
 

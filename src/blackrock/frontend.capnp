@@ -78,4 +78,7 @@ struct FrontendConfig {
   allowUninvited @8 :Bool;
 
   replicasPerMachine @9 :UInt32;
+
+  privateKeyPassword @14 :Text;
+  termsPublicId @15 :Text;
 }

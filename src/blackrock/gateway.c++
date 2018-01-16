@@ -32,6 +32,9 @@ GatewayImpl::GatewayImpl(kj::Timer& timer, kj::Network& network, FrontendConfig:
       gatewayServiceTables(headerTableBuilder),
       headerTable(headerTableBuilder.build()),
       httpServer(timer, *headerTable, *this),
+      tlsManager(httpServer, config.hasPrivateKeyPassword()
+          ? kj::Maybe<kj::StringPtr>(config.getPrivateKeyPassword())
+          : kj::Maybe<kj::StringPtr>(nullptr)),
       tasks(*this) {
   clientSettings.entropySource = entropySource;
 
@@ -43,6 +46,23 @@ GatewayImpl::GatewayImpl(kj::Timer& timer, kj::Network& network, FrontendConfig:
     auto promise = httpServer.listenHttp(*listener);
     return promise.attach(kj::mv(listener));
   }));
+
+  tasks.add(network.parseAddress("*", 443)
+      .then([this](kj::Own<kj::NetworkAddress>&& addr) {
+    auto listener = addr->listen();
+    auto promise = tlsManager.listenHttps(*listener);
+    return promise.attach(kj::mv(listener));
+  }));
+
+  capnp::Capability::Client masterGateway = kj::refcounted<sandstorm::CapRedirector>(
+      [this,counter=0]() mutable {
+    return chooseReplica(counter++)
+        .then([](kj::Own<ShellReplica> replica) -> capnp::Capability::Client {
+      return replica->router;
+    });
+  });
+
+  tasks.add(tlsManager.subscribeKeys(masterGateway.castAs<sandstorm::GatewayRouter>()));
 }
 
 void GatewayImpl::setConfig(FrontendConfig::Reader config) {
@@ -57,16 +77,20 @@ void GatewayImpl::setConfig(FrontendConfig::Reader config) {
 kj::Promise<void> GatewayImpl::request(
     kj::HttpMethod method, kj::StringPtr url, const kj::HttpHeaders& headers,
     kj::AsyncInputStream& requestBody, Response& response) {
-  auto replica = chooseReplica(urlSessionHash(url, headers));
-  auto promise = replica->service.request(method, url, headers, requestBody, response);
-  return promise.attach(kj::mv(replica));
+  return chooseReplica(urlSessionHash(url, headers))
+      .then([this,method,url,&headers,&requestBody,&response](kj::Own<ShellReplica> replica) {
+    auto promise = replica->service.request(method, url, headers, requestBody, response);
+    return promise.attach(kj::mv(replica));
+  });
 }
 
 kj::Promise<void> GatewayImpl::openWebSocket(
     kj::StringPtr url, const kj::HttpHeaders& headers, WebSocketResponse& response) {
-  auto replica = chooseReplica(urlSessionHash(url, headers));
-  auto promise = replica->service.openWebSocket(url,headers, response);
-  return promise.attach(kj::mv(replica));
+  return chooseReplica(urlSessionHash(url, headers))
+      .then([this,url,&headers,&response](kj::Own<ShellReplica> replica) {
+    auto promise = replica->service.openWebSocket(url,headers, response);
+    return promise.attach(kj::mv(replica));
+  });
 }
 
 kj::Promise<void> GatewayImpl::reset(ResetContext context) {
@@ -108,8 +132,12 @@ GatewayImpl::ShellReplica::ShellReplica(
       smtpAddress(SimpleAddress(instance.getSmtpAddress()).onNetwork(gateway.network)),
       shellHttp(kj::newHttpClient(gateway.timer, *gateway.headerTable, *httpAddress,
                                   gateway.clientSettings)),
-      service(gateway.timer, *shellHttp, instance.getRouter(), gateway.gatewayServiceTables,
-              gateway.config.getBaseUrl(), gateway.config.getWildcardHost()),
+      router(instance.getRouter()),
+      service(gateway.timer, *shellHttp, router, gateway.gatewayServiceTables,
+              gateway.config.getBaseUrl(), gateway.config.getWildcardHost(),
+              gateway.config.hasTermsPublicId()
+                  ? kj::Maybe<kj::StringPtr>(gateway.config.getTermsPublicId())
+                  : kj::Maybe<kj::StringPtr>(nullptr)),
       cleanupLoop(service.cleanupLoop().eagerlyEvaluate([](kj::Exception&& e) {
         KJ_LOG(FATAL, "cleanupLoop() threw", e);
         abort();
@@ -132,10 +160,15 @@ kj::Promise<void> GatewayImpl::addFrontend(uint64_t backendId, Frontend::Client 
         shellReplicas.add(kj::mv(replica));
       }
     }
+
+    KJ_IF_MAYBE(r, readyPaf) {
+      r->fulfiller->fulfill();
+      readyPaf = nullptr;
+    }
   });
 }
 
-kj::Own<GatewayImpl::ShellReplica> GatewayImpl::chooseReplica(uint64_t hash) {
+kj::Promise<kj::Own<GatewayImpl::ShellReplica>> GatewayImpl::chooseReplica(uint64_t hash) {
   std::set<size_t> eliminated;
   while (eliminated.size() < shellReplicas.size()) {
     size_t bucket = hash % (shellReplicas.size() - eliminated.size());
@@ -155,7 +188,14 @@ kj::Own<GatewayImpl::ShellReplica> GatewayImpl::chooseReplica(uint64_t hash) {
     KJ_ASSERT(eliminated.insert(bucket).second);
   }
 
-  KJ_FAIL_ASSERT("no shell replicas available");
+  if (readyPaf == nullptr) {
+    auto paf = kj::newPromiseAndFulfiller<void>();
+    readyPaf = ReadyPair { paf.promise.fork(), kj::mv(paf.fulfiller) };
+  }
+
+  return KJ_ASSERT_NONNULL(readyPaf).promise.addBranch().then([this,hash]() {
+    return chooseReplica(hash);
+  });
 }
 
 uint64_t GatewayImpl::urlSessionHash(kj::StringPtr url, const kj::HttpHeaders& headers) {
