@@ -297,7 +297,7 @@ KJ_TEST("can't man in the middle") {
   auto pumpUpTask = pump(*conn2, *conn3).eagerlyEvaluate(nullptr);
   auto pumpDownTask = pump(*conn3, *conn2).eagerlyEvaluate(nullptr);
 
-  KJ_EXPECT_THROW(FAILED, conn1->receiveIncomingMessage().wait(env.waitScope));
+  KJ_EXPECT_THROW(DISCONNECTED, conn1->receiveIncomingMessage().wait(env.waitScope));
 }
 
 KJ_TEST("can reconnect after disconnect") {
