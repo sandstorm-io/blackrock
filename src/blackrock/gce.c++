@@ -203,6 +203,22 @@ kj::Promise<void> GceDriver::boot(MachineId id) {
           "mount /dev/disk/by-id/google-blackrock /var/blackrock/bundle\n";
       break;
     }
+
+    case ComputeDriver::MachineType::GATEWAY: {
+      instanceType = config.getInstanceTypes().getGateway();
+
+      // Tag to accept HTTP and SMTP traffic.
+      args.add("--tags=http,smtp");
+
+      // Assign static IP address if configured.
+      auto addrs = config.getGatewayAddresses();
+      if (id.index < addrs.size()) {
+        args.add("--address");
+        args.add(addrs[id.index]);
+      }
+
+      break;
+    }
   }
 
   args.add("--machine-type");

@@ -37,11 +37,13 @@ struct VagrantConfig {}
 struct GceConfig {
   project @0 :Text;
   zone @1 :Text;
+  gatewayAddresses @8 :List(Text);
   instanceTypes :group {
     storage @2 :Text = "n1-standard-1";
     worker @3 :Text = "n1-highmem-2";
     coordinator @4 :Text = "n1-standard-1";
     frontend @5 :Text = "n1-highcpu-2";
     mongo @6 :Text = "n1-standard-1";
+    gateway @7 :Text = "n1-standard-1";
   }
 }
