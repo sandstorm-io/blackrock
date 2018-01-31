@@ -32,7 +32,8 @@ GatewayImpl::GatewayImpl(kj::Timer& timer, kj::Network& network, FrontendConfig:
       gatewayServiceTables(headerTableBuilder),
       headerTable(headerTableBuilder.build()),
       httpServer(timer, *headerTable, *this),
-      tlsManager(httpServer, config.hasPrivateKeyPassword()
+      smtpServer(*this),
+      tlsManager(httpServer, smtpServer, config.hasPrivateKeyPassword()
           ? kj::Maybe<kj::StringPtr>(config.getPrivateKeyPassword())
           : kj::Maybe<kj::StringPtr>(nullptr)),
       tasks(*this) {
@@ -54,9 +55,22 @@ GatewayImpl::GatewayImpl(kj::Timer& timer, kj::Network& network, FrontendConfig:
     return promise.attach(kj::mv(listener));
   }));
 
-  capnp::Capability::Client masterGateway = kj::refcounted<sandstorm::CapRedirector>(
-      [this,counter=0]() mutable {
-    return chooseReplica(counter++)
+  tasks.add(network.parseAddress("*", 25)
+      .then([this](kj::Own<kj::NetworkAddress>&& addr) {
+    auto listener = addr->listen();
+    auto promise = tlsManager.listenSmtp(*listener);
+    return promise.attach(kj::mv(listener));
+  }));
+
+  tasks.add(network.parseAddress("*", 465)
+      .then([this](kj::Own<kj::NetworkAddress>&& addr) {
+    auto listener = addr->listen();
+    auto promise = tlsManager.listenSmtps(*listener);
+    return promise.attach(kj::mv(listener));
+  }));
+
+  capnp::Capability::Client masterGateway = kj::refcounted<sandstorm::CapRedirector>([this]() {
+    return chooseReplica(roundRobinCounter++)
         .then([](kj::Own<ShellReplica> replica) -> capnp::Capability::Client {
       return replica->router;
     });
@@ -123,6 +137,14 @@ kj::Promise<void> GatewayImpl::remove(RemoveContext context) {
   }
 
   return kj::READY_NOW;
+}
+
+kj::Promise<kj::Own<kj::AsyncIoStream>> GatewayImpl::SmtpNetworkAddressImpl::connect() {
+  return gateway.chooseReplica(gateway.roundRobinCounter++)
+      .then([this](kj::Own<GatewayImpl::ShellReplica>&& replica) {
+    auto promise = replica->smtpAddress->connect();
+    return promise.attach(kj::mv(replica));
+  });
 }
 
 GatewayImpl::ShellReplica::ShellReplica(

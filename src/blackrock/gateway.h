@@ -23,6 +23,7 @@
 #include "cluster-rpc.h"
 #include <sandstorm/gateway.h>
 #include <kj/compat/http.h>
+#include <kj/debug.h>
 
 namespace blackrock {
 
@@ -65,6 +66,19 @@ private:
     void generate(kj::ArrayPtr<byte> buffer) override;
   };
 
+  class SmtpNetworkAddressImpl: public kj::NetworkAddress {
+  public:
+    SmtpNetworkAddressImpl(GatewayImpl& gateway): gateway(gateway) {}
+
+    kj::Promise<kj::Own<kj::AsyncIoStream>> connect() override;
+    kj::Own<kj::ConnectionReceiver> listen() override { KJ_UNIMPLEMENTED("fake address"); }
+    kj::Own<kj::NetworkAddress> clone() override { KJ_UNIMPLEMENTED("fake address"); }
+    kj::String toString() override { KJ_UNIMPLEMENTED("fake address"); }
+
+  private:
+    GatewayImpl& gateway;
+  };
+
   kj::Timer& timer;
   kj::Network& network;
 
@@ -85,7 +99,10 @@ private:
 
   kj::Own<kj::HttpHeaderTable> headerTable;
   kj::HttpServer httpServer;
+  SmtpNetworkAddressImpl smtpServer;
   sandstorm::GatewayTlsManager tlsManager;
+
+  uint roundRobinCounter = 0;
 
   struct ReadyPair {
     kj::ForkedPromise<void> promise;
