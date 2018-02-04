@@ -37,7 +37,8 @@ public:
     WORKER,
     COORDINATOR,
     FRONTEND,
-    MONGO
+    MONGO,
+    GATEWAY
   };
 
   struct MachineId {

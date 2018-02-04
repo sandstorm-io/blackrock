@@ -137,7 +137,7 @@ kill-local:
 	vagrant destroy -f
 
 local-mongo:
-	mongo -u sandstorm -p "$$(vagrant ssh mongo0 -c 'cat /var/blackrock/bundle/mongo/passwd')" --authenticationDatabase admin 172.28.128.50/meteor
+	mongo -u sandstorm --password="$$(vagrant ssh mongo0 -c 'cat /var/blackrock/bundle/mongo/passwd')" --authenticationDatabase admin 172.28.128.50/meteor
 
 local-admintoken:
 	vagrant ssh frontend0 -c 'echo -n testtoken > /var/blackrock/bundle/sandstorm/adminToken'

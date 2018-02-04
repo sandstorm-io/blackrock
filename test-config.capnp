@@ -6,8 +6,8 @@ const vagrant :MasterConfig = (
   workerCount = 2,
   frontendCount = 2,
   frontendConfig = (
-    baseUrl = "http://localrock.sandstorm.io:6080",
-    wildcardHost = "*.localrock.sandstorm.io:6080",
+    baseUrl = "https://localrock.sandstorm.io",
+    wildcardHost = "*.localrock.sandstorm.io",
     allowDemoAccounts = true,
     isTesting = true,
 #    stripeKey = "sk_test_???",
@@ -17,6 +17,7 @@ const vagrant :MasterConfig = (
     replicasPerMachine = 2,
 #    mailchimpKey = "???",
 #    mailchimpListId = "???",
+    privateKeyPassword = "abcd1234",
   ),
   vagrant = ()
 );

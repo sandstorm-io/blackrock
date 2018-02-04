@@ -210,7 +210,7 @@ void runMaster(kj::AsyncIoContext& ioContext, ComputeDriver& driver, MasterConfi
   uint frontendCount = config.getFrontendCount();
   uint mongoCount = 1;
   uint coordinatorCount = 0;
-  uint gatewayCount = 0;
+  uint gatewayCount = 1;
 
   // Storage feeders.
   BackendSetFeeder<StorageSibling> storageSiblingFeeder(storageCount);
@@ -227,12 +227,14 @@ void runMaster(kj::AsyncIoContext& ioContext, ComputeDriver& driver, MasterConfi
   BackendSetFeeder<StorageFactory> storageFactoryFeeder(storageCount);
   BackendSetFeeder<Frontend> frontendFeeder(frontendCount);
   BackendSetFeeder<Mongo> mongoFeeder(mongoCount);
+  BackendSetFeeder<Gateway> gatewayFeeder(gatewayCount);
 
   std::map<ComputeDriver::MachineType, uint> expectedCounts;
   expectedCounts[ComputeDriver::MachineType::STORAGE] = storageCount;
   expectedCounts[ComputeDriver::MachineType::WORKER] = workerCount;
   expectedCounts[ComputeDriver::MachineType::FRONTEND] = frontendCount;
   expectedCounts[ComputeDriver::MachineType::MONGO] = mongoCount;
+  expectedCounts[ComputeDriver::MachineType::GATEWAY] = gatewayCount;
 
   VatPath::Reader storagePath;
   auto workerPaths = kj::heapArray<VatPath::Reader>(config.getWorkerCount());
@@ -320,6 +322,19 @@ void runMaster(kj::AsyncIoContext& ioContext, ComputeDriver& driver, MasterConfi
         mongoFeeder.addBackend(machine.becomeMongoRequest().send().getMongo()));
   });
 
+  // Start gateway.
+  start({ ComputeDriver::MachineType::GATEWAY, 0 }, [&](Machine::Client&& machine) {
+    auto gateway = ({
+      auto req = machine.becomeGatewayRequest();
+      req.setConfig(config.getFrontendConfig());
+      req.send();
+    });
+
+    return registrationArray(
+        gatewayFeeder.addBackend(gateway.getGateway()),
+        frontendFeeder.addConsumer(gateway.getFrontends()));
+  });
+
   // Loop forever handling messages.
   kj::NEVER_DONE.wait(ioContext.waitScope);
   KJ_UNREACHABLE;
@@ -341,6 +356,7 @@ ComputeDriver::MachineId::MachineId(kj::StringPtr name) {
   else HANDLE_CASE(COORDINATOR, "coordinator")
   else HANDLE_CASE(FRONTEND, "frontend")
   else HANDLE_CASE(MONGO, "mongo")
+  else HANDLE_CASE(GATEWAY, "gateway")
   else KJ_FAIL_ASSERT("couldn't parse machine ID", name);
 #undef HANDLE_CASE
 
@@ -359,6 +375,7 @@ kj::String ComputeDriver::MachineId::toString() const {
     case MachineType::COORDINATOR: typeName = "coordinator"; break;
     case MachineType::FRONTEND   : typeName = "frontend"   ; break;
     case MachineType::MONGO      : typeName = "mongo"      ; break;
+    case MachineType::GATEWAY    : typeName = "gateway"    ; break;
   }
 
   return kj::str(typeName, index);

@@ -76,10 +76,10 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
     coordinator0.vm.network "private_network", ip: "172.28.128.30"
   end
   config.vm.define "frontend0" do |frontend0|
-    frontend0.vm.network "private_network", ip: "172.28.128.40"
+    frontend0.vm.network "private_network", ip: "172.28.128.60"
   end
   config.vm.define "frontend1" do |frontend1|
-    frontend1.vm.network "private_network", ip: "172.28.128.41"
+    frontend1.vm.network "private_network", ip: "172.28.128.61"
   end
   config.vm.define "mongo0" do |mongo0|
     mongo0.vm.network "private_network", ip: "172.28.128.50"
@@ -87,5 +87,8 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
     mongo0.vm.provision "shell",
         inline: "mkdir -p /var/blackrock/bundle && mount /blackrock-local/mongo /var/blackrock/bundle",
         run: "always"
+  end
+  config.vm.define "gateway0" do |gateway0|
+    gateway0.vm.network "private_network", ip: "172.28.128.40"
   end
 end
