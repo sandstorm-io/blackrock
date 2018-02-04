@@ -96,7 +96,7 @@ void GatewayImpl::setConfig(FrontendConfig::Reader config) {
   this->config = configMessage->getRoot<FrontendConfig>();
   wildcardHost = sandstorm::WildcardMatcher(config.getWildcardHost());
 
-  // TODO(now): Update all GatewayService instances to new config.
+  // TODO(soon): Update all GatewayService instances to new config.
 }
 
 kj::Promise<void> GatewayImpl::request(
