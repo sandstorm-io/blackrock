@@ -48,6 +48,8 @@ interface Mongo {
 }
 
 struct FrontendConfig {
+  # Config for shells -- and for gateways, for historical reasons.
+
   baseUrl @0 :Text;
   # Equivalent to BASE_URL from sandstorm.conf.
 

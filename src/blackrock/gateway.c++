@@ -32,6 +32,8 @@ GatewayImpl::GatewayImpl(kj::Timer& timer, kj::Network& network, FrontendConfig:
       gatewayServiceTables(headerTableBuilder),
       headerTable(headerTableBuilder.build()),
       httpServer(timer, *headerTable, *this),
+      altPortService(*this, *headerTable, config.getBaseUrl(), config.getWildcardHost()),
+      altPortHttpServer(timer, *headerTable, altPortService),
       smtpServer(*this),
       tlsManager(httpServer, smtpServer, config.hasPrivateKeyPassword()
           ? kj::Maybe<kj::StringPtr>(config.getPrivateKeyPassword())
@@ -41,19 +43,28 @@ GatewayImpl::GatewayImpl(kj::Timer& timer, kj::Network& network, FrontendConfig:
 
   setConfig(config);
 
-  tasks.add(network.parseAddress("*", 80)
-      .then([this](kj::Own<kj::NetworkAddress>&& addr) {
-    auto listener = addr->listen();
-    auto promise = httpServer.listenHttp(*listener);
-    return promise.attach(kj::mv(listener));
-  }));
+  if (config.getBaseUrl().startsWith("https://")) {
+    tasks.add(network.parseAddress("*", 80)
+        .then([this](kj::Own<kj::NetworkAddress>&& addr) {
+      auto listener = addr->listen();
+      auto promise = altPortHttpServer.listenHttp(*listener);
+      return promise.attach(kj::mv(listener));
+    }));
 
-  tasks.add(network.parseAddress("*", 443)
-      .then([this](kj::Own<kj::NetworkAddress>&& addr) {
-    auto listener = addr->listen();
-    auto promise = tlsManager.listenHttps(*listener);
-    return promise.attach(kj::mv(listener));
-  }));
+    tasks.add(network.parseAddress("*", 443)
+        .then([this](kj::Own<kj::NetworkAddress>&& addr) {
+      auto listener = addr->listen();
+      auto promise = tlsManager.listenHttps(*listener);
+      return promise.attach(kj::mv(listener));
+    }));
+  } else {
+    tasks.add(network.parseAddress("*", 80)
+        .then([this](kj::Own<kj::NetworkAddress>&& addr) {
+      auto listener = addr->listen();
+      auto promise = httpServer.listenHttp(*listener);
+      return promise.attach(kj::mv(listener));
+    }));
+  }
 
   tasks.add(network.parseAddress("*", 25)
       .then([this](kj::Own<kj::NetworkAddress>&& addr) {
@@ -264,7 +275,10 @@ uint64_t GatewayImpl::urlSessionHash(kj::StringPtr url, const kj::HttpHeaders& h
 }
 
 void GatewayImpl::taskFailed(kj::Exception&& exception) {
-  KJ_LOG(ERROR, exception);
+  KJ_LOG(FATAL, exception);
+
+  // Better restart since we may be in a degraded state.
+  abort();
 }
 
 }  // namespace blackrock

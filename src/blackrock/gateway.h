@@ -99,6 +99,8 @@ private:
 
   kj::Own<kj::HttpHeaderTable> headerTable;
   kj::HttpServer httpServer;
+  sandstorm::AltPortService altPortService;
+  kj::HttpServer altPortHttpServer;
   SmtpNetworkAddressImpl smtpServer;
   sandstorm::GatewayTlsManager tlsManager;
 
