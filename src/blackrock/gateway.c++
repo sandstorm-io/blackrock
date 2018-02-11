@@ -234,10 +234,26 @@ kj::Promise<kj::Own<GatewayImpl::ShellReplica>> GatewayImpl::chooseReplica(uint6
   });
 }
 
+static bool isAllHex(kj::StringPtr text) {
+  for (char c: text) {
+    if ((c < '0' || '9' < c) &&
+        (c < 'a' || 'f' < c) &&
+        (c < 'A' || 'F' < c)) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
 uint64_t GatewayImpl::urlSessionHash(kj::StringPtr url, const kj::HttpHeaders& headers) {
   KJ_IF_MAYBE(hostId, wildcardHost.match(headers)) {
-    if (hostId->startsWith("ui-") || hostId->startsWith("api-")) {
-      // In these cases we bucket by hostname. These hostnames are hex
+    if (hostId->startsWith("ui-") || hostId->startsWith("api-") ||
+        (hostId->size() == 20 && isAllHex(*hostId))) {
+      // These cases are really served by a grain, and we only use a shell to connect to the right
+      // grain. We bucket on hostname so that a particular grain is always looked up from the same
+      // shell and through the same local grain capability cache. The hostname ends in hex, so we
+      // can just parse it.
       KJ_ASSERT(hostId->size() >= 20);
       auto hex = hostId->slice(hostId->size() - 16);
       char* end;
