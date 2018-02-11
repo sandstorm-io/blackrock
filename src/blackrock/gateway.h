@@ -83,6 +83,7 @@ private:
   kj::Network& network;
 
   sandstorm::GatewayService::Tables gatewayServiceTables;
+  kj::HttpHeaderId hXRealIp;
 
   kj::Own<capnp::MallocMessageBuilder> configMessage;
   FrontendConfig::Reader config;

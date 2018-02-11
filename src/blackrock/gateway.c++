@@ -30,8 +30,11 @@ GatewayImpl::GatewayImpl(kj::Timer& timer, kj::Network& network, FrontendConfig:
                          kj::HttpHeaderTable::Builder headerTableBuilder)
     : timer(timer), network(network),
       gatewayServiceTables(headerTableBuilder),
+      hXRealIp(headerTableBuilder.add("X-Real-IP")),
       headerTable(headerTableBuilder.build()),
-      httpServer(timer, *headerTable, *this),
+      httpServer(timer, *headerTable, [this](kj::AsyncIoStream& conn) {
+        return kj::heap<sandstorm::RealIpService>(static_cast<HttpService&>(*this), hXRealIp, conn);
+      }),
       altPortService(*this, *headerTable, config.getBaseUrl(), config.getWildcardHost()),
       altPortHttpServer(timer, *headerTable, altPortService),
       smtpServer(*this),
