@@ -1062,7 +1062,7 @@ kj::Promise<void> FrontendImpl::Instance::execLoop(
           ", \"replicaNumber\":", replicaNumber,
           "}").cStr(), true));
 
-      KJ_SYSCALL(setenv("EXPERIMENTAL_GATEWAY", "remote", true));
+      KJ_SYSCALL(setenv("HTTP_GATEWAY", "remote", true));
 
       // Pass in special FDs.
       KJ_SYSCALL(dup2(http, 3));
