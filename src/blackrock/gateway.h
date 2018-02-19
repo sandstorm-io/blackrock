@@ -45,9 +45,6 @@ protected:
       kj::HttpMethod method, kj::StringPtr url, const kj::HttpHeaders& headers,
       kj::AsyncInputStream& requestBody, Response& response) override;
 
-  kj::Promise<void> openWebSocket(
-      kj::StringPtr url, const kj::HttpHeaders& headers, WebSocketResponse& response) override;
-
 private:
   struct ShellReplica: kj::Refcounted {
     uint64_t backendId;

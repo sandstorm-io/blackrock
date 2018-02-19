@@ -112,15 +112,6 @@ kj::Promise<void> GatewayImpl::request(
   });
 }
 
-kj::Promise<void> GatewayImpl::openWebSocket(
-    kj::StringPtr url, const kj::HttpHeaders& headers, WebSocketResponse& response) {
-  return chooseReplica(urlSessionHash(url, headers))
-      .then([this,url,&headers,&response](kj::Own<ShellReplica> replica) {
-    auto promise = replica->service.openWebSocket(url,headers, response);
-    return promise.attach(kj::mv(replica));
-  });
-}
-
 kj::Promise<void> GatewayImpl::reset(ResetContext context) {
   shellReplicas.clear();
 
