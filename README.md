@@ -35,10 +35,6 @@ To shut down:
 
     make kill-local
 
-## Running just the shell locally
-
-Currently, Blackrock adds additional code to the Sandstorm shell to handle payments. Now that Blackrock is open source, we will soon move that module into Sandstorm proper, to simplify the codebase. For now, to test the payments code, you need to use `run-dev.sh` from inside Blackrock's `shell` directory. You need to `make meteor-env` before this will work.
-
 ## Deploying
 
 Please talk to us on [sandstorm-dev](https://groups.google.com/group/sandstorm-dev).

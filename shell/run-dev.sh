@@ -1,1 +1,0 @@
-../deps/sandstorm/shell/run-dev.sh

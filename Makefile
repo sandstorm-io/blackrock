@@ -43,33 +43,13 @@ clean:
 continuous: tmp/.deps
 	make -f deps/sandstorm/Makefile continuous
 
-# These rules generate shell/.meteor by copying over files from Sandstorm and
-# then adding all packages named "blackrock-*" found in shell/packages to the
-# dependency list. You should never ever edit things in Blackrock's
-# shell/.meteor directly; edit Sandstorm's version instead, and then re-run
-# make.
-shell/.meteor:
-	@mkdir shell/.meteor
-	@touch shell/.meteor/DO-NOT-EDIT-THESE
-shell/.meteor/%: deps/sandstorm/shell/.meteor/% tmp/.deps shell/.meteor
-	@cp $< $@
-shell/.meteor/packages: deps/sandstorm/shell/.meteor/packages tmp/.deps shell/.meteor shell/packages/blackrock-*
-	@$(call color,generating meteor package list)
-	@cp $< $@
-	@(echo && cd shell/packages && ls -d blackrock-*) >> $@
-	@find shell/packages -type l | xargs -r rm
-	@(cd shell/packages && ln -s ../../deps/sandstorm/shell/packages/* .)
-meteor-env: shell/.meteor/cordova-plugins shell/.meteor/platforms shell/.meteor/release shell/.meteor/versions shell/.meteor/packages
-	@ # Hack: If we don't "npm install" inside Sandstorm itself, we may have broken symlinks, e.g. introjs.css.
-	@cd deps/sandstorm/shell && meteor npm install
-
-bundle: meteor-env tmp/.deps
+bundle: tmp/.deps
 	make -f deps/sandstorm/Makefile bundle
 
 bin/e2fsck: tmp/e2fsprogs/e2fsck/e2fsck check-e2fsprogs.sh
 	./check-e2fsprogs.sh
 
-shell-env: meteor-env tmp/.deps
+shell-env: tmp/.deps
 	make -f deps/sandstorm/Makefile shell-env
 
 deps: tmp/.deps
