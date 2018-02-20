@@ -818,7 +818,9 @@ var methods = {
     updateBonuses(Meteor.user());
   }
 };
-Meteor.methods(methods);
+if (Meteor.settings.public.stripePublicKey) {
+  Meteor.methods(methods);
+}
 
 function getAllStripeCustomers() {
   var hasMore = true;
@@ -932,9 +934,11 @@ function updateBonuses(user) {
   return paymentsBonuses;
 }
 
-Meteor.publish("myBonuses", function () {
-  if (!this.userId) return [];
+if (Meteor.settings.public.stripePublicKey) {
+  Meteor.publish("myBonuses", function () {
+    if (!this.userId) return [];
 
-  updateBonuses(Meteor.users.findOne({_id: this.userId}));
-  return Meteor.users.find({_id: this.userId}, {fields: {"payments.bonuses": 1}});
-});
+    updateBonuses(Meteor.users.findOne({_id: this.userId}));
+    return Meteor.users.find({_id: this.userId}, {fields: {"payments.bonuses": 1}});
+  });
+}
