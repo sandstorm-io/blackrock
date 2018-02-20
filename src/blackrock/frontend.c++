@@ -1053,7 +1053,6 @@ kj::Promise<void> FrontendImpl::Instance::execLoop(
           ", \"wildcardHost\":\"", config.getWildcardHost(), "\""
           ", \"quotaEnabled\":", config.getIsQuotaEnabled() ? "true" : "false",
           ", \"stripePublicKey\":\"", config.getStripePublicKey(), "\""
-          ", \"outOfBeta\": ", config.getOutOfBeta() ? "true" : "false",
           ", \"allowUninvited\":", config.getAllowUninvited() ? "true" : "false",
           "}"
           ", \"stripeKey\":\"", config.getStripeKey(), "\""

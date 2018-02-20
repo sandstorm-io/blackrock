@@ -27,8 +27,6 @@ var Url = Npm.require('url');
 var ROOT_URL = process.env.ROOT_URL;
 var HOSTNAME = Url.parse(ROOT_URL).hostname;
 
-const MAYBE_BETA = Meteor.settings.public.outOfBeta ? "" : "-beta";
-
 stripe = Npm.require("stripe")(Meteor.settings.stripeKey);
 
 BlackrockPayments = {};
@@ -330,8 +328,6 @@ function handleWebhookEvent(db, event) {
       settingsUrl: ROOT_URL + "/account",
     };
 
-    let needExitBeta = false;
-
     var mod = {"payments.lastInvoiceTime": event.created};
 
     // Send an email.
@@ -345,29 +341,13 @@ function handleWebhookEvent(db, event) {
           const parts = line.plan.id.split("-");
           const planName = parts[0];
 
-          if (parts[1] === "beta" && Meteor.settings.public.outOfBeta) {
-            needExitBeta = true;
-          }
-
           const plan = db.getPlan(planName, user);
           const planTitle = plan.title || (plan._id.charAt(0).toUpperCase() + plan._id.slice(1));
 
-          if (line.amount === 0 && parts[1] === "beta") {
-            // This is a beta plan, so show the beta discount.
-            items.push({
-              title: { defaultText: "1 month " + planTitle + " plan" },
-              amountCents: plan.price,
-            });
-            items.push({
-              title: { defaultText: "Beta discount" },
-              amountCents: -plan.price,
-            });
-          } else {
-            items.push({
-              title: { defaultText: "1 month " + planTitle + " plan" },
-              amountCents: line.amount,
-            });
-          }
+          items.push({
+            title: { defaultText: "1 month " + planTitle + " plan" },
+            amountCents: line.amount,
+          });
         } else {
           items.push({
             title: { defaultText: line.description },
@@ -383,36 +363,7 @@ function handleWebhookEvent(db, event) {
         });
       }
 
-      if (needExitBeta) {
-        // We noticed the user is still on a beta plan but we're out of beta now. Switch them to
-        // a real plan. Don't send an invoice for the old plan.
-
-        const data = Meteor.wrapAsync(
-            stripe.customers.retrieve.bind(stripe.customers))(invoice.customer);
-        if (data.subscriptions && data.subscriptions.data.length > 0) {
-          const subscription = data.subscriptions.data[0];
-          const parts = subscription.plan.id.split("-");
-
-          // Check again that the user really is still in a beta plan.
-          if (parts[1] === "beta") {
-            console.log("Switching user to paid non-beta plan:",
-                        user._id, invoice.customer, parts[0]);
-
-            try {
-              Meteor.wrapAsync(stripe.customers.updateSubscription.bind(stripe.customers))(
-                  invoice.customer, subscription.id, {plan: parts[0]});
-            } catch (err) {
-              if (!err.raw || err.raw.type !== "card_error") {
-                throw err;
-              }
-
-              paymentFailed(db, user, invoice.customer, config, mod);
-            }
-          }
-        }
-      } else {
-        sendInvoice(db, user, { items }, config);
-      }
+      sendInvoice(db, user, { items }, config);
     }
 
     Meteor.users.update({_id: user._id}, {$set: mod});
@@ -740,12 +691,12 @@ var methods = {
             Meteor.wrapAsync(stripe.customers.updateSubscription.bind(stripe.customers))(
               customerId,
               data.subscriptions.data[0].id,
-              {plan: newPlan + MAYBE_BETA}
+              {plan: newPlan}
             );
           } else {
             Meteor.wrapAsync(stripe.customers.createSubscription.bind(stripe.customers))(
               customerId,
-              {plan: newPlan + MAYBE_BETA}
+              {plan: newPlan}
             );
           }
         } catch (err) {
@@ -789,7 +740,7 @@ var methods = {
     }
     Meteor.wrapAsync(stripe.customers.createSubscription.bind(stripe.customers))(
       customerId,
-      {plan: plan + MAYBE_BETA}
+      {plan: plan}
     );
     Meteor.users.update({_id: this.userId}, {$set: { plan: plan }});
     return sanitizedSource;
