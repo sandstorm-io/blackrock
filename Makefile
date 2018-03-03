@@ -36,9 +36,8 @@ all: blackrock.tar.xz
 fast: blackrock-fast.tar.xz
 
 clean:
-	rm -rf blackrock*.tar.xz shell/.meteor local-config
+	rm -rf blackrock*.tar.xz local-config
 	make -f deps/sandstorm/Makefile clean
-	find shell/packages -type l | xargs -r rm
 
 continuous: tmp/.deps
 	make -f deps/sandstorm/Makefile continuous
