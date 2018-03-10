@@ -98,17 +98,25 @@ doit make BUILD=$BUILD
 if [ "$HOTFIX" = "yes" ]; then
   FRONTENDS=$(gce instances list --format=text | grep '^name:' | sed -e 's/^name: *//g' | grep '^frontend' | grep -v 'frontend0$')
   FRONTENDS="$FRONTENDS frontend0"
+  GATEWAYS=$(gce instances list --format=text | grep '^name:' | sed -e 's/^name: *//g' | grep '^gateway')
+  MACHINES="$FRONTENDS $GATEWAYS"
 
-  for FRONTEND in $FRONTENDS; do
-    doit gce copy-files blackrock.tar.xz "root@$FRONTEND:/root"
+  for MACHINE in $MACHINES; do
+    doit gce copy-files blackrock.tar.xz "root@$MACHINE:/root"
   done
 
   for FRONTEND in $FRONTENDS; do
     doit gce ssh "root@$FRONTEND" --command 'cd /root && rm -rf blackrock /blackrock/bundle.new && tar Jxof blackrock.tar.xz && mv blackrock/bundle /blackrock/bundle.new && cd /blackrock && mv bundle bundle.$(date -u +%Y%m%d-%H%M%S) && mv bundle.new bundle'
   done
+  for GATEWAY in $GATEWAYS; do
+    doit gce ssh "root@$GATEWAY" --command 'cd /root && rm -rf blackrock /blackrock/bundle.new && tar Jxof blackrock.tar.xz && mv blackrock/bin/blackrock /blackrock/bin/blackrock.new && cd /blackrock/bin && mv blackrock blackrock.$(date -u +%Y%m%d-%H%M%S) && mv blackrock.new blackrock'
+  done
 
   for FRONTEND in $FRONTENDS; do
     doit gce ssh "root@$FRONTEND" --command 'kill $(pidof node)'
+  done
+  for GATEWAY in $GATEWAYS; do
+    doit gce ssh "root@$GATEWAY" --command 'kill -9 $(ps ax | grep blackrock | grep slave | awk "{print \$1}")'
   done
 
   exit 0
