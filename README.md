@@ -1,5 +1,7 @@
 # Blackrock
 
+Blackrock is an extension to [Sandstorm](https://github.com/sandstorm-io/sandstorm) that allows a single instance to scale across a cluster of machines. It is used to power [Sandstorm Oasis](https://oasis.sandstorm.io), the managed hosting service offered by [Sandstorm.io](https://sandstorm.io).
+
 See the [Blackrock roadmap](https://github.com/sandstorm-io/sandstorm/tree/master/roadmap/blackrock) for a design overview.
 
 ## Running locally
