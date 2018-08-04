@@ -129,7 +129,7 @@ private:
       });
     }
 
-    return timer.timeoutAfter(15 * kj::SECONDS, driver.run(id, self, retryStage == RESTART))
+    return timer.timeoutAfter(300 * kj::SECONDS, driver.run(id, self, retryStage == RESTART))
         .then([this,retryStage](VatPath::Reader path) {
       auto machine = rpcSystem.bootstrap(path).castAs<Machine>();
 
