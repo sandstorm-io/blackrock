@@ -1081,6 +1081,10 @@ kj::MainBuilder::Validity SupervisorMain::run() {
   // Set CLOEXEC on the Cap'n Proto socket so that the app doesn't see it.
   KJ_SYSCALL(fcntl(3, F_SETFD, FD_CLOEXEC));
 
+  // Reduce priority of grain processes so that a malicious app cannot consume all CPU to starve
+  // system daemons.
+  KJ_SYSCALL(nice(19));
+
   sandstormSupervisor.setAppName("appname-not-applicable");
 
   SystemConnectorImpl connector;
