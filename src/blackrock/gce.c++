@@ -160,7 +160,7 @@ kj::Promise<void> GceDriver::boot(MachineId id) {
   auto idStr = kj::str(id);
   auto tagStr = kj::str("--tags=", image);
   args.addAll(std::initializer_list<const kj::StringPtr>
-      { "instances", "create", idStr, "--image", image, tagStr, "--no-scopes", "-q" });
+      { "instances", "create", idStr, "--image", image, "--no-scopes", "-q" });
   kj::StringPtr startupScript;
   kj::StringPtr instanceType;
   switch (id.type) {
@@ -208,7 +208,7 @@ kj::Promise<void> GceDriver::boot(MachineId id) {
       instanceType = config.getInstanceTypes().getGateway();
 
       // Tag to accept HTTP and SMTP traffic.
-      args.add("--tags=http,smtp");
+      tagStr = kj::str(tagStr, ",http,smtp");
 
       // Assign static IP address if configured.
       auto addrs = config.getGatewayAddresses();
@@ -220,6 +220,8 @@ kj::Promise<void> GceDriver::boot(MachineId id) {
       break;
     }
   }
+
+  args.add(tagStr);
 
   args.add("--machine-type");
   args.add(instanceType);
