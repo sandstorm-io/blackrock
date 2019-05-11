@@ -31,7 +31,7 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
 
   # We build Blackrock outside of Vagrant, so there's no reason for the VM
   # to be modifying the source directory. Mount it read-only.
-  config.vm.synced_folder ".", "/blackrock", :mount_options => ["ro"]
+  config.vm.synced_folder ".", "/blackrock", type: "nfs", :mount_options => ["ro"]
 
   # The directory ".local" should contain two ext4 disk images: "storage"
   # and "mongo". Server state will be stored in these so that
@@ -43,7 +43,7 @@ Vagrant.configure(VAGRANTFILE_API_VERSION) do |config|
   #     truncate -s 10737418240 .local/mongo
   #     /sbin/mkfs.ext4 .local/storage
   #     /sbin/mkfs.ext4 .local/mongo
-  config.vm.synced_folder ".local", "/blackrock-local"
+  config.vm.synced_folder ".local", "/blackrock-local", type: "nfs"
 
   # Don't check for image updates on every run; could be slow.
   config.vm.box_check_update = false
