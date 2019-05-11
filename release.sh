@@ -16,7 +16,7 @@ case $1 in
     ;;
   prod )
     GCE_PROJECT=sandstorm-oasis
-    export CLOUDSDK_COMPUTE_ZONE=us-central1-f
+    export CLOUDSDK_COMPUTE_ZONE=us-central1-c
 
     # We always do a Blackrock prod release shortly after a Sandstorm release.
     BUILD=$(curl -s https://install.sandstorm.io/dev)
