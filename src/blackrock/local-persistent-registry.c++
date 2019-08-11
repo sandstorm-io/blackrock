@@ -17,6 +17,7 @@
 #include "local-persistent-registry.h"
 #include <sodium/randombytes.h>
 #include <kj/debug.h>
+#include <kj/encoding.h>
 
 namespace blackrock {
 
@@ -58,7 +59,9 @@ public:
     KJ_IF_MAYBE(reg, registration) {
       auto savedRef = kj::heap<SavedRef>(*reg);
       ref.getLocalRef().setAs<capnp::Data>(kj::ArrayPtr<byte>(savedRef->token));
-      reg->registry.savedRefs[kj::ArrayPtr<byte>(savedRef->token)] = kj::mv(savedRef);
+      auto key = kj::ArrayPtr<byte>(savedRef->token);
+      auto insertResult = reg->registry.savedRefs.insert(std::make_pair(key, kj::mv(savedRef)));
+      KJ_ASSERT(insertResult.second, kj::encodeHex(savedRef->token));
     } else {
       ref.getLocalRef().initAs<capnp::Data>(sizeof(SavedRef::token));
     }
