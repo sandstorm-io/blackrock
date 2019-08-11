@@ -1991,15 +1991,16 @@ private:
       }
     }
 
-    kj::Promise<void> dispatchCall(uint64_t interfaceId, uint16_t methodId,
+    capnp::Capability::Server::DispatchCallResult dispatchCall(
+        uint64_t interfaceId, uint16_t methodId,
         capnp::CallContext<capnp::AnyPointer, capnp::AnyPointer> context) override {
       if (inner.currentExclusiveNumber != exclusiveNumber) {
-        return KJ_EXCEPTION(DISCONNECTED, "Volume revoked due to concurrent write");
+        return { KJ_EXCEPTION(DISCONNECTED, "Volume revoked due to concurrent write"), false };
       }
 
       if (interfaceId != capnp::typeId<Volume>()) {
-        return KJ_EXCEPTION(UNIMPLEMENTED, "actual interface: blackrock::Volume",
-                            interfaceId, methodId);
+        return { KJ_EXCEPTION(UNIMPLEMENTED, "actual interface: blackrock::Volume",
+                              interfaceId, methodId), false };
       }
 
       return inner.dispatchCall(interfaceId, methodId, context);

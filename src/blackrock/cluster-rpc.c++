@@ -885,6 +885,10 @@ private:
 
       sendOnCurrentStream();
     }
+    
+    size_t sizeInWords() override {
+      return message.sizeInWords();
+    }
 
     void sendOnCurrentStream() {
       connection.sentConnectionNumber = kj::min(
@@ -914,6 +918,10 @@ private:
 
     capnp::AnyPointer::Reader getBody() override {
       return message->getRoot<capnp::AnyPointer>();
+    }
+
+    size_t sizeInWords() override {
+      return message->sizeInWords();
     }
 
   private:

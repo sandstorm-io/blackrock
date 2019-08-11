@@ -127,6 +127,8 @@ private:
     const void* getBrand() override {
       return nullptr;
     }
+    
+    kj::Maybe<int> getFd() override { return nullptr; }
   };
 
   ObjectKey getUser(kj::StringPtr userId) {

@@ -31,13 +31,14 @@ public:
     registration = nullptr;
   }
 
-  kj::Promise<void> dispatchCall(uint64_t interfaceId, uint16_t methodId,
+  capnp::Capability::Server::DispatchCallResult dispatchCall(
+      uint64_t interfaceId, uint16_t methodId,
       capnp::CallContext<capnp::AnyPointer, capnp::AnyPointer> context) override {
     // TODO(perf): We need a better way to check if a method is implemented locally. Here we
     //   attempt a local call and catch UNIMPLEMENTED exceptions, but constructing exceptions is
     //   slow due to string manipulation (even though no actual throw/catch will take place here).
-    return Persistent::Server::dispatchCall(interfaceId, methodId, context)
-        .catch_([=](kj::Exception&& e) mutable -> kj::Promise<void> {
+    auto result = Persistent::Server::dispatchCall(interfaceId, methodId, context);
+    result.promise = result.promise.catch_([=](kj::Exception&& e) mutable -> kj::Promise<void> {
       if (e.getType() == kj::Exception::Type::UNIMPLEMENTED) {
         auto params = context.getParams();
         auto req = inner.typelessRequest(interfaceId, methodId, params.targetSize());
@@ -47,6 +48,7 @@ public:
         return kj::mv(e);
       }
     });
+    return result;
   }
 
   kj::Promise<void> save(SaveContext context) override {
