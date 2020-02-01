@@ -127,11 +127,11 @@ mkdir -p dbg
 cp bin/blackrock.unstripped dbg/blackrock-$BUILDSTAMP
 
 # Create a new image.
-doit gce instances create build --image-project debian-cloud --image-family debian-9
+doit gce instances create build --image blackrock-240-20181020-200157
 doit sleep 10 # make sure instance is up
 doit gce ssh build --command 'sudo sed -i -e "s/PermitRootLogin no/PermitRootLogin without-password/g" /etc/ssh/sshd_config; sudo service ssh restart'
 doit gce copy-files blackrock.tar.xz root@build:/
-doit gce ssh root@build --command "cd / && tar Jxof blackrock.tar.xz && rm /blackrock.tar.xz"
+doit gce ssh root@build --command "cd / && rm -rf /blackrock && tar Jxof blackrock.tar.xz && rm /blackrock.tar.xz"
 doit gce instances delete build -q --keep-disks boot
 doit gce images create blackrock-$BUILDSTAMP --source-disk build
 doit gce disks delete -q build
